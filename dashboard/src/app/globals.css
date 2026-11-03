@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Tiered Obsidian-Slate Palette */
+  --bg-canvas: #0B0E11;
+  --bg-panel: #151921;
+  --bg-card: #1E2329;
+  --bg-well: #262C36;
+  --border-hairline: #2B3139;
+  --border-focus: #00E5FF;
+
+  /* Quant Accents */
+  --accent-cyan: #00E5FF;
+  --accent-mint: #0ECB81;
+  --accent-coral: #F6465D;
+  --accent-gold: #F0B90B;
+  --accent-violet: #8B5CF6;
+
+  /* Text & Foreground */
+  --foreground: #EAECEF;
+  --text-muted: #848E9C;
+  --text-secondary: #B7BDC6;
+}
+
+html, body {
+  color: var(--foreground);
+  background-color: #0B0E11;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Enforce tabular-nums globally on all numbers, timers, prices and monospace elements */
+.font-mono,
+code,
+pre,
+[class*="font-mono"],
+.tabular-nums {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Custom Obsidian-Slate scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0E11;
+}
+::-webkit-scrollbar-thumb {
+  background: #262C36;
+  border-radius: 3px;
+  border: 1px solid #2B3139;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2B3139;
+}
+
+/* Structural Hairline & Zero-Shadow Terminal Classes */
+.terminal-card {
+  background-color: #1E2329;
+  border: 1px solid #2B3139;
+  border-radius: 6px;
+}
+
+.terminal-panel {
+  background-color: #151921;
+  border: 1px solid #2B3139;
+  border-radius: 6px;
+}
+
+.terminal-well {
+  background-color: #262C36;
+  border: 1px solid #2B3139;
+  border-radius: 4px;
+}
+
+.terminal-admin-card {
+  background-color: #141418;
+  border: 1px solid #27272A;
+  border-radius: 2px;
+}
