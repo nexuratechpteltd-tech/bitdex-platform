@@ -1857,13 +1857,56 @@ async def toggle_engine_b(req: EngineBToggleRequest, current_user: Dict[str, Any
     user_id = current_user["user_id"]
     conn = get_db_connection()
     try:
+        from ..services.futures_db import get_or_create_futures_account
+        
+        # 1. Check for active exchange connection
+        conn_row = conn.execute(
+            "SELECT account_id, environment FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        
+        if not conn_row and req.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="No active exchange connection found. Please connect your Binance Testnet API credentials in Account Connections before configuring High-Frequency Trading."
+            )
+        
+        # 2. Get or initialize futures account if user has a connection
+        connection_id = conn_row["account_id"] if conn_row else "FCONN-DEFAULT"
+        env = conn_row["environment"] if conn_row else "testnet"
+        account = get_or_create_futures_account(conn, user_id, connection_id, environment=env, initial_balance=0.0)
+        
+        # 3. Safety checks (fail closed)
+        if account.get("kill_switch_active"):
+            raise HTTPException(
+                status_code=403,
+                detail="Account kill switch is ACTIVE. Strategy activation is locked."
+            )
+            
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE futures_accounts SET engine_b_enabled = ?, updated_at = ? WHERE user_id = ?",
                 (1 if req.enabled else 0, now_str, user_id)
             )
-        return {"status": "SUCCESS", "engine_b_enabled": req.enabled}
+            if cur.rowcount == 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Database persistence error: failed to update account strategy state."
+                )
+        
+        # Fetch verified persisted state from database
+        updated_acc = conn.execute("SELECT engine_b_enabled FROM futures_accounts WHERE user_id = ?", (user_id,)).fetchone()
+        persisted_val = bool(updated_acc["engine_b_enabled"]) if updated_acc else False
+        
+        return {
+            "status": "SUCCESS",
+            "engine_b_enabled": persisted_val,
+            "persisted": True,
+            "operational": False,
+            "operational_status": "NOT_OPERATIONAL",
+            "message": "High-Frequency Trading configuration saved. Note: Real exchange execution is undergoing controlled Testnet risk validation. Live order dispatch remains disabled." if req.enabled else "High-Frequency Trading deactivated."
+        }
     finally:
         conn.close()
 
@@ -1872,49 +1915,78 @@ async def get_customer_trading_overview(current_user: Dict[str, Any] = Depends(g
     user_id = current_user["user_id"]
     conn = get_db_connection()
     try:
-        account = conn.execute("SELECT * FROM futures_accounts WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,)).fetchone()
+        from ..services.futures_db import get_or_create_futures_account
+
+        account = conn.execute(
+            "SELECT * FROM futures_accounts WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+            (user_id,)
+        ).fetchone()
+
         if not account:
-            account_data = {
-                "account_id": f"ACC-{user_id[:8]}",
-                "wallet_balance": 10000.0,
-                "available_balance": 10000.0,
-                "unrealized_pnl": 0.0,
-                "margin_balance": 10000.0,
-                "engine_b_enabled": 0,
-                "trading_locked": 1,
-                "environment": "TESTNET"
-            }
+            conn_row = conn.execute(
+                "SELECT account_id, environment FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
+                (user_id,)
+            ).fetchone()
+            if conn_row:
+                account_data = get_or_create_futures_account(
+                    conn, user_id, conn_row["account_id"], environment=conn_row.get("environment", "testnet"), initial_balance=0.0
+                )
+                account_data["is_provisioned"] = True
+            else:
+                account_data = {
+                    "account_id": f"UNPROVISIONED-{user_id[:8]}",
+                    "wallet_balance": 0.0,
+                    "available_balance": 0.0,
+                    "unrealized_pnl": 0.0,
+                    "margin_balance": 0.0,
+                    "engine_b_enabled": 0,
+                    "trading_locked": 1,
+                    "environment": "TESTNET",
+                    "is_provisioned": False
+                }
         else:
             account_data = dict(account)
+            account_data["is_provisioned"] = True
 
+        acc_id = account_data.get("account_id", "")
+
+        # Strict Tenant Isolation: only query leases, trades, and positions for this user/account
         leases = [dict(r) for r in conn.execute(
-            "SELECT * FROM futures_symbol_leases WHERE status = 'ACTIVE' ORDER BY acquired_at DESC LIMIT 10"
+            "SELECT * FROM futures_symbol_leases WHERE account_id = ? AND status = 'ACTIVE' ORDER BY acquired_at DESC LIMIT 10",
+            (acc_id,)
         ).fetchall()]
 
         trades = [dict(r) for r in conn.execute(
-            "SELECT * FROM futures_scalp_trades WHERE user_id = ? OR user_id = 'USR-R7-VALIDATION' ORDER BY created_at DESC LIMIT 20",
+            "SELECT * FROM futures_scalp_trades WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
             (user_id,)
         ).fetchall()]
 
         positions = [dict(r) for r in conn.execute(
-            "SELECT * FROM futures_positions WHERE status = 'OPEN' AND (user_id = ? OR user_id = 'USR-R7-VALIDATION')",
+            "SELECT * FROM futures_positions WHERE status = 'OPEN' AND user_id = ?",
             (user_id,)
         ).fetchall()]
 
-        engine_a = {
-            "name": "Engine A (Spot Grid & Swing Momentum)",
+        # Real exposure calculation
+        open_positions_notional = sum(abs(float(p.get("quantity", 0.0)) * float(p.get("entry_price", 0.0))) for p in positions)
+        wb = float(account_data.get("wallet_balance", 0.0))
+        agg_exposure_pct = round((open_positions_notional / wb) * 100.0, 2) if wb > 0 else 0.0
+
+        long_term_strategy = {
+            "name": "Long-Term & Swing Strategy",
             "strategy": "SPOT_GRID_SWING",
             "status": "STANDBY",
             "active_pairs": ["BTC/USDT", "ETH/USDT"],
             "live_locked": True,
-            "allocated_capital_usd": 5000.0
+            "allocated_capital_usd": float(account_data.get("available_balance", 0.0))
         }
 
-        engine_b = {
-            "name": "Engine B (Autonomous Post-Only Scalper)",
+        hft_strategy = {
+            "name": "High-Frequency Trading (USDⓈ-M Scalper)",
             "strategy": "POST_ONLY_MOMENTUM_SCALP",
-            "status": "ACTIVE" if account_data.get("engine_b_enabled") else "STANDBY",
+            "status": "NOT_OPERATIONAL" if account_data.get("engine_b_enabled") else "STANDBY",
             "enabled": bool(account_data.get("engine_b_enabled")),
+            "operational": False,
+            "operational_status": "NOT_OPERATIONAL",
             "live_locked": True,
             "parameters": {
                 "donchian_period": 20,
@@ -1924,16 +1996,17 @@ async def get_customer_trading_overview(current_user: Dict[str, Any] = Depends(g
                 "order_type": "LIMIT_MAKER (GTX)",
                 "fill_timeout_seconds": 15
             },
-            "active_leases_count": len(leases)
+            "active_leases_count": len(leases),
+            "status_description": "Engine undergoing controlled testnet risk validation. Live order dispatch remains disabled."
         }
 
         risk = {
-            "aggregate_exposure_pct": 0.0,
+            "aggregate_exposure_pct": agg_exposure_pct,
             "max_exposure_cap_pct": 50.0,
             "max_leverage_clamp": 5,
             "naked_positions_count": 0,
             "stop_loss_coverage_pct": 100.0,
-            "circuit_breaker_active": False,
+            "circuit_breaker_active": bool(account_data.get("kill_switch_active", 0)),
             "live_trading_locked": True,
             "read_only_mode": True
         }
@@ -1941,8 +2014,8 @@ async def get_customer_trading_overview(current_user: Dict[str, Any] = Depends(g
         return {
             "status": "SUCCESS",
             "account": account_data,
-            "engine_a": engine_a,
-            "engine_b": engine_b,
+            "engine_a": long_term_strategy,
+            "engine_b": hft_strategy,
             "risk": risk,
             "active_leases": leases,
             "positions": positions,
@@ -1950,3 +2023,20 @@ async def get_customer_trading_overview(current_user: Dict[str, Any] = Depends(g
         }
     finally:
         conn.close()
+
+@customer_router.get("/customer/trading/hft/pairs")
+async def get_hft_eligible_pairs(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Returns dynamically discovered and ranked Binance USD(S)-M pairs for High-Frequency Trading."""
+    from ..services.futures_discovery import MarketDiscoveryService
+    try:
+        svc = MarketDiscoveryService()
+        discovery_res = svc.scan_and_rank_eligible_pairs(max_candidates=10)
+        return {
+            "status": "SUCCESS",
+            "pairs": discovery_res.get("candidates", []),
+            "total_scanned": len(discovery_res.get("candidates", [])) + len(discovery_res.get("rejected", [])),
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
+    except Exception as e:
+        logger.error(f"HFT pair discovery failed: {e}")
+        return {"status": "SUCCESS", "pairs": [], "error": "Discovery feed temporarily unavailable"}

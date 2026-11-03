@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS futures_accounts (
     max_leverage_limit INTEGER NOT NULL DEFAULT 10,
     trading_locked INTEGER NOT NULL DEFAULT 0,
     kill_switch_active INTEGER NOT NULL DEFAULT 0,
+    engine_b_enabled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -280,6 +281,10 @@ def apply_futures_migrations(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE futures_positions ADD COLUMN entry_fee_usd REAL NOT NULL DEFAULT 0.0")
     if "stop_exchange_order_id" not in pos_cols:
         conn.execute("ALTER TABLE futures_positions ADD COLUMN stop_exchange_order_id INTEGER")
+        
+    acc_cols = [r[1] for r in conn.execute("PRAGMA table_info(futures_accounts)").fetchall()]
+    if "engine_b_enabled" not in acc_cols:
+        conn.execute("ALTER TABLE futures_accounts ADD COLUMN engine_b_enabled INTEGER NOT NULL DEFAULT 0")
         
     conn.commit()
 

@@ -82,6 +82,16 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
     return "PROFILE_SECURITY";
   });
 
+  // Three-Mode Customer Navigation State (Phase 2)
+  const [tradingMode, setTradingMode] = useState<"LONG_TERM" | "GRID" | "HFT">(() => {
+    if (typeof window !== "undefined") {
+      const h = window.location.hash.toLowerCase();
+      if (h === "#grid") return "GRID";
+      if (h === "#hft" || h === "#scalp" || h === "#futures") return "HFT";
+    }
+    return "LONG_TERM";
+  });
+
   // Notification Rules State (Phase 6)
   const [notifyExecReceipts, setNotifyExecReceipts] = useState<boolean>(true);
   const [notifyPriceAlerts, setNotifyPriceAlerts] = useState<boolean>(true);
@@ -103,7 +113,10 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
     const handleHash = () => {
       if (typeof window === "undefined") return;
       const h = window.location.hash.toLowerCase();
-      if (h === "#pnl" || h === "#positions" || h === "#profit_loss" || h === "#orders" || h === "#ledger" || h === "#trades" || h === "#holdings") setActiveTab("PROFIT_LOSS");
+      if (h === "#grid") { setActiveTab("TRADING"); setTradingMode("GRID"); }
+      else if (h === "#hft" || h === "#scalp" || h === "#futures") { setActiveTab("TRADING"); setTradingMode("HFT"); }
+      else if (h === "#trading" || h === "#dashboard" || h === "#longterm") { setActiveTab("TRADING"); setTradingMode("LONG_TERM"); }
+      else if (h === "#pnl" || h === "#positions" || h === "#profit_loss" || h === "#orders" || h === "#ledger" || h === "#trades" || h === "#holdings") setActiveTab("PROFIT_LOSS");
       else if (h === "#balances") setActiveTab("BALANCES");
       else if (h === "#connections" || h === "#wallets") setActiveTab("CONNECTIONS");
       else if (h === "#settings" || h === "#account" || h === "#profile") { setActiveTab("SETTINGS"); setSettingsSubTab("PROFILE_SECURITY"); }
@@ -1334,30 +1347,50 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             {/* Primary Nav Links */}
             <nav className="hidden lg:flex items-center gap-1 text-sm font-medium">
               <button
-                onClick={() => { setActiveTab("TRADING"); if (typeof window !== "undefined") window.location.hash = "dashboard"; }}
+                onClick={() => { setActiveTab("TRADING"); setTradingMode("LONG_TERM"); if (typeof window !== "undefined") window.location.hash = "dashboard"; }}
                 className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                  activeTab === "TRADING"
+                  activeTab === "TRADING" && tradingMode === "LONG_TERM"
                     ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
                     : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
                 }`}
               >
-                Dashboard
+                Long-Term
               </button>
               <button
                 onClick={() => {
                   setActiveTab("TRADING");
+                  setTradingMode("GRID");
                   if (typeof window !== "undefined") {
+                    window.location.hash = "grid";
                     window.dispatchEvent(new CustomEvent("bitdex_open_scalp_grid"));
                   }
                 }}
-                className="px-3 py-1.5 rounded-lg text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921] transition-all cursor-pointer"
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  activeTab === "TRADING" && tradingMode === "GRID"
+                    ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
+                    : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
+                }`}
               >
                 Grid
               </button>
               <button
+                onClick={() => {
+                  setActiveTab("TRADING");
+                  setTradingMode("HFT");
+                  if (typeof window !== "undefined") window.location.hash = "hft";
+                }}
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  activeTab === "TRADING" && tradingMode === "HFT"
+                    ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
+                    : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
+                }`}
+              >
+                High-Frequency
+              </button>
+              <button
                 onClick={() => { setActiveTab("CONNECTIONS"); if (typeof window !== "undefined") window.location.hash = "account"; }}
                 className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                  activeTab !== "TRADING"
+                  activeTab === "CONNECTIONS"
                     ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
                     : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
                 }`}
@@ -1770,10 +1803,84 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             </button>
           </div>
         )}
-        {/* TAB 1: TRADING / INSTITUTIONAL DUAL-ENGINE CONSOLE */}
+        {/* TAB 1: THREE-MODE TRADING TERMINAL */}
         {activeTab === "TRADING" && (
-          <div>
-            <InstitutionalTradingDashboard token={token} />
+          <div className="space-y-6">
+            {/* Strategy Mode Sub-Navigation Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-3 p-2 bg-[#121218] border border-[#272735] rounded-2xl shadow-lg">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  id="tab-btn-longterm"
+                  onClick={() => {
+                    setTradingMode("LONG_TERM");
+                    if (typeof window !== "undefined") window.location.hash = "dashboard";
+                  }}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-mono text-xs font-bold transition-all cursor-pointer ${
+                    tradingMode === "LONG_TERM"
+                      ? "bg-[#00E5FF] text-[#0B0E11] shadow-md shadow-[#00E5FF]/20"
+                      : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+                  }`}
+                >
+                  <TrendingUp className="w-4 h-4" />
+                  <span>Long-Term Strategy</span>
+                </button>
+
+                <button
+                  type="button"
+                  id="tab-btn-grid"
+                  onClick={() => {
+                    setTradingMode("GRID");
+                    if (typeof window !== "undefined") {
+                      window.location.hash = "grid";
+                      window.dispatchEvent(new CustomEvent("bitdex_open_scalp_grid"));
+                    }
+                  }}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-mono text-xs font-bold transition-all cursor-pointer ${
+                    tradingMode === "GRID"
+                      ? "bg-[#00E5FF] text-[#0B0E11] shadow-md shadow-[#00E5FF]/20"
+                      : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+                  }`}
+                >
+                  <Layers className="w-4 h-4" />
+                  <span>Grid Trading</span>
+                </button>
+
+                <button
+                  type="button"
+                  id="tab-btn-hft"
+                  onClick={() => {
+                    setTradingMode("HFT");
+                    if (typeof window !== "undefined") window.location.hash = "hft";
+                  }}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-mono text-xs font-bold transition-all cursor-pointer ${
+                    tradingMode === "HFT"
+                      ? "bg-[#00E5FF] text-[#0B0E11] shadow-md shadow-[#00E5FF]/20"
+                      : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+                  }`}
+                >
+                  <Zap className="w-4 h-4" />
+                  <span>High-Frequency Trading</span>
+                </button>
+              </div>
+
+              <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-[#64748B] px-3">
+                <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+                <span>Multi-Strategy Isolated Execution</span>
+              </div>
+            </div>
+
+            {/* Mode 1: Long-Term Strategy — RESTORED ORIGINAL PORTAL ({children}) */}
+            <div className={tradingMode === "LONG_TERM" || tradingMode === "GRID" ? "space-y-6" : "hidden"}>
+              {children}
+            </div>
+
+            {/* Mode 3: Dedicated High-Frequency Trading Workspace */}
+            {tradingMode === "HFT" && (
+              <div>
+                <InstitutionalTradingDashboard token={token} />
+              </div>
+            )}
           </div>
         )}
 
@@ -4519,24 +4626,63 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
       {/* ─── MOBILE STICKY BOTTOM NAVIGATION BAR (md:hidden) ─────────────────── */}
       <nav
         aria-label="Mobile Navigation"
-        className="fixed bottom-0 left-0 right-0 z-50 md:hidden bg-[#121218]/95 backdrop-blur-md border-t border-[#272735] px-2 py-1 shadow-2xl"
+        className="fixed bottom-0 left-0 right-0 z-50 md:hidden bg-[#121218]/95 backdrop-blur-md border-t border-[#272735] px-1 py-1 shadow-2xl"
       >
         <div className="flex items-center justify-around max-w-lg mx-auto">
           <button
             type="button"
             onClick={() => {
               setActiveTab("TRADING");
+              setTradingMode("LONG_TERM");
               if (typeof window !== "undefined") window.location.hash = "trading";
             }}
-            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+            className={`min-h-[48px] min-w-[44px] flex-1 flex flex-col items-center justify-center py-1 px-1 rounded-lg transition-all ${
               activeTab === "TRADING"
                 ? "text-[#00E5FF] font-bold"
                 : "text-[#94A3B8] hover:text-white"
             }`}
           >
-            <TrendingUp className={`w-5 h-5 mb-0.5 ${activeTab === "TRADING" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
-            <span className="text-[10px] tracking-tight">Trading</span>
+            <TrendingUp className={`w-4 h-4 mb-0.5 ${activeTab === "TRADING" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[9px] tracking-tight">Trading</span>
             {activeTab === "TRADING" && (
+              <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("CONNECTIONS");
+              if (typeof window !== "undefined") window.location.hash = "connections";
+            }}
+            className={`min-h-[48px] min-w-[44px] flex-1 flex flex-col items-center justify-center py-1 px-1 rounded-lg transition-all ${
+              activeTab === "CONNECTIONS"
+                ? "text-[#00E5FF] font-bold"
+                : "text-[#94A3B8] hover:text-white"
+            }`}
+          >
+            <Key className={`w-4 h-4 mb-0.5 ${activeTab === "CONNECTIONS" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[9px] tracking-tight">Vault</span>
+            {activeTab === "CONNECTIONS" && (
+              <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("PROFIT_LOSS");
+              if (typeof window !== "undefined") window.location.hash = "pnl";
+            }}
+            className={`min-h-[48px] min-w-[44px] flex-1 flex flex-col items-center justify-center py-1 px-1 rounded-lg transition-all ${
+              activeTab === "PROFIT_LOSS"
+                ? "text-[#00E5FF] font-bold"
+                : "text-[#94A3B8] hover:text-white"
+            }`}
+          >
+            <Activity className={`w-4 h-4 mb-0.5 ${activeTab === "PROFIT_LOSS" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[9px] tracking-tight">P&L</span>
+            {activeTab === "PROFIT_LOSS" && (
               <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
             )}
           </button>
@@ -4548,14 +4694,14 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               if (typeof window !== "undefined") window.location.hash = "balances";
               fetchBalances();
             }}
-            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+            className={`min-h-[48px] min-w-[44px] flex-1 flex flex-col items-center justify-center py-1 px-1 rounded-lg transition-all ${
               activeTab === "BALANCES"
                 ? "text-[#00E5FF] font-bold"
                 : "text-[#94A3B8] hover:text-white"
             }`}
           >
-            <Scale className={`w-5 h-5 mb-0.5 ${activeTab === "BALANCES" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
-            <span className="text-[10px] tracking-tight">Balances</span>
+            <Scale className={`w-4 h-4 mb-0.5 ${activeTab === "BALANCES" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[9px] tracking-tight">Balances</span>
             {activeTab === "BALANCES" && (
               <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
             )}
@@ -4567,14 +4713,14 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               setActiveTab("BILLING");
               if (typeof window !== "undefined") window.location.hash = "billing";
             }}
-            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+            className={`min-h-[48px] min-w-[44px] flex-1 flex flex-col items-center justify-center py-1 px-1 rounded-lg transition-all ${
               activeTab === "BILLING"
                 ? "text-[#00E5FF] font-bold"
                 : "text-[#94A3B8] hover:text-white"
             }`}
           >
-            <Wallet className={`w-5 h-5 mb-0.5 ${activeTab === "BILLING" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
-            <span className="text-[10px] tracking-tight">Billing</span>
+            <Wallet className={`w-4 h-4 mb-0.5 ${activeTab === "BILLING" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[9px] tracking-tight">Billing</span>
             {activeTab === "BILLING" && (
               <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
             )}
@@ -4586,14 +4732,14 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               setActiveTab("SUPPORT");
               if (typeof window !== "undefined") window.location.hash = "support";
             }}
-            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+            className={`min-h-[48px] min-w-[44px] flex-1 flex flex-col items-center justify-center py-1 px-1 rounded-lg transition-all ${
               activeTab === "SUPPORT"
                 ? "text-[#00E5FF] font-bold"
                 : "text-[#94A3B8] hover:text-white"
             }`}
           >
-            <LifeBuoy className={`w-5 h-5 mb-0.5 ${activeTab === "SUPPORT" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
-            <span className="text-[10px] tracking-tight">Support</span>
+            <LifeBuoy className={`w-4 h-4 mb-0.5 ${activeTab === "SUPPORT" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[9px] tracking-tight">Support</span>
             {activeTab === "SUPPORT" && (
               <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
             )}

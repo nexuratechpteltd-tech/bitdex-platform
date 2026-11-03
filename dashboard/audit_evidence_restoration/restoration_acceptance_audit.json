@@ -1,0 +1,134 @@
+[
+  {
+    "viewport": "mobile_360px",
+    "width": 360,
+    "scrollWidth": 360,
+    "hasHorizontalOverflow": false,
+    "hasLongTermBtn": true,
+    "hasGridBtn": true,
+    "hasHftBtn": true,
+    "hasMarketsScreener": true,
+    "hasLiveFeed": true,
+    "isBottomNavVisible": true,
+    "hasConnectionsInNav": true,
+    "hasPnlInNav": true,
+    "touchTargetsOk": true,
+    "hft": {
+      "hasHftTerminal": true,
+      "hasDynamicPairs": true,
+      "hasRiskTelemetry": true,
+      "hasValidationMode": true,
+      "hasAuditedLedger": true
+    }
+  },
+  {
+    "viewport": "mobile_390px",
+    "width": 390,
+    "scrollWidth": 390,
+    "hasHorizontalOverflow": false,
+    "hasLongTermBtn": true,
+    "hasGridBtn": true,
+    "hasHftBtn": true,
+    "hasMarketsScreener": true,
+    "hasLiveFeed": true,
+    "isBottomNavVisible": true,
+    "hasConnectionsInNav": true,
+    "hasPnlInNav": true,
+    "touchTargetsOk": true,
+    "hft": {
+      "hasHftTerminal": true,
+      "hasDynamicPairs": true,
+      "hasRiskTelemetry": true,
+      "hasValidationMode": true,
+      "hasAuditedLedger": true
+    }
+  },
+  {
+    "viewport": "mobile_430px",
+    "width": 430,
+    "scrollWidth": 430,
+    "hasHorizontalOverflow": false,
+    "hasLongTermBtn": true,
+    "hasGridBtn": true,
+    "hasHftBtn": true,
+    "hasMarketsScreener": true,
+    "hasLiveFeed": true,
+    "isBottomNavVisible": true,
+    "hasConnectionsInNav": true,
+    "hasPnlInNav": true,
+    "touchTargetsOk": true,
+    "hft": {
+      "hasHftTerminal": true,
+      "hasDynamicPairs": true,
+      "hasRiskTelemetry": true,
+      "hasValidationMode": true,
+      "hasAuditedLedger": true
+    }
+  },
+  {
+    "viewport": "tablet_768px",
+    "width": 768,
+    "scrollWidth": 768,
+    "hasHorizontalOverflow": false,
+    "hasLongTermBtn": true,
+    "hasGridBtn": true,
+    "hasHftBtn": true,
+    "hasMarketsScreener": true,
+    "hasLiveFeed": true,
+    "isBottomNavVisible": false,
+    "hasConnectionsInNav": false,
+    "hasPnlInNav": false,
+    "touchTargetsOk": true,
+    "hft": {
+      "hasHftTerminal": true,
+      "hasDynamicPairs": true,
+      "hasRiskTelemetry": true,
+      "hasValidationMode": true,
+      "hasAuditedLedger": true
+    }
+  },
+  {
+    "viewport": "desktop_1024px",
+    "width": 1024,
+    "scrollWidth": 1024,
+    "hasHorizontalOverflow": false,
+    "hasLongTermBtn": true,
+    "hasGridBtn": true,
+    "hasHftBtn": true,
+    "hasMarketsScreener": true,
+    "hasLiveFeed": true,
+    "isBottomNavVisible": false,
+    "hasConnectionsInNav": false,
+    "hasPnlInNav": false,
+    "touchTargetsOk": true,
+    "hft": {
+      "hasHftTerminal": true,
+      "hasDynamicPairs": true,
+      "hasRiskTelemetry": true,
+      "hasValidationMode": true,
+      "hasAuditedLedger": true
+    }
+  },
+  {
+    "viewport": "desktop_1440px",
+    "width": 1440,
+    "scrollWidth": 1440,
+    "hasHorizontalOverflow": false,
+    "hasLongTermBtn": true,
+    "hasGridBtn": true,
+    "hasHftBtn": true,
+    "hasMarketsScreener": true,
+    "hasLiveFeed": true,
+    "isBottomNavVisible": false,
+    "hasConnectionsInNav": false,
+    "hasPnlInNav": false,
+    "touchTargetsOk": true,
+    "hft": {
+      "hasHftTerminal": true,
+      "hasDynamicPairs": true,
+      "hasRiskTelemetry": true,
+      "hasValidationMode": true,
+      "hasAuditedLedger": true
+    }
+  }
+]
