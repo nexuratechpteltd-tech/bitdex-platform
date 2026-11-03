@@ -363,10 +363,12 @@ export default function InstitutionalTradingDashboard({
     const margin = strategyConfig.margin_allocation_usd;
     const lev = strategyConfig.leverage;
     const notional = margin * lev;
-    const makerFeePct = 0.02; // Binance USD(S)-M Maker Tier
-    const roundTripFeePct = makerFeePct * 2; // 0.04%
-    const bufferPct = 0.01; // 0.01% funding/buffer
-    const totalFrictionPct = roundTripFeePct + bufferPct; // 0.05%
+    const makerFeeRatePct = 0.02; // Binance USD(S)-M VIP 0 Maker Tier (0.020%)
+    const takerFeeRatePct = 0.05; // Binance USD(S)-M VIP 0 Taker Tier (0.050%)
+    const roundTripMakerFeePct = makerFeeRatePct * 2; // 0.040%
+    const bufferPct = 0.01; // 0.010% funding / slippage allowance
+    const totalFrictionPct = roundTripMakerFeePct + bufferPct; // 0.050%
+    const contingentStopFrictionPct = makerFeeRatePct + takerFeeRatePct + bufferPct; // 0.080%
     const targetPct = strategyConfig.net_profit_target_pct;
     const netReturnPct = Math.max(0, targetPct - totalFrictionPct);
     const estDollarProfit = (notional * (netReturnPct / 100));
@@ -374,6 +376,10 @@ export default function InstitutionalTradingDashboard({
 
     return {
       notional,
+      makerFeeRatePct,
+      takerFeeRatePct,
+      roundTripMakerFeePct,
+      contingentStopFrictionPct,
       totalFrictionPct,
       requiredMovePct: totalFrictionPct,
       netReturnPct,
@@ -448,7 +454,6 @@ export default function InstitutionalTradingDashboard({
         throw new Error(resJson.detail || "Failed to arm HFT session.");
       }
 
-      setSessionState("ACTIVE");
       setFeedback({
         type: "info",
         message: resJson.message || `HFT session for ${selectedPair} ARMED in Controlled Testnet Validation Mode.`
@@ -1020,7 +1025,9 @@ export default function InstitutionalTradingDashboard({
           <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735]">
             <span className="text-[10px] text-[#64748B] block">Confirmed Fills Realized:</span>
             <span className="font-bold text-[#10B981] tabular-nums">
-              ${account?.unrealized_pnl ? account.unrealized_pnl.toFixed(2) : "0.00"}
+              ${recentTrades && recentTrades.length > 0
+                ? recentTrades.reduce((acc, t) => acc + (t.realized_pnl || 0), 0).toFixed(2)
+                : "0.00"}
             </span>
           </div>
 

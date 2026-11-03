@@ -2363,12 +2363,12 @@ async def start_hft_session_route(req: HftSessionActionRequest, current_user: Di
         if acc.get("kill_switch_active"):
             raise HTTPException(status_code=403, detail="Cannot start session: Account kill-switch is ACTIVE.")
 
-        success, token_lse, reason_lse = EngineCoordinator.acquire_lease(conn, acc_id, clean_symbol, "ENGINE_B", duration_seconds=3600)
-        if not success:
-            raise HTTPException(status_code=409, detail=f"Collision lock: {reason_lse}")
-
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with conn:
+            success, token_lse, reason_lse = EngineCoordinator.acquire_lease(conn, acc_id, clean_symbol, "ENGINE_B", duration_seconds=3600)
+            if not success:
+                raise HTTPException(status_code=409, detail=f"Collision lock: {reason_lse}")
+
             conn.execute(
                 "UPDATE futures_accounts SET engine_b_enabled = 1, updated_at = ? WHERE user_id = ?",
                 (now_str, user_id)
@@ -2396,11 +2396,13 @@ async def stop_hft_session_route(req: HftSessionActionRequest, current_user: Dic
     try:
         from ..services.engine_coordinator import EngineCoordinator
         acc = conn.execute("SELECT account_id FROM futures_accounts WHERE user_id = ?", (user_id,)).fetchone()
-        if acc:
-            conn.execute("UPDATE futures_symbol_leases SET status = 'RELEASED' WHERE account_id = ? AND symbol = ?", (acc["account_id"], clean_symbol))
-
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with conn:
+            if acc:
+                conn.execute(
+                    "UPDATE futures_symbol_leases SET status = 'RELEASED' WHERE account_id = ? AND symbol = ? AND engine_id = 'ENGINE_B' AND status = 'ACTIVE'",
+                    (acc["account_id"], clean_symbol)
+                )
             conn.execute(
                 "UPDATE futures_accounts SET engine_b_enabled = 0, updated_at = ? WHERE user_id = ?",
                 (now_str, user_id)
