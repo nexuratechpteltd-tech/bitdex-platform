@@ -1,7 +1,8 @@
 """
-Exness Secure Credential Vault (Hardened Phase 2.1)
+Exness Secure Credential Vault (Hardened Phase 2.2)
 Provides AES-256-GCM authenticated encryption for Exness MT5 Demo credentials.
 Strictly fails closed if a valid 32-byte vault key is not configured.
+Includes explicit key versioning metadata, safe rotation, rollback, and recovery sequences.
 Binds cryptographic AAD to customer ID to guarantee tenant isolation and tamper detection.
 Specification reference: Master Exness HFT Implementation Specification, Part 4.4 & Part 4.5.
 """
@@ -15,6 +16,8 @@ from datetime import datetime, timezone
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger("bitdex.exness.vault")
+
+CURRENT_VAULT_KEY_VERSION = 1
 
 
 def get_master_key() -> bytes:
@@ -58,7 +61,8 @@ class ExnessCredentialVault:
     - Passwords never returned to frontend JavaScript.
     - Tenant isolation: Ciphertext bound to user_id via AES-GCM Associated Data (AAD).
     - Format validation on nonces and ciphertexts before cryptographic operations.
-    - Supports atomic key rotation without credential loss.
+    - Explicit key version metadata (key_version integer tag).
+    - Supports atomic key rotation, rollback, and recovery without credential loss.
     """
 
     @classmethod
@@ -70,10 +74,12 @@ class ExnessCredentialVault:
         server: str,
         account_type: str = "DEMO",
         override_key: Optional[bytes] = None,
-    ) -> Dict[str, str]:
+        key_version: int = CURRENT_VAULT_KEY_VERSION,
+    ) -> Dict[str, Any]:
         """
         Encrypts Exness credentials using AES-256-GCM authenticated encryption.
         AAD is bound to f'{user_id}:{login}:{server}'.
+        Attaches key_version metadata to payload.
         """
         if not user_id or not str(user_id).strip():
             raise ValueError("user_id is required for cryptographic tenant binding.")
@@ -105,6 +111,7 @@ class ExnessCredentialVault:
 
         return {
             "cipher": "AES-256-GCM",
+            "key_version": int(key_version),
             "nonce": nonce.hex(),
             "ciphertext": ciphertext.hex(),
             "aad_hash": str(hash(aad)),
@@ -116,12 +123,13 @@ class ExnessCredentialVault:
         user_id: str,
         login: str,
         server: str,
-        enc_payload: Dict[str, str],
+        enc_payload: Dict[str, Any],
         override_key: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """
         Decrypts Exness credentials and validates cryptographic integrity tag.
         Validates nonce and ciphertext structure before decryption.
+        Returns dict containing login, password, server, account_type, and key_version.
         Raises PermissionError if ciphertext, nonce, or user_id has been tampered with.
         """
         if not isinstance(enc_payload, dict):
@@ -144,7 +152,7 @@ class ExnessCredentialVault:
         if not ct_hex or not isinstance(ct_hex, str):
             raise ValueError("Missing or invalid ciphertext in encrypted payload.")
         clean_ct = ct_hex.strip()
-        if len(clean_ct) < 32:  # Must contain at least the 16-byte (32 hex) authentication tag
+        if len(clean_ct) < 32:
             raise ValueError(f"Ciphertext too short: expected >= 32 hex chars, got {len(clean_ct)}.")
         try:
             ciphertext = bytes.fromhex(clean_ct)
@@ -160,9 +168,10 @@ class ExnessCredentialVault:
 
         try:
             decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, aad.encode("utf-8"))
-            return json.loads(decrypted_bytes.decode("utf-8"))
+            data = json.loads(decrypted_bytes.decode("utf-8"))
+            data["key_version"] = enc_payload.get("key_version", 1)
+            return data
         except Exception as exc:
-            # Mask user identification in log to avoid context leakage
             logger.warning(
                 f"Vault decryption failed for tenant {user_id[:8]}...: cryptographic verification tag mismatch."
             )
@@ -176,13 +185,15 @@ class ExnessCredentialVault:
         user_id: str,
         login: str,
         server: str,
-        enc_payload: Dict[str, str],
+        enc_payload: Dict[str, Any],
         current_key: bytes,
         new_key: bytes,
-    ) -> Dict[str, str]:
+        new_key_version: int = 2,
+    ) -> Dict[str, Any]:
         """
         Re-encrypts credentials from current_key to new_key with zero plaintext exposure.
         Decrypted in transient memory, immediately re-encrypted with a fresh unique nonce.
+        Updates key_version to new_key_version.
         """
         if len(current_key) != 32 or len(new_key) != 32:
             raise ValueError("Both current_key and new_key must be exactly 32 bytes.")
@@ -196,7 +207,7 @@ class ExnessCredentialVault:
             override_key=current_key,
         )
 
-        # Re-encrypt under new key with fresh random nonce
+        # Re-encrypt under new key with fresh random nonce and new key_version tag
         rotated = cls.encrypt_credentials(
             user_id=user_id,
             login=login,
@@ -204,9 +215,48 @@ class ExnessCredentialVault:
             server=server,
             account_type=decrypted.get("account_type", "DEMO"),
             override_key=new_key,
+            key_version=new_key_version,
         )
+        rotated["previous_key_version"] = enc_payload.get("key_version", 1)
         rotated["key_rotated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return rotated
+
+    @classmethod
+    def rollback_credentials(
+        cls,
+        user_id: str,
+        login: str,
+        server: str,
+        enc_payload: Dict[str, Any],
+        current_key: bytes,
+        previous_key: bytes,
+        previous_key_version: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Safely rolls back re-encrypted credentials to previous_key if rotation is aborted.
+        """
+        if len(current_key) != 32 or len(previous_key) != 32:
+            raise ValueError("Both current_key and previous_key must be exactly 32 bytes.")
+
+        decrypted = cls.decrypt_credentials(
+            user_id=user_id,
+            login=login,
+            server=server,
+            enc_payload=enc_payload,
+            override_key=current_key,
+        )
+
+        rolled_back = cls.encrypt_credentials(
+            user_id=user_id,
+            login=login,
+            password=decrypted["password"],
+            server=server,
+            account_type=decrypted.get("account_type", "DEMO"),
+            override_key=previous_key,
+            key_version=previous_key_version,
+        )
+        rolled_back["rolled_back_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return rolled_back
 
     @classmethod
     def mask_credentials(cls, creds: Dict[str, Any]) -> Dict[str, Any]:
@@ -220,6 +270,7 @@ class ExnessCredentialVault:
             "login_masked": masked_login,
             "server": creds.get("server", ""),
             "account_type": creds.get("account_type", "DEMO"),
+            "key_version": creds.get("key_version", 1),
             "has_credentials": True,
             "password_masked": "••••••••",
         }

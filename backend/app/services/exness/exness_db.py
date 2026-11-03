@@ -1,6 +1,6 @@
 """
-Exness Database Migration and Data Layer (Hardened Phase 2.1)
-Additive schema definitions, local position tracking, and atomic key rotation for Exness MT5 HFT.
+Exness Database Migration and Data Layer (Hardened Phase 2.2)
+Additive schema definitions, adapter persistence, and safe key rotation/rollback.
 Specification reference: Master Exness HFT Implementation Specification, Part 8.
 """
 
@@ -24,6 +24,7 @@ EXNESS_DDL_STATEMENTS = [
         account_login TEXT NOT NULL,
         server_name TEXT NOT NULL,
         account_type TEXT DEFAULT 'DEMO',
+        adapter_mode TEXT DEFAULT 'DETERMINISTIC_MOCK_DEMO',
         encrypted_credentials TEXT NOT NULL,
         is_active INTEGER DEFAULT 1,
         is_read_only INTEGER DEFAULT 0,
@@ -167,12 +168,22 @@ EXNESS_INDEXES = [
 
 
 def apply_exness_migrations(conn: sqlite3.Connection) -> None:
-    """Applies all additive Exness tables and indexes."""
+    """Applies all additive Exness tables, columns, and indexes."""
     with conn:
         for stmt in EXNESS_DDL_STATEMENTS:
             conn.execute(stmt)
         for idx in EXNESS_INDEXES:
             conn.execute(idx)
+
+        # Additive check: add adapter_mode column if table was previously created without it
+        cursor = conn.execute("PRAGMA table_info(exness_demo_connections);")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "adapter_mode" not in columns:
+            conn.execute(
+                "ALTER TABLE exness_demo_connections ADD COLUMN adapter_mode TEXT DEFAULT 'DETERMINISTIC_MOCK_DEMO';"
+            )
+            logger.info("Added adapter_mode column to exness_demo_connections.")
+
     logger.info("Successfully verified and applied additive Exness schema migrations.")
 
 
@@ -190,12 +201,13 @@ def save_exness_connection(
     user_id: str,
     login: str,
     server: str,
-    enc_credentials: Dict[str, str],
+    enc_credentials: Dict[str, Any],
+    adapter_mode: str = "DETERMINISTIC_MOCK_DEMO",
     balance: float = 5000.0,
     equity: float = 5000.0,
     leverage: int = 2000,
 ) -> str:
-    """Creates or updates an Exness demo connection."""
+    """Creates or updates an Exness demo connection with explicit adapter_mode persistence."""
     conn_id = f"EXN-CONN-{secrets.token_hex(6).upper()}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -205,15 +217,16 @@ def save_exness_connection(
             """
             INSERT INTO exness_demo_connections (
                 connection_id, user_id, account_login, server_name, account_type,
-                encrypted_credentials, is_active, is_read_only, balance_usd, equity_usd,
-                leverage, currency, last_reconciled_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'DEMO', ?, 1, 0, ?, ?, ?, 'USD', ?, ?, ?)
+                adapter_mode, encrypted_credentials, is_active, is_read_only, balance_usd,
+                equity_usd, leverage, currency, last_reconciled_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'DEMO', ?, ?, 1, 0, ?, ?, ?, 'USD', ?, ?, ?)
             """,
             (
                 conn_id,
                 user_id,
                 login,
                 server,
+                adapter_mode,
                 json.dumps(enc_credentials),
                 balance,
                 equity,
@@ -289,11 +302,12 @@ def rotate_database_vault_keys(
     conn: sqlite3.Connection,
     old_key_hex: str,
     new_key_hex: str,
+    new_version: int = 2,
 ) -> int:
     """
     Atomically rotates the AES-256-GCM vault encryption key for all stored credentials in database.
     Operates within a single transaction to guarantee zero data loss.
-    Returns the count of successfully rotated connection credentials.
+    Updates key_version metadata to new_version.
     """
     old_key = bytes.fromhex(old_key_hex.strip())
     new_key = bytes.fromhex(new_key_hex.strip())
@@ -315,6 +329,7 @@ def rotate_database_vault_keys(
                 enc_payload=enc_creds,
                 current_key=old_key,
                 new_key=new_key,
+                new_key_version=new_version,
             )
             conn.execute(
                 "UPDATE exness_demo_connections SET encrypted_credentials = ?, updated_at = ? WHERE connection_id = ?",
@@ -326,5 +341,50 @@ def rotate_database_vault_keys(
             )
             rotated_count += 1
 
-    logger.info(f"Successfully rotated vault encryption key for {rotated_count} stored connections.")
+    logger.info(f"Successfully rotated vault encryption key for {rotated_count} stored connections to v{new_version}.")
     return rotated_count
+
+
+def rollback_database_vault_keys(
+    conn: sqlite3.Connection,
+    current_key_hex: str,
+    previous_key_hex: str,
+    previous_version: int = 1,
+) -> int:
+    """
+    Safely rolls back database credentials to previous key and version tag if rotation verification fails.
+    """
+    current_key = bytes.fromhex(current_key_hex.strip())
+    prev_key = bytes.fromhex(previous_key_hex.strip())
+    if len(current_key) != 32 or len(prev_key) != 32:
+        raise ValueError("Both current_key and previous_key must be exactly 32 bytes.")
+
+    rows = conn.execute(
+        "SELECT connection_id, user_id, account_login, server_name, encrypted_credentials FROM exness_demo_connections"
+    ).fetchall()
+
+    rolled_back_count = 0
+    with conn:
+        for r in rows:
+            enc_creds = json.loads(r["encrypted_credentials"])
+            new_payload = ExnessCredentialVault.rollback_credentials(
+                user_id=r["user_id"],
+                login=r["account_login"],
+                server=r["server_name"],
+                enc_payload=enc_creds,
+                current_key=current_key,
+                previous_key=prev_key,
+                previous_key_version=previous_version,
+            )
+            conn.execute(
+                "UPDATE exness_demo_connections SET encrypted_credentials = ?, updated_at = ? WHERE connection_id = ?",
+                (
+                    json.dumps(new_payload),
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    r["connection_id"],
+                ),
+            )
+            rolled_back_count += 1
+
+    logger.info(f"Successfully rolled back vault encryption key for {rolled_back_count} stored connections to v{previous_version}.")
+    return rolled_back_count

@@ -584,13 +584,38 @@ class ExnessDeterministicMockAdapter(ExnessBaseAdapter):
                 })
             else:
                 lp = local_by_ticket[t]
-                if abs(float(lp.get("volume", 0)) - float(bp.get("volume", 0))) > 1e-4:
+                # Symbol match
+                b_sym = str(bp.get("symbol", "")).upper()
+                l_sym = str(lp.get("symbol", "")).upper()
+                if l_sym and b_sym and l_sym != b_sym:
+                    discrepancies.append({
+                        "ticket": t,
+                        "type": "SYMBOL_MISMATCH",
+                        "broker_symbol": b_sym,
+                        "local_symbol": l_sym,
+                        "details": f"Symbol mismatch on {t}: broker={b_sym}, local={l_sym}",
+                    })
+                # Direction match
+                b_dir = str(bp.get("type", "")).upper()
+                l_dir = str(lp.get("order_side", "")).upper()
+                if l_dir and b_dir and l_dir != b_dir:
+                    discrepancies.append({
+                        "ticket": t,
+                        "type": "DIRECTION_MISMATCH",
+                        "broker_direction": b_dir,
+                        "local_direction": l_dir,
+                        "details": f"Direction mismatch on {t}: broker={b_dir}, local={l_dir}",
+                    })
+                # Volume match
+                b_vol = float(bp.get("volume", 0))
+                l_vol = float(lp.get("volume", 0))
+                if abs(b_vol - l_vol) > 1e-4:
                     discrepancies.append({
                         "ticket": t,
                         "type": "VOLUME_MISMATCH",
-                        "broker_volume": bp["volume"],
-                        "local_volume": lp.get("volume"),
-                        "details": f"Volume mismatch on {t}: broker={bp['volume']}, local={lp.get('volume')}",
+                        "broker_volume": b_vol,
+                        "local_volume": l_vol,
+                        "details": f"Volume mismatch on {t}: broker={b_vol}, local={l_vol}",
                     })
 
         # 2. Missing broker positions (exists in local DB, missing on broker)
