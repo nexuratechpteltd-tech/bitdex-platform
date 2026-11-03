@@ -4,7 +4,7 @@ import logging
 from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .security import TauricSecurityMiddleware
-from .services.saas_db import init_saas_db
+from .services.saas_db import init_saas_db, get_db_connection
 from .services.auth_manager import AuthManager
 from .routes import (
     health,
@@ -26,12 +26,17 @@ from .routes import (
     settings as settings_route,
     saas_customer,
     saas_admin,
+    exness_hft,
 )
 
 # Initialize SaaS Database and seed admin/owner accounts
 init_saas_db()
 from .services.ledger_db import init_ledger_tables
 init_ledger_tables()
+from .services.exness.exness_db import apply_exness_migrations
+_ex_conn = get_db_connection()
+apply_exness_migrations(_ex_conn)
+_ex_conn.close()
 AuthManager.seed_initial_accounts()
 
 app = FastAPI(
@@ -101,6 +106,7 @@ app.include_router(settings_route.router, prefix="/api/v1")
 app.include_router(saas_customer.customer_router, prefix="/api/v1")
 app.include_router(saas_admin.admin_router, prefix="/api/v1")
 app.include_router(saas_admin.webhook_router, prefix="/api/v1")
+app.include_router(exness_hft.router, prefix="/api/v1")
 
 @app.get("/")
 async def root():
