@@ -1,4 +1,5 @@
 "use client";
+import ProtectionCenter from "./ProtectionCenter";
 
 import React, { useState, useEffect, useMemo } from "react";
 import {
@@ -1087,6 +1088,8 @@ export default function AdminPanel({
               </button>
             </div>
           )}
+
+          <ProtectionCenter token={token} className="mb-6" />
 
           {/* ════════════ MODULE 1: CUSTOMERS WORKSPACE ════════════ */}
           {activeModule === "CUSTOMERS" && (

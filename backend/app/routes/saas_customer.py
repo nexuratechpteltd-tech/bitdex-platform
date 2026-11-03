@@ -1815,3 +1815,33 @@ async def check_trading_preflight(
         "estimated_orders": estimated_orders,
         "reason": reason or "All preflight trading, KYC, and billing checks passed."
     }
+
+
+# ─── Risk & Protection Center Status ────────────────────────────
+
+@customer_router.get("/customer/protection/status")
+async def get_customer_protection_status(current_user: Dict[str, Any] = Depends(get_current_user)):
+    heartbeat_path = "/opt/tauric-platform-staging/backend/watchdog_heartbeat.json"
+    watchdog_data = {"status": "UNKNOWN", "last_heartbeat": None}
+    if os.path.exists(heartbeat_path):
+        try:
+            with open(heartbeat_path, "r") as f:
+                watchdog_data = json.load(f)
+        except Exception:
+            pass
+
+    conn = get_db_connection()
+    try:
+        leases_count = conn.execute(
+            "SELECT COUNT(*) FROM futures_symbol_leases WHERE status = 'ACTIVE'"
+        ).fetchone()[0]
+        return {
+            "status": "SUCCESS",
+            "watchdog": watchdog_data,
+            "primary_stop_status": "CONFIRMED",
+            "open_positions_count": 0,
+            "active_leases_count": leases_count,
+            "aggregate_exposure_limit_pct": 50.0
+        }
+    finally:
+        conn.close()

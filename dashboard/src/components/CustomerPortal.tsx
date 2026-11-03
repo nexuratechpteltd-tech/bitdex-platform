@@ -1,4 +1,5 @@
 "use client";
+import ProtectionCenter from "./ProtectionCenter";
 
 import React, { useState, useEffect } from "react";
 import Image from "next/image";
@@ -1318,7 +1319,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
   });
 
   return (
-    <div className="min-h-screen bg-[#0B0E11] text-[#EAECEF] flex flex-col font-sans">
+    <div className="min-h-screen bg-[#0A0A0E] text-[#EAECEF] flex flex-col font-sans overflow-x-hidden pb-20 md:pb-6">
       {/* ─── CUSTOMER PORTAL HEADER ─────────────── */}
       <header className="sticky top-0 z-40 w-full border-b border-[#2B3139] bg-[#151921]">
         <div className="max-w-[1760px] w-full mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 h-16 flex items-center justify-between gap-4">
@@ -1770,7 +1771,8 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
         )}
         {/* TAB 1: TRADING / SIGNALS CONSOLE */}
         {activeTab === "TRADING" && (
-          <div>
+          <div className="space-y-6">
+            <ProtectionCenter token={token} />
             {children}
           </div>
         )}
@@ -4513,6 +4515,91 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
           </div>
         </div>
       )}
+ 
+      {/* ─── MOBILE STICKY BOTTOM NAVIGATION BAR (md:hidden) ─────────────────── */}
+      <nav
+        aria-label="Mobile Navigation"
+        className="fixed bottom-0 left-0 right-0 z-50 md:hidden bg-[#121218]/95 backdrop-blur-md border-t border-[#272735] px-2 py-1 shadow-2xl"
+      >
+        <div className="flex items-center justify-around max-w-lg mx-auto">
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("TRADING");
+              if (typeof window !== "undefined") window.location.hash = "trading";
+            }}
+            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+              activeTab === "TRADING"
+                ? "text-[#00E5FF] font-bold"
+                : "text-[#94A3B8] hover:text-white"
+            }`}
+          >
+            <TrendingUp className={`w-5 h-5 mb-0.5 ${activeTab === "TRADING" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[10px] tracking-tight">Trading</span>
+            {activeTab === "TRADING" && (
+              <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("BALANCES");
+              if (typeof window !== "undefined") window.location.hash = "balances";
+              fetchBalances();
+            }}
+            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+              activeTab === "BALANCES"
+                ? "text-[#00E5FF] font-bold"
+                : "text-[#94A3B8] hover:text-white"
+            }`}
+          >
+            <Scale className={`w-5 h-5 mb-0.5 ${activeTab === "BALANCES" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[10px] tracking-tight">Balances</span>
+            {activeTab === "BALANCES" && (
+              <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("BILLING");
+              if (typeof window !== "undefined") window.location.hash = "billing";
+            }}
+            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+              activeTab === "BILLING"
+                ? "text-[#00E5FF] font-bold"
+                : "text-[#94A3B8] hover:text-white"
+            }`}
+          >
+            <Wallet className={`w-5 h-5 mb-0.5 ${activeTab === "BILLING" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[10px] tracking-tight">Billing</span>
+            {activeTab === "BILLING" && (
+              <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("SUPPORT");
+              if (typeof window !== "undefined") window.location.hash = "support";
+            }}
+            className={`min-h-[48px] min-w-[48px] flex-1 flex flex-col items-center justify-center py-1 px-2 rounded-lg transition-all ${
+              activeTab === "SUPPORT"
+                ? "text-[#00E5FF] font-bold"
+                : "text-[#94A3B8] hover:text-white"
+            }`}
+          >
+            <LifeBuoy className={`w-5 h-5 mb-0.5 ${activeTab === "SUPPORT" ? "text-[#00E5FF]" : "text-[#94A3B8]"}`} />
+            <span className="text-[10px] tracking-tight">Support</span>
+            {activeTab === "SUPPORT" && (
+              <span className="w-1 h-1 rounded-full bg-[#00E5FF] mt-0.5" />
+            )}
+          </button>
+        </div>
+      </nav>
     </div>
   );
 }

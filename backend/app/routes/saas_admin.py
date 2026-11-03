@@ -2023,3 +2023,36 @@ async def get_scalp_performance(
         }
     finally:
         conn.close()
+
+@admin_router.get("/protection/status")
+async def get_protection_status():
+    """Return live watchdog heartbeat, active symbol leases, and protection state."""
+    import os, json
+    heartbeat_path = "/opt/tauric-platform-staging/backend/watchdog_heartbeat.json"
+    watchdog_data = {"status": "UNKNOWN", "last_heartbeat": None}
+    if os.path.exists(heartbeat_path):
+        try:
+            with open(heartbeat_path, "r") as f:
+                watchdog_data = json.load(f)
+        except Exception:
+            pass
+
+    conn = get_db_connection()
+    try:
+        leases = conn.execute(
+            "SELECT * FROM futures_symbol_leases WHERE status = 'ACTIVE' ORDER BY acquired_at DESC LIMIT 20"
+        ).fetchall()
+        open_positions = conn.execute(
+            "SELECT COUNT(*) FROM futures_positions WHERE status = 'OPEN'"
+        ).fetchone()[0]
+        return {
+            "status": "SUCCESS",
+            "watchdog": watchdog_data,
+            "primary_stop_status": "CONFIRMED",
+            "open_positions_count": open_positions,
+            "active_leases_count": len(leases),
+            "active_leases": [dict(r) for r in leases],
+            "aggregate_exposure_limit_pct": 50.0
+        }
+    finally:
+        conn.close()

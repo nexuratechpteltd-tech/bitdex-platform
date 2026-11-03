@@ -103,3 +103,8 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Runtime logs and watchdog heartbeat
+backend/watchdog.log
+backend/watchdog_heartbeat.json
+*.log
