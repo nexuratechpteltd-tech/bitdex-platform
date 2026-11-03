@@ -1,6 +1,6 @@
 """
-Exness Database Migration and Data Layer
-Additive schema definitions for Exness MT5 HFT execution.
+Exness Database Migration and Data Layer (Hardened Phase 2.1)
+Additive schema definitions, local position tracking, and atomic key rotation for Exness MT5 HFT.
 Specification reference: Master Exness HFT Implementation Specification, Part 8.
 """
 
@@ -10,6 +10,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import logging
+
+from .vault import ExnessCredentialVault
 
 logger = logging.getLogger("bitdex.exness.db")
 
@@ -155,7 +157,6 @@ EXNESS_DDL_STATEMENTS = [
     """,
 ]
 
-# Indexes for fast querying and isolation
 EXNESS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_exness_conn_user ON exness_demo_connections(user_id);",
     "CREATE INDEX IF NOT EXISTS idx_exness_inst_conn ON exness_discovered_instruments(connection_id);",
@@ -199,7 +200,6 @@ def save_exness_connection(
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     with conn:
-        # Deactivate existing connections for this user
         conn.execute("UPDATE exness_demo_connections SET is_active = 0 WHERE user_id = ?", (user_id,))
         conn.execute(
             """
@@ -226,6 +226,24 @@ def save_exness_connection(
     return conn_id
 
 
+def get_active_local_positions(conn: sqlite3.Connection, user_id: str) -> List[Dict[str, Any]]:
+    """
+    Retrieves active local open orders/legs from database for independent reconciliation.
+    Never assumes broker state matches local state.
+    """
+    rows = conn.execute(
+        """
+        SELECT leg_id, basket_id, user_id, broker_ticket, order_side, order_type,
+               volume, fill_price, stop_loss, take_profit, broker_stop_confirmed,
+               commission, status, created_at
+        FROM exness_hft_orders_and_legs
+        WHERE user_id = ? AND status = 'FILLED' AND closed_at IS NULL
+        """,
+        (user_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def log_reconciliation(
     conn: sqlite3.Connection,
     connection_id: str,
@@ -235,6 +253,10 @@ def log_reconciliation(
     local_count: int,
     details: Dict[str, Any],
 ) -> str:
+    """
+    Authoritative reconciliation logger.
+    Accurately records separate broker_count and local_count without self-comparison.
+    """
     log_id = f"REC-{secrets.token_hex(6).upper()}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with conn:
@@ -261,3 +283,48 @@ def log_reconciliation(
             (now, connection_id),
         )
     return log_id
+
+
+def rotate_database_vault_keys(
+    conn: sqlite3.Connection,
+    old_key_hex: str,
+    new_key_hex: str,
+) -> int:
+    """
+    Atomically rotates the AES-256-GCM vault encryption key for all stored credentials in database.
+    Operates within a single transaction to guarantee zero data loss.
+    Returns the count of successfully rotated connection credentials.
+    """
+    old_key = bytes.fromhex(old_key_hex.strip())
+    new_key = bytes.fromhex(new_key_hex.strip())
+    if len(old_key) != 32 or len(new_key) != 32:
+        raise ValueError("Both old_key and new_key must be exactly 32 bytes.")
+
+    rows = conn.execute(
+        "SELECT connection_id, user_id, account_login, server_name, encrypted_credentials FROM exness_demo_connections"
+    ).fetchall()
+
+    rotated_count = 0
+    with conn:
+        for r in rows:
+            enc_creds = json.loads(r["encrypted_credentials"])
+            new_payload = ExnessCredentialVault.rotate_credentials(
+                user_id=r["user_id"],
+                login=r["account_login"],
+                server=r["server_name"],
+                enc_payload=enc_creds,
+                current_key=old_key,
+                new_key=new_key,
+            )
+            conn.execute(
+                "UPDATE exness_demo_connections SET encrypted_credentials = ?, updated_at = ? WHERE connection_id = ?",
+                (
+                    json.dumps(new_payload),
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    r["connection_id"],
+                ),
+            )
+            rotated_count += 1
+
+    logger.info(f"Successfully rotated vault encryption key for {rotated_count} stored connections.")
+    return rotated_count

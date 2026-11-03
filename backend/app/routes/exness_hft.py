@@ -1,6 +1,7 @@
 """
-Exness High-Frequency Trading (HFT) API Router
-Phase 2 Implementation: Broker Adapter, Deterministic Mock Demo, Credential Vault, and Reconciliation.
+Exness High-Frequency Trading (HFT) API Router (Hardened Phase 2.1)
+Enforces strict broker connection semantics, separate authentication fields,
+deterministic adapter selection (no accidental mock fallback), and authoritative reconciliation.
 Specification reference: Master Exness HFT Implementation Specification, Part 4 & Part 11.
 """
 
@@ -18,6 +19,7 @@ from ..services.exness.vault import ExnessCredentialVault
 from ..services.exness.exness_db import (
     get_user_exness_connection,
     save_exness_connection,
+    get_active_local_positions,
     log_reconciliation,
 )
 
@@ -29,8 +31,8 @@ router = APIRouter(prefix="/hft/exness", tags=["Exness HFT"])
 _USER_ADAPTERS: Dict[str, Any] = {}
 
 
-def get_user_adapter(user_id: str) -> ExnessDeterministicMockAdapter:
-    """Returns or instantiates the user's Exness adapter."""
+def get_user_adapter(user_id: str) -> Any:
+    """Returns or instantiates the user's active Exness adapter."""
     if user_id not in _USER_ADAPTERS:
         _USER_ADAPTERS[user_id] = ExnessDeterministicMockAdapter(
             account_id="149827361",
@@ -41,10 +43,10 @@ def get_user_adapter(user_id: str) -> ExnessDeterministicMockAdapter:
 
 
 class ExnessConnectRequest(BaseModel):
-    account_login: str = Field(..., min_length=4, max_length=32)
-    password: str = Field(..., min_length=4)
-    server_name: str = Field(default="Exness-MT5Trial")
-    use_mock: bool = Field(default=True, description="Use deterministic mock demo initially")
+    account_login: str = Field(..., min_length=4, max_length=32, description="Exness MT5 account login ID")
+    password: str = Field(..., min_length=4, max_length=128, description="Exness MT5 trading password")
+    server_name: str = Field(default="Exness-MT5Trial", description="Exness MT5 trial/demo server name")
+    use_mock: bool = Field(default=True, description="Explicit mode selection: True for simulated mock, False for real MT5 gateway")
 
 
 class MarginCalculateRequest(BaseModel):
@@ -56,8 +58,8 @@ class MarginCalculateRequest(BaseModel):
 @router.get("/status")
 async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
     """
-    Returns Exness HFT subsystem status and execution locks.
-    Guarantees: Live trading is strictly locked in staging.
+    Returns Exness HFT subsystem status, execution locks, and discrete connection semantics.
+    Separates adapter connection from broker authentication.
     """
     adapter = get_user_adapter(user["user_id"])
     conn_status = await adapter.get_connection_status()
@@ -73,8 +75,11 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         "broker": "Exness MT5",
         "environment": "DEMO_ONLY",
         "live_trading_locked": True,
+        "adapter_connected": conn_status.get("adapter_connected", False),
+        "broker_authenticated": conn_status.get("broker_authenticated", False),
         "is_mock": conn_status.get("is_mock", True),
         "broker_mode": conn_status.get("broker_mode", "DETERMINISTIC_MOCK_DEMO"),
+        "connection_type": conn_status.get("connection_type", "SIMULATED_DEMO"),
         "is_connected": conn_status.get("is_connected", False),
         "active_connection": (
             {
@@ -98,7 +103,9 @@ async def connect_exness_demo(
 ):
     """
     Establishes an Exness MT5 Demo connection.
-    Encrypts credentials with AES-256-GCM authenticated vault and stores in database.
+    - Encrypts credentials with AES-256-GCM authenticated vault and stores in database.
+    - Explicitly routes to Deterministic Mock Demo or real MT5 Gateway based on `use_mock`.
+    - Never falls back to mock accidentally when real mode is requested.
     """
     user_id = user["user_id"]
 
@@ -111,44 +118,106 @@ async def connect_exness_demo(
         account_type="DEMO",
     )
 
-    # Initialize adapter
-    adapter = ExnessDeterministicMockAdapter(
-        account_id=req.account_login,
-        server=req.server_name,
-        initial_balance=5000.0,
-    )
-    conn_res = await adapter.connect()
-    _USER_ADAPTERS[user_id] = adapter
-
-    acct_info = await adapter.get_account_info()
-
-    # Save to database
-    conn = get_db_connection()
-    try:
-        conn_id = save_exness_connection(
-            conn=conn,
-            user_id=user_id,
-            login=req.account_login,
+    if req.use_mock:
+        # Deterministic Mock Demo Mode (Simulated)
+        adapter = ExnessDeterministicMockAdapter(
+            account_id=req.account_login,
             server=req.server_name,
-            enc_credentials=enc_creds,
-            balance=acct_info["balance"],
-            equity=acct_info["equity"],
-            leverage=acct_info["leverage"],
+            initial_balance=5000.0,
         )
-    finally:
-        conn.close()
+        conn_res = await adapter.connect()
+        _USER_ADAPTERS[user_id] = adapter
+        acct_info = await adapter.get_account_info()
 
-    return {
-        "status": "SUCCESS",
-        "connection_id": conn_id,
-        "connection_details": conn_res,
-        "account_telemetry": acct_info,
-        "credentials": ExnessCredentialVault.mask_credentials({
-            "login": req.account_login,
-            "server": req.server_name,
-            "account_type": "DEMO",
-        }),
-    }
+        # Save to database
+        conn = get_db_connection()
+        try:
+            conn_id = save_exness_connection(
+                conn=conn,
+                user_id=user_id,
+                login=req.account_login,
+                server=req.server_name,
+                enc_credentials=enc_creds,
+                balance=acct_info["balance"],
+                equity=acct_info["equity"],
+                leverage=acct_info["leverage"],
+            )
+        finally:
+            conn.close()
+
+        return {
+            "status": "SUCCESS",
+            "connection_id": conn_id,
+            "adapter_connected": True,
+            "broker_authenticated": False,  # Explicitly simulated
+            "is_mock": True,
+            "broker_mode": "DETERMINISTIC_MOCK_DEMO",
+            "connection_type": "SIMULATED_DEMO",
+            "connection_details": conn_res,
+            "account_telemetry": acct_info,
+            "credentials": ExnessCredentialVault.mask_credentials({
+                "login": req.account_login,
+                "server": req.server_name,
+                "account_type": "DEMO",
+            }),
+        }
+    else:
+        # Real MT5 Gateway Mode Requested
+        gateway_adapter = ExnessMT5GatewayAdapter(
+            account_id=req.account_login,
+            server=req.server_name,
+        )
+        conn_res = await gateway_adapter.connect()
+
+        # If gateway is offline or unauthenticated, fail closed without accidental mock fallback
+        if not conn_res.get("broker_authenticated", False):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "status": conn_res.get("status", "MT5_TERMINAL_UNAVAILABLE"),
+                    "adapter_connected": conn_res.get("adapter_connected", False),
+                    "broker_authenticated": False,
+                    "is_mock": False,
+                    "broker_mode": "EXNESS_MT5_GATEWAY",
+                    "reason": conn_res.get("reason", "MT5 Gateway execution bridge is unreachable."),
+                    "recommended_action": "Set use_mock=true for simulated demo testing.",
+                },
+            )
+
+        _USER_ADAPTERS[user_id] = gateway_adapter
+        acct_info = await gateway_adapter.get_account_info()
+
+        conn = get_db_connection()
+        try:
+            conn_id = save_exness_connection(
+                conn=conn,
+                user_id=user_id,
+                login=req.account_login,
+                server=req.server_name,
+                enc_credentials=enc_creds,
+                balance=acct_info.get("balance", 0.0),
+                equity=acct_info.get("equity", 0.0),
+                leverage=acct_info.get("leverage", 2000),
+            )
+        finally:
+            conn.close()
+
+        return {
+            "status": "SUCCESS",
+            "connection_id": conn_id,
+            "adapter_connected": True,
+            "broker_authenticated": True,
+            "is_mock": False,
+            "broker_mode": "EXNESS_MT5_GATEWAY",
+            "connection_type": "REAL_EXNESS_DEMO",
+            "connection_details": conn_res,
+            "account_telemetry": acct_info,
+            "credentials": ExnessCredentialVault.mask_credentials({
+                "login": req.account_login,
+                "server": req.server_name,
+                "account_type": "DEMO",
+            }),
+        }
 
 
 @router.get("/account")
@@ -218,21 +287,29 @@ async def calculate_trade_margin(
 
 @router.post("/reconcile")
 async def trigger_reconciliation(user: Dict[str, Any] = Depends(get_current_user)):
-    """Triggers account reconciliation and persists log in database."""
+    """
+    Triggers authoritative account reconciliation.
+    Independently fetches broker positions and local database positions.
+    Never compares broker positions against themselves.
+    """
     adapter = get_user_adapter(user["user_id"])
-    rec_result = await adapter.reconcile_account()
+    user_id = user["user_id"]
 
     conn = get_db_connection()
     try:
-        db_conn = get_user_exness_connection(conn, user["user_id"])
+        db_conn = get_user_exness_connection(conn, user_id)
         conn_id = db_conn["connection_id"] if db_conn else "NO_ACTIVE_CONN"
+        local_positions = get_active_local_positions(conn, user_id)
+
+        rec_result = await adapter.reconcile_account(local_positions=local_positions)
+
         log_id = log_reconciliation(
             conn=conn,
             connection_id=conn_id,
-            user_id=user["user_id"],
+            user_id=user_id,
             discrepancy_count=rec_result["discrepancy_count"],
             broker_count=rec_result["broker_positions_count"],
-            local_count=rec_result["broker_positions_count"],
+            local_count=rec_result["local_positions_count"],
             details=rec_result,
         )
     finally:

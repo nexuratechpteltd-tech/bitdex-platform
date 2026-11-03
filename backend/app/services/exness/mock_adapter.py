@@ -146,27 +146,41 @@ class ExnessDeterministicMockAdapter(ExnessBaseAdapter):
         logger.info(f"Connected to Exness Mock Demo (Account: {self.account_id}, Server: {self.server})")
         return {
             "status": "CONNECTED",
+            "adapter_connected": True,
+            "broker_authenticated": False,  # Explicitly simulated!
             "is_mock": True,
             "broker_mode": "DETERMINISTIC_MOCK_DEMO",
+            "connection_type": "SIMULATED_DEMO",
             "account_id": self.account_id,
             "server": self.server,
             "connected_at": self.connected_at,
+            "notice": "Simulated Exness MT5 Demo session. Not a real broker connection.",
         }
 
     async def disconnect(self) -> Dict[str, Any]:
         """Terminates mock session."""
         self.is_connected = False
-        return {"status": "DISCONNECTED", "is_mock": True}
+        return {
+            "status": "DISCONNECTED",
+            "adapter_connected": False,
+            "broker_authenticated": False,
+            "is_mock": True,
+            "broker_mode": "DETERMINISTIC_MOCK_DEMO",
+            "connection_type": "SIMULATED_DEMO",
+        }
 
     async def get_connection_status(self) -> Dict[str, Any]:
         return {
             "is_connected": self.is_connected,
+            "adapter_connected": self.is_connected,
+            "broker_authenticated": False,  # Mock is never real broker authentication
+            "is_mock": True,
+            "broker_mode": "DETERMINISTIC_MOCK_DEMO",
+            "connection_type": "SIMULATED_DEMO",
+            "live_execution_locked": True,
             "latency_ms": 14.5 if self.is_connected else None,
             "broker_server": self.server,
             "account_id": self.account_id,
-            "is_mock": True,
-            "broker_mode": "DETERMINISTIC_MOCK_DEMO",
-            "live_execution_locked": True,
             "last_heartbeat_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
@@ -528,27 +542,92 @@ class ExnessDeterministicMockAdapter(ExnessBaseAdapter):
             "stops_level": spec["stops_level"],
         }
 
-    async def reconcile_account(self) -> Dict[str, Any]:
-        acct = await self.get_account_info()
-        open_pos = await self.get_open_positions()
+    async def reconcile_account(
+        self, local_positions: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Authoritative reconciliation cross-checking broker positions with local records.
+        Never compares broker count against itself.
+        """
+        if not self.is_connected:
+            return {
+                "status": "BROKER_UNAVAILABLE",
+                "reconciliation_source": "SIMULATED_MOCK",
+                "is_mock": True,
+                "discrepancy_count": 0,
+                "reason": "Mock session is disconnected.",
+                "reconciled_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
 
-        # Check net exposure
-        net_lots = sum(p["volume"] if p["type"] == "BUY" else -p["volume"] for p in open_pos)
-        gross_lots = sum(p["volume"] for p in open_pos)
+        acct = await self.get_account_info()
+        broker_pos = await self.get_open_positions()
+        loc_pos = local_positions if local_positions is not None else []
+
+        broker_by_ticket = {str(p["ticket"]): p for p in broker_pos}
+        local_by_ticket = {
+            str(p.get("broker_ticket", p.get("ticket"))): p
+            for p in loc_pos
+            if p.get("broker_ticket") or p.get("ticket")
+        }
+
+        discrepancies = []
+
+        # 1. Untracked broker positions (exists on broker, missing in local DB)
+        for t, bp in broker_by_ticket.items():
+            if t not in local_by_ticket:
+                discrepancies.append({
+                    "ticket": t,
+                    "type": "UNTRACKED_BROKER_POSITION",
+                    "symbol": bp["symbol"],
+                    "volume": bp["volume"],
+                    "details": f"Position {t} ({bp['symbol']} {bp['volume']} lots) exists on broker but missing locally.",
+                })
+            else:
+                lp = local_by_ticket[t]
+                if abs(float(lp.get("volume", 0)) - float(bp.get("volume", 0))) > 1e-4:
+                    discrepancies.append({
+                        "ticket": t,
+                        "type": "VOLUME_MISMATCH",
+                        "broker_volume": bp["volume"],
+                        "local_volume": lp.get("volume"),
+                        "details": f"Volume mismatch on {t}: broker={bp['volume']}, local={lp.get('volume')}",
+                    })
+
+        # 2. Missing broker positions (exists in local DB, missing on broker)
+        for t, lp in local_by_ticket.items():
+            if t not in broker_by_ticket:
+                discrepancies.append({
+                    "ticket": t,
+                    "type": "MISSING_BROKER_POSITION",
+                    "details": f"Local position {t} not found among active broker positions (may be closed or liquidated).",
+                })
+
+        net_lots_broker = sum(p["volume"] if p["type"] == "BUY" else -p["volume"] for p in broker_pos)
+        gross_lots_broker = sum(p["volume"] for p in broker_pos)
+        net_lots_local = sum(
+            float(p.get("volume", 0)) if str(p.get("order_side", "")).upper() == "BUY" else -float(p.get("volume", 0))
+            for p in loc_pos
+        )
+
+        status = "DISCREPANCY_DETECTED" if discrepancies else "RECONCILED"
 
         return {
-            "status": "RECONCILED",
+            "status": status,
+            "reconciliation_source": "SIMULATED_MOCK",
+            "is_mock": True,
             "account_id": self.account_id,
-            "broker_positions_count": len(open_pos),
-            "discrepancy_count": 0,
-            "net_directional_lots": round(net_lots, 4),
-            "gross_exposure_lots": round(gross_lots, 4),
+            "broker_positions_count": len(broker_pos),
+            "local_positions_count": len(loc_pos),
+            "discrepancy_count": len(discrepancies),
+            "discrepancies": discrepancies,
+            "net_broker_lots": round(net_lots_broker, 4),
+            "net_local_lots": round(net_lots_local, 4),
+            "gross_broker_lots": round(gross_lots_broker, 4),
             "equity": acct["equity"],
             "balance": acct["balance"],
             "used_margin": acct["used_margin"],
             "free_margin": acct["free_margin"],
             "margin_level": acct["margin_level"],
-            "is_mock": True,
             "reconciled_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
