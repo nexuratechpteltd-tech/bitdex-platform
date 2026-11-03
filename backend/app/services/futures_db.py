@@ -268,6 +268,26 @@ CREATE TABLE IF NOT EXISTS futures_scalp_trades (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_futures_scalp_trades_user ON futures_scalp_trades(user_id, symbol, created_at);
+
+CREATE TABLE IF NOT EXISTS futures_strategy_configs (
+    config_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'AUTO',
+    margin_allocation_usd REAL NOT NULL DEFAULT 50.0,
+    leverage INTEGER NOT NULL DEFAULT 3,
+    net_profit_target_pct REAL NOT NULL DEFAULT 0.6,
+    max_loss_pct REAL NOT NULL DEFAULT 0.9,
+    max_holding_duration_seconds INTEGER NOT NULL DEFAULT 900,
+    session_mode TEXT NOT NULL DEFAULT 'SINGLE_CYCLE',
+    daily_loss_limit_usd REAL NOT NULL DEFAULT 20.0,
+    max_daily_trades INTEGER NOT NULL DEFAULT 10,
+    status TEXT NOT NULL DEFAULT 'CONFIGURED',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fsc_user_symbol ON futures_strategy_configs(user_id, symbol);
+
 """
 
 
@@ -920,3 +940,81 @@ def complete_scalp_trade(
     conn.commit()
     row = conn.execute("SELECT * FROM futures_scalp_trades WHERE trade_id = ?", (trade_id,)).fetchone()
     return dict(row)
+
+
+
+# ─────────────────────────────────────────────────────────────
+# Strategy Configuration Management
+# ─────────────────────────────────────────────────────────────
+
+def upsert_futures_strategy_config(
+    conn: sqlite3.Connection,
+    user_id: str,
+    symbol: str,
+    direction: str = "AUTO",
+    margin_allocation_usd: float = 50.0,
+    leverage: int = 3,
+    net_profit_target_pct: float = 0.6,
+    max_loss_pct: float = 0.9,
+    max_holding_duration_seconds: int = 900,
+    session_mode: str = "SINGLE_CYCLE",
+    daily_loss_limit_usd: float = 20.0,
+    max_daily_trades: int = 10,
+    status: str = "CONFIGURED",
+) -> Dict[str, Any]:
+    """Persist or update customer HFT strategy configuration."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    clean_symbol = symbol.upper().replace("/", "").replace(":", "").replace("-", "")
+    config_id = f"CFG-{user_id[:8]}-{clean_symbol}"
+
+    conn.execute(
+        """
+        INSERT INTO futures_strategy_configs (
+            config_id, user_id, symbol, direction, margin_allocation_usd,
+            leverage, net_profit_target_pct, max_loss_pct, max_holding_duration_seconds,
+            session_mode, daily_loss_limit_usd, max_daily_trades, status,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(config_id) DO UPDATE SET
+            direction = excluded.direction,
+            margin_allocation_usd = excluded.margin_allocation_usd,
+            leverage = excluded.leverage,
+            net_profit_target_pct = excluded.net_profit_target_pct,
+            max_loss_pct = excluded.max_loss_pct,
+            max_holding_duration_seconds = excluded.max_holding_duration_seconds,
+            session_mode = excluded.session_mode,
+            daily_loss_limit_usd = excluded.daily_loss_limit_usd,
+            max_daily_trades = excluded.max_daily_trades,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        """,
+        (
+            config_id, user_id, clean_symbol, direction, margin_allocation_usd,
+            leverage, net_profit_target_pct, max_loss_pct, max_holding_duration_seconds,
+            session_mode, daily_loss_limit_usd, max_daily_trades, status,
+            now, now
+        )
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM futures_strategy_configs WHERE config_id = ?", (config_id,)).fetchone()
+    return dict(row) if row else {}
+
+
+def get_futures_strategy_config(
+    conn: sqlite3.Connection,
+    user_id: str,
+    symbol: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Retrieve persisted customer HFT strategy configuration."""
+    if symbol:
+        clean_symbol = symbol.upper().replace("/", "").replace(":", "").replace("-", "")
+        row = conn.execute(
+            "SELECT * FROM futures_strategy_configs WHERE user_id = ? AND symbol = ? ORDER BY updated_at DESC LIMIT 1",
+            (user_id, clean_symbol)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM futures_strategy_configs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (user_id,)
+        ).fetchone()
+    return dict(row) if row else None

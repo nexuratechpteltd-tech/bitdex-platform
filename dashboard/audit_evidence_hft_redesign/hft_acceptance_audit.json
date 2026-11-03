@@ -1,0 +1,57 @@
+[
+  {
+    "viewport": "mobile_360px",
+    "width": 360,
+    "hasDuplicateInHeader": false,
+    "singleStrategyBar": true,
+    "hasHorizontalOverflow": false,
+    "pairsCount": 12,
+    "configBtnExists": true,
+    "checklistCount": 9,
+    "honestProtection": true
+  },
+  {
+    "viewport": "mobile_390px",
+    "width": 390,
+    "hasDuplicateInHeader": false,
+    "singleStrategyBar": true,
+    "hasHorizontalOverflow": false,
+    "pairsCount": 12,
+    "configBtnExists": true,
+    "checklistCount": 9,
+    "honestProtection": true
+  },
+  {
+    "viewport": "mobile_430px",
+    "width": 430,
+    "hasDuplicateInHeader": false,
+    "singleStrategyBar": true,
+    "hasHorizontalOverflow": false,
+    "pairsCount": 12,
+    "configBtnExists": true,
+    "checklistCount": 9,
+    "honestProtection": true
+  },
+  {
+    "viewport": "tablet_768px",
+    "width": 768,
+    "hasDuplicateInHeader": false,
+    "singleStrategyBar": true,
+    "hasHorizontalOverflow": false,
+    "pairsCount": 12,
+    "configBtnExists": true,
+    "checklistCount": 9,
+    "honestProtection": true
+  },
+  {
+    "viewport": "desktop_1440px",
+    "width": 1440,
+    "hasDuplicateInHeader": false,
+    "singleStrategyBar": true,
+    "hasHorizontalOverflow": false,
+    "pairsCount": 12,
+    "configBtnExists": true,
+    "checklistCount": 9,
+    "honestProtection": true
+  }
+]

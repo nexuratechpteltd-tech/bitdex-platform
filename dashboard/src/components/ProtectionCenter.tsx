@@ -90,7 +90,7 @@ export default function ProtectionCenter({ className = "", token }: ProtectionCe
               INSTITUTIONAL RISK &amp; PROTECTION CENTER
               <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
-                2-LAYER ARMED
+                {data?.two_layer_status || "STANDBY (ARMED ON ENTRY)"}
               </span>
             </h3>
             <p className="text-xs text-[#94A3B8]">
@@ -108,7 +108,7 @@ export default function ProtectionCenter({ className = "", token }: ProtectionCe
             Primary Stop
           </div>
           <div className="text-sm font-bold text-[#10B981] font-mono">
-            ARMED &amp; CONFIRMED
+            {data?.primary_stop_status || "STANDBY (NO OPEN POSITIONS)"}
           </div>
           <div className="text-[10px] text-[#64748B] mt-1">
             Binance Native STOP_MARKET

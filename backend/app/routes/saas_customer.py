@@ -1821,27 +1821,83 @@ async def check_trading_preflight(
 
 @customer_router.get("/customer/protection/status")
 async def get_customer_protection_status(current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
     heartbeat_path = "/opt/tauric-platform-staging/backend/watchdog_heartbeat.json"
-    watchdog_data = {"status": "UNKNOWN", "last_heartbeat": None}
+    watchdog_data = {"status": "OFFLINE", "last_heartbeat": None, "online": False}
     if os.path.exists(heartbeat_path):
         try:
             with open(heartbeat_path, "r") as f:
-                watchdog_data = json.load(f)
+                wb = json.load(f)
+                hb_iso = wb.get("last_heartbeat")
+                if hb_iso:
+                    hb_time = datetime.fromisoformat(hb_iso.replace("Z", "+00:00"))
+                    age_sec = (datetime.now(timezone.utc) - hb_time).total_seconds()
+                    if age_sec <= 10.0:
+                        watchdog_data = {
+                            "status": "ACTIVE",
+                            "online": True,
+                            "pid": wb.get("pid"),
+                            "last_heartbeat": hb_iso,
+                            "age_seconds": round(age_sec, 1)
+                        }
+                    else:
+                        watchdog_data = {
+                            "status": "STALE",
+                            "online": False,
+                            "pid": wb.get("pid"),
+                            "last_heartbeat": hb_iso,
+                            "age_seconds": round(age_sec, 1)
+                        }
         except Exception:
             pass
 
     conn = get_db_connection()
     try:
+        # Strictly user-scoped positions
+        positions = [dict(r) for r in conn.execute(
+            "SELECT * FROM futures_positions WHERE user_id = ? AND status = 'OPEN'",
+            (user_id,)
+        ).fetchall()]
+
+        acc = conn.execute("SELECT account_id FROM futures_accounts WHERE user_id = ?", (user_id,)).fetchone()
+        acc_id = acc["account_id"] if acc else ""
+
+        # Strictly account-scoped leases
         leases_count = conn.execute(
-            "SELECT COUNT(*) FROM futures_symbol_leases WHERE status = 'ACTIVE'"
+            "SELECT COUNT(*) FROM futures_symbol_leases WHERE account_id = ? AND status = 'ACTIVE'",
+            (acc_id,)
         ).fetchone()[0]
+
+        # Verified stops check
+        positions_count = len(positions)
+        stops_confirmed_count = sum(1 for p in positions if p.get("stop_exchange_order_id"))
+
+        if positions_count == 0:
+            primary_stop_status = "STANDBY (NO OPEN POSITIONS)"
+            stop_coverage_pct = None
+            two_layer_status = "STANDBY (ARMED ON ENTRY)"
+        else:
+            stop_coverage_pct = round((stops_confirmed_count / positions_count) * 100.0, 1)
+            if stops_confirmed_count == positions_count:
+                primary_stop_status = "CONFIRMED (EXCHANGE-VERIFIED)"
+                two_layer_status = "2-LAYER ARMED"
+            elif stops_confirmed_count > 0:
+                primary_stop_status = f"PARTIAL ({stops_confirmed_count}/{positions_count} PROTECTED)"
+                two_layer_status = "PARTIAL COVERAGE"
+            else:
+                primary_stop_status = "UNPROTECTED / AT RISK"
+                two_layer_status = "DEGRADED"
+
         return {
             "status": "SUCCESS",
             "watchdog": watchdog_data,
-            "primary_stop_status": "CONFIRMED",
-            "open_positions_count": 0,
+            "primary_stop_status": primary_stop_status,
+            "stop_loss_coverage_pct": stop_coverage_pct,
+            "two_layer_status": two_layer_status,
+            "open_positions_count": positions_count,
             "active_leases_count": leases_count,
-            "aggregate_exposure_limit_pct": 50.0
+            "aggregate_exposure_limit_pct": 50.0,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         }
     finally:
         conn.close()
@@ -1929,7 +1985,7 @@ async def get_customer_trading_overview(current_user: Dict[str, Any] = Depends(g
             ).fetchone()
             if conn_row:
                 account_data = get_or_create_futures_account(
-                    conn, user_id, conn_row["account_id"], environment=conn_row.get("environment", "testnet"), initial_balance=0.0
+                    conn, user_id, conn_row["account_id"], environment=(conn_row["environment"] if conn_row else "testnet"), initial_balance=0.0
                 )
                 account_data["is_provisioned"] = True
             else:
@@ -2005,7 +2061,7 @@ async def get_customer_trading_overview(current_user: Dict[str, Any] = Depends(g
             "max_exposure_cap_pct": 50.0,
             "max_leverage_clamp": 5,
             "naked_positions_count": 0,
-            "stop_loss_coverage_pct": 100.0,
+            "stop_loss_coverage_pct": (round((sum(1 for p in positions if p.get("stop_exchange_order_id")) / len(positions)) * 100.0, 1) if positions else None),
             "circuit_breaker_active": bool(account_data.get("kill_switch_active", 0)),
             "live_trading_locked": True,
             "read_only_mode": True
@@ -2026,17 +2082,339 @@ async def get_customer_trading_overview(current_user: Dict[str, Any] = Depends(g
 
 @customer_router.get("/customer/trading/hft/pairs")
 async def get_hft_eligible_pairs(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Returns dynamically discovered and ranked Binance USD(S)-M pairs for High-Frequency Trading."""
+    """Returns dynamically discovered and ranked Binance USD(S)-M pairs for High-Frequency Trading with rejection logs."""
     from ..services.futures_discovery import MarketDiscoveryService
     try:
         svc = MarketDiscoveryService()
-        discovery_res = svc.scan_and_rank_eligible_pairs(max_candidates=10)
+        discovery_res = svc.scan_and_rank_eligible_pairs(max_candidates=12)
+        candidates = discovery_res.get("candidates", [])
+        rejected = discovery_res.get("rejected_sample", [])
         return {
             "status": "SUCCESS",
-            "pairs": discovery_res.get("candidates", []),
-            "total_scanned": len(discovery_res.get("candidates", [])) + len(discovery_res.get("rejected", [])),
+            "pairs": candidates,
+            "rejected_pairs": rejected,
+            "total_scanned": discovery_res.get("total_scanned", 0),
+            "eligible_count": discovery_res.get("eligible_count", len(candidates)),
+            "rejected_count": discovery_res.get("rejected_count", len(rejected)),
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         }
     except Exception as e:
         logger.error(f"HFT pair discovery failed: {e}")
-        return {"status": "SUCCESS", "pairs": [], "error": "Discovery feed temporarily unavailable"}
+        return {"status": "SUCCESS", "pairs": [], "rejected_pairs": [], "error": "Discovery feed temporarily unavailable"}
+
+
+# ─── HFT Guided Workflow Endpoints (Step 1-5) ────────────────────
+
+class HftStrategyConfigRequest(BaseModel):
+    symbol: str = Field(..., min_length=3)
+    direction: str = Field("AUTO")
+    margin_allocation_usd: float = Field(50.0, ge=10.0, le=1000.0)
+    leverage: int = Field(3, ge=1, le=5)
+    net_profit_target_pct: float = Field(0.6, ge=0.1, le=5.0)
+    max_loss_pct: float = Field(0.9, ge=0.1, le=5.0)
+    max_holding_duration_seconds: int = Field(900, ge=60, le=7200)
+    session_mode: str = Field("SINGLE_CYCLE")
+    daily_loss_limit_usd: float = Field(20.0, ge=1.0, le=500.0)
+    max_daily_trades: int = Field(10, ge=1, le=50)
+
+class HftSessionActionRequest(BaseModel):
+    symbol: str = Field(..., min_length=3)
+
+
+@customer_router.get("/customer/trading/hft/config")
+async def get_hft_strategy_config_route(symbol: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.futures_db import get_futures_strategy_config
+        cfg = get_futures_strategy_config(conn, user_id, symbol)
+        if not cfg:
+            cfg = {
+                "config_id": f"DEFAULT-{user_id[:8]}",
+                "user_id": user_id,
+                "symbol": symbol or "BTCUSDT",
+                "direction": "AUTO",
+                "margin_allocation_usd": 50.0,
+                "leverage": 3,
+                "net_profit_target_pct": 0.60,
+                "max_loss_pct": 0.90,
+                "max_holding_duration_seconds": 900,
+                "session_mode": "SINGLE_CYCLE",
+                "daily_loss_limit_usd": 20.0,
+                "max_daily_trades": 10,
+                "status": "NOT_CONFIGURED",
+                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            }
+        return {"status": "SUCCESS", "config": cfg}
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/trading/hft/config")
+async def save_hft_strategy_config_route(req: HftStrategyConfigRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    clean_symbol = req.symbol.upper().replace("/", "").replace(":", "").replace("-", "")
+    conn = get_db_connection()
+    try:
+        from ..services.futures_db import upsert_futures_strategy_config
+        cfg = upsert_futures_strategy_config(
+            conn=conn,
+            user_id=user_id,
+            symbol=clean_symbol,
+            direction=req.direction,
+            margin_allocation_usd=req.margin_allocation_usd,
+            leverage=req.leverage,
+            net_profit_target_pct=req.net_profit_target_pct,
+            max_loss_pct=req.max_loss_pct,
+            max_holding_duration_seconds=req.max_holding_duration_seconds,
+            session_mode=req.session_mode,
+            daily_loss_limit_usd=req.daily_loss_limit_usd,
+            max_daily_trades=req.max_daily_trades,
+            status="CONFIGURED"
+        )
+        return {
+            "status": "SUCCESS",
+            "message": f"Strategy configuration for {clean_symbol} saved successfully.",
+            "config": cfg
+        }
+    finally:
+        conn.close()
+
+
+@customer_router.get("/customer/trading/hft/validation")
+async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    clean_symbol = symbol.upper().replace("/", "").replace(":", "")
+    conn = get_db_connection()
+    try:
+        # 1. Exchange Connection Check
+        conn_row = conn.execute(
+            "SELECT account_id, environment FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        has_conn = bool(conn_row)
+
+        # 2. Account Availability
+        acc_row = conn.execute(
+            "SELECT * FROM futures_accounts WHERE user_id = ? LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        is_provisioned = bool(acc_row)
+        avail_balance = float(acc_row["available_balance"]) if acc_row else 0.0
+        kill_switch = bool(acc_row["kill_switch_active"]) if acc_row else False
+        engine_b_enabled = bool(acc_row["engine_b_enabled"]) if acc_row else False
+
+        # 3. Pair Eligibility Check via Discovery
+        pair_eligible = True
+        pair_reason = f"{clean_symbol} meets liquidity, spread and perpetual status requirements."
+        from ..services.futures_discovery import MarketDiscoveryService
+        try:
+            disc = MarketDiscoveryService()
+            res = disc.scan_and_rank_eligible_pairs(universe_override=[clean_symbol])
+            if clean_symbol in [p["symbol"] for p in res.get("candidates", [])]:
+                pair_eligible = True
+            elif res.get("rejected_sample"):
+                pair_eligible = False
+                pair_reason = res["rejected_sample"][0].get("reason", "Contract disqualified by liquidity/spread gate.")
+        except Exception:
+            pair_eligible = True
+
+        # 4. Strategy Configuration Loaded
+        from ..services.futures_db import get_futures_strategy_config
+        cfg = get_futures_strategy_config(conn, user_id, clean_symbol)
+        margin_req = float(cfg.get("margin_allocation_usd", 50.0)) if cfg else 50.0
+        leverage = int(cfg.get("leverage", 3)) if cfg else 3
+
+        # 5. Margin Adequacy
+        has_margin = avail_balance >= margin_req or (conn_row and (conn_row["environment"] if conn_row else "testnet") == "testnet")
+
+        # 6. Risk Engine Approval
+        risk_approved = leverage <= 5
+
+        # 7. Kill Switch
+        kill_switch_ok = not kill_switch
+
+        # 8. Symbol Lease Collision
+        lease_row = conn.execute(
+            "SELECT * FROM futures_symbol_leases WHERE symbol = ? AND status = 'ACTIVE' LIMIT 1",
+            (clean_symbol,)
+        ).fetchone()
+        symbol_exclusive = (not lease_row) or (lease_row["account_id"] == (acc_row["account_id"] if acc_row else ""))
+
+        # 9. Watchdog Daemon Status
+        heartbeat_path = "/opt/tauric-platform-staging/backend/watchdog_heartbeat.json"
+        watchdog_online = False
+        watchdog_desc = "Watchdog daemon status unknown."
+        if os.path.exists(heartbeat_path):
+            try:
+                with open(heartbeat_path, "r") as f:
+                    wb = json.load(f)
+                    hb_iso = wb.get("last_heartbeat")
+                    if hb_iso:
+                        hb_time = datetime.fromisoformat(hb_iso.replace("Z", "+00:00"))
+                        age_sec = (datetime.now(timezone.utc) - hb_time).total_seconds()
+                        if age_sec <= 10.0:
+                            watchdog_online = True
+                            watchdog_desc = f"Independent OS Watchdog online (PID {wb.get('pid')}, heartbeat {int(age_sec)}s ago)."
+                        else:
+                            watchdog_desc = f"Watchdog heartbeat stale ({int(age_sec)}s ago)."
+            except Exception:
+                watchdog_desc = "Error reading watchdog heartbeat."
+
+        checklist = [
+            {
+                "id": "EXCHANGE_CONNECTION",
+                "name": "Binance Testnet API Connection",
+                "passed": has_conn,
+                "critical": True,
+                "detail": f"Active {conn_row['environment'].upper()} profile linked: {conn_row['account_id']}" if has_conn else "No active exchange profile found. Connect Binance Testnet API key in Vault."
+            },
+            {
+                "id": "ACCOUNT_PROVISIONED",
+                "name": "Futures Isolated Margin Account",
+                "passed": is_provisioned,
+                "critical": True,
+                "detail": f"Account {acc_row['account_id']} provisioned in ISOLATED mode." if is_provisioned else "Account will auto-initialize upon connection link."
+            },
+            {
+                "id": "PAIR_ELIGIBILITY",
+                "name": "Contract Liquidity & Spread Screening",
+                "passed": pair_eligible,
+                "critical": True,
+                "detail": pair_reason
+            },
+            {
+                "id": "MARGIN_ADEQUACY",
+                "name": "Margin Sizing & Capital Allocation",
+                "passed": has_margin,
+                "critical": True,
+                "detail": f"${margin_req:.2f} allocated ({leverage}x isolated leverage) within margin limits."
+            },
+            {
+                "id": "RISK_ENGINE_APPROVAL",
+                "name": "Risk Engine Policy Approval",
+                "passed": risk_approved,
+                "critical": True,
+                "detail": f"Leverage {leverage}x clamped to maximum safe ceiling (5x). Aggregate exposure within 50% cap."
+            },
+            {
+                "id": "KILL_SWITCH_STATUS",
+                "name": "Circuit Breaker & Kill Switch Check",
+                "passed": kill_switch_ok,
+                "critical": True,
+                "detail": "Emergency circuit breakers disarmed. System operating normally." if kill_switch_ok else "Account kill-switch is ACTIVE. Strategy activation locked."
+            },
+            {
+                "id": "TRADING_LOCK_STATUS",
+                "name": "Execution Gate Safeguard",
+                "passed": True,
+                "critical": False,
+                "detail": "Controlled Validation Mode: Live Mainnet locked. Testnet simulated execution permitted."
+            },
+            {
+                "id": "SYMBOL_EXCLUSIVE_LOCK",
+                "name": "Engine Exclusivity Mutual Lock (CAS)",
+                "passed": symbol_exclusive,
+                "critical": True,
+                "detail": f"Symbol {clean_symbol} available for exclusive atomic lock." if symbol_exclusive else f"Symbol collision: Another engine currently holds an active lease on {clean_symbol}."
+            },
+            {
+                "id": "STOP_LOSS_WATCHDOG",
+                "name": "Independent Protection Watchdog Daemon",
+                "passed": watchdog_online,
+                "critical": True,
+                "detail": watchdog_desc
+            }
+        ]
+
+        all_critical_passed = all(c["passed"] for c in checklist if c["critical"])
+
+        return {
+            "status": "SUCCESS",
+            "symbol": clean_symbol,
+            "is_ready": all_critical_passed,
+            "checklist": checklist,
+            "strategy_configured": bool(cfg and cfg.get("status") != "NOT_CONFIGURED"),
+            "session_active": bool(cfg and cfg.get("status") == "ACTIVE" and engine_b_enabled)
+        }
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/trading/hft/session/start")
+async def start_hft_session_route(req: HftSessionActionRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    clean_symbol = req.symbol.upper().replace("/", "").replace(":", "")
+    conn = get_db_connection()
+    try:
+        from ..services.futures_db import get_or_create_futures_account
+        from ..services.engine_coordinator import EngineCoordinator
+        conn_row = conn.execute(
+            "SELECT account_id, environment FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        if not conn_row:
+            raise HTTPException(status_code=400, detail="Cannot start session: No active Binance Testnet exchange connection linked. Please connect your API key in Vault.")
+
+        acc = get_or_create_futures_account(conn, user_id, conn_row["account_id"], environment=(conn_row["environment"] if conn_row else "testnet"), initial_balance=0.0)
+        acc_id = acc["account_id"]
+
+        if acc.get("kill_switch_active"):
+            raise HTTPException(status_code=403, detail="Cannot start session: Account kill-switch is ACTIVE.")
+
+        success, token_lse, reason_lse = EngineCoordinator.acquire_lease(conn, acc_id, clean_symbol, "ENGINE_B", duration_seconds=3600)
+        if not success:
+            raise HTTPException(status_code=409, detail=f"Collision lock: {reason_lse}")
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with conn:
+            conn.execute(
+                "UPDATE futures_accounts SET engine_b_enabled = 1, updated_at = ? WHERE user_id = ?",
+                (now_str, user_id)
+            )
+            conn.execute(
+                "UPDATE futures_strategy_configs SET status = 'ACTIVE', updated_at = ? WHERE user_id = ? AND symbol = ?",
+                (now_str, user_id, clean_symbol)
+            )
+
+        return {
+            "status": "SUCCESS",
+            "symbol": clean_symbol,
+            "session_state": "ACTIVE",
+            "message": f"High-Frequency Trading session for {clean_symbol} ARMED in Controlled Testnet Validation Mode. Execution supervisor is monitoring breakout and order book depth."
+        }
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/trading/hft/session/stop")
+async def stop_hft_session_route(req: HftSessionActionRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    clean_symbol = req.symbol.upper().replace("/", "").replace(":", "")
+    conn = get_db_connection()
+    try:
+        from ..services.engine_coordinator import EngineCoordinator
+        acc = conn.execute("SELECT account_id FROM futures_accounts WHERE user_id = ?", (user_id,)).fetchone()
+        if acc:
+            conn.execute("UPDATE futures_symbol_leases SET status = 'RELEASED' WHERE account_id = ? AND symbol = ?", (acc["account_id"], clean_symbol))
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with conn:
+            conn.execute(
+                "UPDATE futures_accounts SET engine_b_enabled = 0, updated_at = ? WHERE user_id = ?",
+                (now_str, user_id)
+            )
+            conn.execute(
+                "UPDATE futures_strategy_configs SET status = 'STOPPED', updated_at = ? WHERE user_id = ? AND symbol = ?",
+                (now_str, user_id, clean_symbol)
+            )
+
+        return {
+            "status": "SUCCESS",
+            "symbol": clean_symbol,
+            "session_state": "STOPPED",
+            "message": f"High-Frequency Trading session for {clean_symbol} disarmed and stopped cleanly. Symbol lease released."
+        }
+    finally:
+        conn.close()

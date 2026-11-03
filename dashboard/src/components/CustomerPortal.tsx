@@ -1344,58 +1344,18 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               <span className="text-xl font-bold tracking-tight text-[#EAECEF] font-mono">Bitdex</span>
             </div>
 
-            {/* Primary Nav Links */}
-            <nav className="hidden lg:flex items-center gap-1 text-sm font-medium">
-              <button
-                onClick={() => { setActiveTab("TRADING"); setTradingMode("LONG_TERM"); if (typeof window !== "undefined") window.location.hash = "dashboard"; }}
-                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                  activeTab === "TRADING" && tradingMode === "LONG_TERM"
-                    ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
-                    : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
-                }`}
-              >
-                Long-Term
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab("TRADING");
-                  setTradingMode("GRID");
-                  if (typeof window !== "undefined") {
-                    window.location.hash = "grid";
-                    window.dispatchEvent(new CustomEvent("bitdex_open_scalp_grid"));
-                  }
-                }}
-                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                  activeTab === "TRADING" && tradingMode === "GRID"
-                    ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
-                    : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
-                }`}
-              >
-                Grid
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab("TRADING");
-                  setTradingMode("HFT");
-                  if (typeof window !== "undefined") window.location.hash = "hft";
-                }}
-                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                  activeTab === "TRADING" && tradingMode === "HFT"
-                    ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
-                    : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
-                }`}
-              >
-                High-Frequency
-              </button>
+            {/* Account & Vault Direct Navigation (Isolated from Strategy Bar) */}
+            <nav className="hidden lg:flex items-center gap-2 text-xs font-mono">
               <button
                 onClick={() => { setActiveTab("CONNECTIONS"); if (typeof window !== "undefined") window.location.hash = "account"; }}
-                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
                   activeTab === "CONNECTIONS"
-                    ? "bg-[#00E5FF] text-[#0B0E11] font-bold shadow-sm"
-                    : "text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#151921]"
+                    ? "bg-[#00E5FF]/15 text-[#00E5FF] border-[#00E5FF]/40 font-bold shadow-sm"
+                    : "text-[#848E9C] border-transparent hover:text-[#EAECEF] hover:bg-[#1E2329]"
                 }`}
               >
-                Account
+                <Key className="w-3.5 h-3.5" />
+                <span>Account &amp; Vault</span>
               </button>
             </nav>
           </div>
