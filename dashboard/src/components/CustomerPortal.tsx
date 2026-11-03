@@ -1,4 +1,5 @@
 "use client";
+import InstitutionalTradingDashboard from "./InstitutionalTradingDashboard";
 import ProtectionCenter from "./ProtectionCenter";
 
 import React, { useState, useEffect } from "react";
@@ -1769,11 +1770,10 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             </button>
           </div>
         )}
-        {/* TAB 1: TRADING / SIGNALS CONSOLE */}
+        {/* TAB 1: TRADING / INSTITUTIONAL DUAL-ENGINE CONSOLE */}
         {activeTab === "TRADING" && (
-          <div className="space-y-6">
-            <ProtectionCenter token={token} />
-            {children}
+          <div>
+            <InstitutionalTradingDashboard token={token} />
           </div>
         )}
 

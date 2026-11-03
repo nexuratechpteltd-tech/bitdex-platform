@@ -2056,3 +2056,39 @@ async def get_protection_status():
         }
     finally:
         conn.close()
+
+
+# ─── Admin Multi-Tenant Trading & Risk Oversight ───────────────
+
+@admin_router.get("/trading/overview")
+async def get_admin_trading_overview(admin_user = Depends(get_admin_user)):
+    conn = get_db_connection()
+    try:
+        leases = [dict(r) for r in conn.execute(
+            "SELECT * FROM futures_symbol_leases WHERE status = 'ACTIVE' ORDER BY acquired_at DESC LIMIT 20"
+        ).fetchall()]
+
+        trades = [dict(r) for r in conn.execute(
+            "SELECT * FROM futures_scalp_trades ORDER BY created_at DESC LIMIT 50"
+        ).fetchall()]
+
+        open_positions = [dict(r) for r in conn.execute(
+            "SELECT * FROM futures_positions WHERE status = 'OPEN' ORDER BY opened_at DESC LIMIT 20"
+        ).fetchall()]
+
+        accounts_count = conn.execute("SELECT COUNT(*) FROM futures_accounts").fetchone()[0]
+        enabled_engine_b_count = conn.execute("SELECT COUNT(*) FROM futures_accounts WHERE engine_b_enabled = 1").fetchone()[0]
+
+        return {
+            "status": "SUCCESS",
+            "total_futures_accounts": accounts_count,
+            "engine_b_enabled_accounts": enabled_engine_b_count,
+            "active_leases": leases,
+            "active_leases_count": len(leases),
+            "open_positions": open_positions,
+            "recent_trades": trades,
+            "global_live_trading_locked": True,
+            "global_read_only_mode": True
+        }
+    finally:
+        conn.close()

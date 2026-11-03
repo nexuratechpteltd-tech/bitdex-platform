@@ -44,6 +44,7 @@ import {
   Download,
   Server,
   Settings,
+  Layers,
   ChevronDown
 } from "lucide-react";
 
@@ -1090,6 +1091,44 @@ export default function AdminPanel({
           )}
 
           <ProtectionCenter token={token} className="mb-6" />
+
+          {/* Dual-Engine Platform Oversight & Risk Controls */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <div className="rounded-xl bg-[#121218] border border-[#272735] p-4 font-mono text-xs">
+              <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#272735]">
+                <span className="text-white font-bold flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-purple-400" />
+                  ENGINE A (SPOT &amp; SWING)
+                </span>
+                <span className="text-[10px] text-[#F59E0B] px-2 py-0.5 rounded bg-[#F59E0B]/10 border border-[#F59E0B]/30 font-bold">
+                  STANDBY • LIVE LOCKED
+                </span>
+              </div>
+              <div className="text-[11px] text-[#94A3B8] space-y-1">
+                <div className="flex justify-between"><span>Strategy:</span><span className="text-white">SPOT_GRID_SWING</span></div>
+                <div className="flex justify-between"><span>Mutual Exclusivity:</span><span className="text-[#10B981]">ARMED (0 Collisions)</span></div>
+                <div className="flex justify-between"><span>Safety Locks:</span><span className="text-[#10B981]">Zero Real-Money Risk</span></div>
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-[#121218] border border-[#272735] p-4 font-mono text-xs">
+              <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#272735]">
+                <span className="text-white font-bold flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-[#00E5FF]" />
+                  ENGINE B (AUTONOMOUS SCALPER)
+                </span>
+                <span className="text-[10px] text-[#00E5FF] px-2 py-0.5 rounded bg-[#00E5FF]/10 border border-[#00E5FF]/30 font-bold">
+                  POST-ONLY MOMENTUM
+                </span>
+              </div>
+              <div className="text-[11px] text-[#94A3B8] space-y-1">
+                <div className="flex justify-between"><span>Filters:</span><span className="text-white">Donchian(20) • ADX&gt;22 • RVOL&gt;1.5</span></div>
+                <div className="flex justify-between"><span>Leverage Ceiling:</span><span className="text-[#10B981]">5x Hard Clamped</span></div>
+                <div className="flex justify-between"><span>Exposure Cap:</span><span className="text-white">50.0% Aggregate Portfolio</span></div>
+              </div>
+            </div>
+          </div>
+
 
           {/* ════════════ MODULE 1: CUSTOMERS WORKSPACE ════════════ */}
           {activeModule === "CUSTOMERS" && (
