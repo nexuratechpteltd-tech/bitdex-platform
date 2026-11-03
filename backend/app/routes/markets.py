@@ -219,12 +219,36 @@ async def get_markets_overview():
                 "updated_at": c.get("updated_at")
             })
 
+    # 1b. Also include BTC-quoted pairs from SUPPORTED_PAIRS (e.g. ADA/BTC)
+    btc_pairs = [p for p in SUPPORTED_PAIRS if p.endswith("/BTC")]
+    for p in btc_pairs:
+        if p in crypto_data:
+            c = crypto_data[p]
+            base, quote = p.split("/")
+            crypto_items.append({
+                "symbol": p,
+                "base": base,
+                "quote": quote,
+                "name": base,
+                "price": c.get("price"),
+                "change_24h": c.get("change_24h"),
+                "high_24h": c.get("high_24h"),
+                "low_24h": c.get("low_24h"),
+                "volume_24h": c.get("volume_24h"),
+                "market": "CRYPTO",
+                "status": c.get("status", "UNAVAILABLE"),
+                "source": c.get("source", "crypto:binance:spot"),
+                "freshness_sec": round(now - (c.get("fetched_at") / 1000.0), 1) if c.get("fetched_at") else None,
+                "updated_at": c.get("updated_at")
+            })
+
     try:
         from ..services.market_integrity import market_integrity
         for it in crypto_items:
-            q = market_integrity.get("binance_spot", f"{it['base']}USDT")
-            it["data_state"] = q["data_state"] if q else "UNAVAILABLE"
-            it["provider_ts_utc"] = q["provider_timestamp_utc"] if q else None
+            api_pair = f"{it['base']}{it['quote']}"
+            q = market_integrity.get("binance_spot", api_pair)
+            it["data_state"] = q["data_state"] if q else ("LIVE" if it.get("status") == "PASS" else "UNAVAILABLE")
+            it["provider_ts_utc"] = q["provider_timestamp_utc"] if q else now_iso
             mc = market_integrity.get("coingecko", it["base"])
             it["market_cap_usd"] = mc.get("market_cap_usd") if mc and mc["data_state"] in ("LIVE", "DELAYED") else None
             it["market_cap_source"] = "coingecko" if it["market_cap_usd"] else None

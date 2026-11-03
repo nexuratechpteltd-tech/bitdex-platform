@@ -678,6 +678,44 @@ const getSymbolParts = (sym: string): { base: string; quote: string } => {
   return { base: clean, quote: "USDT" };
 };
 
+export const formatSignalPrice = (
+  val: number | null | undefined,
+  symbolOrQuote?: string,
+  market?: string
+): string => {
+  if (val === null || val === undefined || !Number.isFinite(val)) return "--";
+  if (val <= 0) return "--";
+
+  const quote = symbolOrQuote && symbolOrQuote.includes("/")
+    ? symbolOrQuote.split("/")[1].toUpperCase()
+    : (symbolOrQuote || "").toUpperCase();
+
+  const isBtcQuote = quote === "BTC" || (symbolOrQuote && symbolOrQuote.toUpperCase().endsWith("/BTC"));
+  const isUsdQuote = quote === "USDT" || quote === "USD" || quote === "USDC";
+
+  let numStr = "";
+  if (isBtcQuote || val < 0.0001) {
+    numStr = val.toFixed(8);
+  } else if (val < 0.01) {
+    numStr = val.toFixed(6);
+  } else if (val < 1.0) {
+    numStr = val.toFixed(4);
+  } else if (val >= 100) {
+    numStr = val.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  } else {
+    numStr = val.toFixed(4);
+  }
+
+  if (isBtcQuote) {
+    return `${numStr} ₿`;
+  } else if (isUsdQuote || (!quote && market !== "FOREX" && val >= 1.0)) {
+    return `$${numStr}`;
+  } else if (quote && quote !== "USD") {
+    return `${numStr} ${quote}`;
+  }
+  return numStr;
+};
+
 export default function UnifiedSignalDashboard({
   onOpenTauricResearch,
 }: UnifiedSignalDashboardProps) {
@@ -4350,10 +4388,41 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-[#848E9C] border border-[#2B3139]/80">
                     {signal.pattern}
                   </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-950/50 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                    <span>Active</span>
-                  </span>
+                  {(() => {
+                    const st = signal.availability_status || signal.status || "VALID_SIGNAL";
+                    let badgeClass = "bg-emerald-950/50 text-emerald-400 border-emerald-500/30";
+                    let dotClass = "bg-emerald-400";
+                    let label = "Valid Signal";
+
+                    if (st === "NO_ACTIVE_SIGNAL") {
+                      badgeClass = "bg-slate-800 text-slate-300 border-slate-600/50";
+                      dotClass = "bg-slate-400";
+                      label = "No Active Setup";
+                    } else if (st === "INSUFFICIENT_DATA") {
+                      badgeClass = "bg-amber-950/50 text-amber-400 border-amber-500/40";
+                      dotClass = "bg-amber-400";
+                      label = "Insufficient Data";
+                    } else if (st === "MARKET_DATA_UNAVAILABLE") {
+                      badgeClass = "bg-rose-950/50 text-rose-400 border-rose-500/40";
+                      dotClass = "bg-rose-400";
+                      label = "Data Unavailable";
+                    } else if (st === "MARKET_CLOSED") {
+                      badgeClass = "bg-amber-950/50 text-amber-400 border-amber-500/40";
+                      dotClass = "bg-amber-400";
+                      label = "Market Closed";
+                    } else if (st === "UNSUPPORTED_INSTRUMENT") {
+                      badgeClass = "bg-slate-900 text-slate-400 border-slate-700";
+                      dotClass = "bg-slate-500";
+                      label = "Unsupported";
+                    }
+
+                    return (
+                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 ${badgeClass}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`}></span>
+                        <span>{label}</span>
+                      </span>
+                    );
+                  })()}
                 </div>
 
                 {/* Directional Meter Gauge Widget */}
@@ -4424,9 +4493,7 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                   <div>
                     <span className="text-[10px] text-[#848E9C] font-medium uppercase block tracking-wider">REFERENCE PRICE</span>
                     <span className="text-[#EAECEF] font-semibold tabular-nums">
-                      {signal.reference_price >= 100
-                        ? `$${signal.reference_price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : signal.reference_price.toFixed(4)}
+                      {formatSignalPrice(signal.reference_price, signal.quote_asset || signal.symbol, signal.market)}
                     </span>
                   </div>
                   <div>
@@ -4434,29 +4501,25 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                       {signal.market === "CRYPTO" && isSell ? "EXIT / DEFENSE ZONE" : "ENTRY ZONE"}
                     </span>
                     <span className="text-[#EAECEF] font-semibold truncate block tabular-nums">
-                      {signal.entry_zone}
+                      {signal.entry_zone || "--"}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-[#848E9C] font-medium uppercase block tracking-wider">STOP LOSS</span>
                     <span className="text-rose-400 font-semibold tabular-nums">
-                      {signal.stop_loss >= 100
-                        ? `$${signal.stop_loss.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : signal.stop_loss.toFixed(4)}
+                      {formatSignalPrice(signal.stop_loss, signal.quote_asset || signal.symbol, signal.market)}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-[#848E9C] font-medium uppercase block tracking-wider">TARGET</span>
-                    {signal.multi_targets ? (
+                    {signal.multi_targets?.tp1 ? (
                       <span className="text-emerald-400 font-semibold tabular-nums text-xs block truncate">
-                        TP1: {signal.multi_targets.tp1.price >= 100 ? `$${signal.multi_targets.tp1.price.toFixed(2)}` : signal.multi_targets.tp1.price.toFixed(4)}
+                        TP1: {formatSignalPrice(signal.multi_targets.tp1.price, signal.quote_asset || signal.symbol, signal.market)}
                         <span className="text-[#848E9C] font-normal ml-1">({signal.multi_targets.blended_net_reward_pct > 0 ? `+${signal.multi_targets.blended_net_reward_pct}% net` : ""})</span>
                       </span>
                     ) : (
                       <span className="text-emerald-400 font-semibold tabular-nums">
-                        {signal.target >= 100
-                          ? `$${signal.target.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                          : signal.target.toFixed(4)}
+                        {formatSignalPrice(signal.target, signal.quote_asset || signal.symbol, signal.market)}
                       </span>
                     )}
                   </div>
@@ -4600,7 +4663,7 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                 .map((item) => {
                   const isPos = (item.change_24h ?? 0) >= 0;
                   const displayPrice = typeof item.price === "number"
-                    ? (item.price >= 10 ? item.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : item.price.toFixed(4))
+                    ? formatSignalPrice(item.price, item.symbol, item.market)
                     : "--";
                   const displayChange = typeof item.change_24h === "number"
                     ? `${isPos ? "+" : ""}${item.change_24h.toFixed(2)}%`
@@ -4652,7 +4715,7 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                         <div className="flex items-center gap-1.5 flex-1 max-w-[220px]">
                           <span className="text-[9px]">24h H/L</span>
                           <span className="text-[10px] text-[#EAECEF] font-bold tabular-nums">
-                            {item.low_24h ? (item.low_24h >= 10 ? item.low_24h.toLocaleString() : item.low_24h.toFixed(4)) : "--"} — {item.high_24h ? (item.high_24h >= 10 ? item.high_24h.toLocaleString() : item.high_24h.toFixed(4)) : "--"}
+                            {typeof item.low_24h === "number" ? formatSignalPrice(item.low_24h, item.symbol, item.market) : "--"} — {typeof item.high_24h === "number" ? formatSignalPrice(item.high_24h, item.symbol, item.market) : "--"}
                           </span>
                         </div>
 
@@ -4777,8 +4840,9 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
             {(() => {
               const cpSig: any = signals.find((x: any) => x.symbol === centerpiecePair.symbol);
               const ovItem: any = overviewMarkets.find((m: any) => m.symbol === centerpiecePair.symbol);
-              const fmt = (v: any) => typeof v === "number" && Number.isFinite(v) ? (v >= 100 ? `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : v.toFixed(4)) : "--";
+              const quoteSym = centerpiecePair.symbol.includes("/") ? centerpiecePair.symbol.split("/")[1] : "USDT";
               const live = ovItem && typeof ovItem.price === "number" && ovItem.data_state !== "UNAVAILABLE" ? ovItem : null;
+              const fmt = (v: any) => formatSignalPrice(v, quoteSym, cpSig?.market || centerpiecePair.market);
               const livePill = (
                 <div className="relative flex items-center justify-between p-2.5 rounded bg-[#00E5FF]/10 border-2 border-[#00E5FF]">
                   <div className="flex items-center gap-2">
@@ -4788,12 +4852,13 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                   <span className="text-[9px] text-[#00E5FF] font-mono">{live ? (live.source || "provider") : "no verified quote"}</span>
                 </div>
               );
-              if (!cpSig) {
+              const isValid = cpSig && (cpSig.availability_status === "VALID_SIGNAL" || cpSig.status === "VALID_SIGNAL" || cpSig.status === "Active");
+              if (!isValid) {
                 return (
                   <div id="ladder-no-signal" className="p-4 rounded-lg bg-[#1E2329] border border-[#2B3139] space-y-2.5 font-mono text-xs">
                     <div className="text-[10px] text-[#848E9C] uppercase tracking-wider font-bold">Price Execution Ladder</div>
                     {livePill}
-                    <div className="text-[#848E9C]">No active signal for {centerpiecePair.symbol}. Entry, take-profit and stop-loss levels are shown only when the signal engine produces them.</div>
+                    <div className="text-[#848E9C]">{cpSig?.status_explanation || `No active signal for ${centerpiecePair.symbol}. Entry, take-profit and stop-loss levels are shown only when the signal engine produces them.`}</div>
                   </div>
                 );
               }
@@ -4930,19 +4995,19 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                     <div>
                       <span className="text-[10px] text-[#848E9C] block uppercase font-medium">Entry</span>
                       <span className="font-bold text-[#EAECEF] tabular-nums">
-                        {typeof sig.entry_price === "number" ? sig.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : sig.current_price?.toLocaleString() || "--"}
+                        {formatSignalPrice(sig.entry_price ?? sig.current_price, sig.symbol, sig.market)}
                       </span>
                     </div>
                     <div>
                       <span className="text-[10px] text-[#848E9C] block uppercase font-medium">Stop-loss</span>
                       <span className="font-bold text-[#F6465D] tabular-nums">
-                        {typeof sig.stop_price === "number" ? sig.stop_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : "--"}
+                        {formatSignalPrice(sig.stop_price, sig.symbol, sig.market)}
                       </span>
                     </div>
                     <div>
                       <span className="text-[10px] text-[#848E9C] block uppercase font-medium">Target 1</span>
                       <span className="font-bold text-[#0ECB81] tabular-nums">
-                        {typeof sig.tp1 === "number" ? sig.tp1.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : sig.target_price?.toLocaleString() || "--"}
+                        {formatSignalPrice(sig.tp1 ?? sig.target_price, sig.symbol, sig.market)}
                       </span>
                     </div>
                   </div>
@@ -5234,27 +5299,21 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                     <div className="p-2 rounded bg-[#1E2329] border border-[#2B3139] shadow-sm">
                       <span className="text-[10px] text-[#848E9C] uppercase block">TP1 (50% Allocation)</span>
                       <span className="text-emerald-400 font-bold tabular-nums text-sm block">
-                        {selectedSignal.multi_targets.tp1.price >= 100
-                          ? `$${selectedSignal.multi_targets.tp1.price.toFixed(2)}`
-                          : selectedSignal.multi_targets.tp1.price.toFixed(4)}
+                        {formatSignalPrice(selectedSignal.multi_targets.tp1.price, selectedSignal.quote_asset || selectedSignal.symbol, selectedSignal.market)}
                       </span>
                       <span className="text-[10px] text-[#848E9C] block">1.2R (+{selectedSignal.multi_targets.tp1.net_reward_pct}% net)</span>
                     </div>
                     <div className="p-2 rounded bg-[#1E2329] border border-[#2B3139] shadow-sm">
                       <span className="text-[10px] text-[#848E9C] uppercase block">TP2 (30% Allocation)</span>
                       <span className="text-emerald-300 font-bold tabular-nums text-sm block">
-                        {selectedSignal.multi_targets.tp2.price >= 100
-                          ? `$${selectedSignal.multi_targets.tp2.price.toFixed(2)}`
-                          : selectedSignal.multi_targets.tp2.price.toFixed(4)}
+                        {formatSignalPrice(selectedSignal.multi_targets.tp2.price, selectedSignal.quote_asset || selectedSignal.symbol, selectedSignal.market)}
                       </span>
                       <span className="text-[10px] text-[#848E9C] block">2.0R (+{selectedSignal.multi_targets.tp2.net_reward_pct}% net)</span>
                     </div>
                     <div className="p-2 rounded bg-[#1E2329] border border-[#2B3139] shadow-sm">
                       <span className="text-[10px] text-[#848E9C] uppercase block">TP3 (20% Allocation)</span>
                       <span className="text-emerald-200 font-bold tabular-nums text-sm block">
-                        {selectedSignal.multi_targets.tp3.price >= 100
-                          ? `$${selectedSignal.multi_targets.tp3.price.toFixed(2)}`
-                          : selectedSignal.multi_targets.tp3.price.toFixed(4)}
+                        {formatSignalPrice(selectedSignal.multi_targets.tp3.price, selectedSignal.quote_asset || selectedSignal.symbol, selectedSignal.market)}
                       </span>
                       <span className="text-[10px] text-[#848E9C] block">3.2R (+{selectedSignal.multi_targets.tp3.net_reward_pct}% net)</span>
                     </div>
@@ -5330,7 +5389,7 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
                   {selectedSignal.name} ({selectedSignal.symbol}) via {selectedSignal.pattern}. Triggers: trend
                   structure vs EMA200; healthy momentum on RSI(14); MACD histogram alignment. Technical score{" "}
                   <strong className="tabular-nums">{selectedSignal.score}/100</strong> ({selectedSignal.checklist.length} confirming factors).
-                  Risk is defined by invalidation stop at {selectedSignal.stop_loss}; target at {selectedSignal.target} (Reward/Risk {selectedSignal.risk_reward}).
+                  Risk is defined by invalidation stop at {formatSignalPrice(selectedSignal.stop_loss, selectedSignal.quote_asset || selectedSignal.symbol, selectedSignal.market)}; target at {formatSignalPrice(selectedSignal.target, selectedSignal.quote_asset || selectedSignal.symbol, selectedSignal.market)} (Reward/Risk {selectedSignal.risk_reward}).
                 </p>
               </div>
 

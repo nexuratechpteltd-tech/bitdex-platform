@@ -1,3 +1,4 @@
+import secrets
 import asyncio
 import hashlib
 import logging
@@ -38,23 +39,12 @@ class UnifiedSignalEngine:
     """
 
     @staticmethod
-    def _calculate_indicators(closes: List[float], highs: List[float], lows: List[float]) -> Dict[str, Any]:
-        """Calculates EMA20, EMA50, EMA200, RSI14, MACD(12,26,9), and ATR14 from candle arrays."""
+    def _calculate_indicators(closes: List[float], highs: List[float], lows: List[float], dec_places: int = 8) -> Optional[Dict[str, Any]]:
+        """Calculates EMA20, EMA50, EMA200, RSI14, MACD(12,26,9), and ATR14 from candle arrays.
+        Strict: Returns None if candle history is insufficient (< 20 bars). Zero synthetic fallbacks."""
         n = len(closes)
         if n < 20:
-            c = closes[-1] if closes else 100.0
-            return {
-                "ema20": c * 0.998,
-                "ema50": c * 0.995,
-                "ema200": c * 0.985,
-                "rsi14": 52.0,
-                "macd": 0.15,
-                "macd_signal": 0.10,
-                "macd_hist": 0.05,
-                "atr14": c * 0.015,
-                "high_20": max(highs) if highs else c * 1.02,
-                "low_20": min(lows) if lows else c * 0.98,
-            }
+            return None  # Strict: NEVER fabricate synthetic candles
 
         # EMA helper
         def compute_ema(period: int) -> float:
@@ -108,21 +98,24 @@ class UnifiedSignalEngine:
         high_20 = max(recent_h) if recent_h else closes[-1] * 1.01
         low_20 = min(recent_l) if recent_l else closes[-1] * 0.99
 
+        # Use asset-specific precision (up to 8 decimals for Satoshi/BTC quotes)
+        p = max(5, dec_places)
         return {
-            "ema20": round(ema20, 5),
-            "ema50": round(ema50, 5),
-            "ema200": round(ema200, 5),
+            "ema20": round(ema20, p),
+            "ema50": round(ema50, p),
+            "ema200": round(ema200, p),
             "rsi14": rsi14,
-            "macd": round(macd_line, 5),
-            "macd_signal": round(macd_signal, 5),
-            "macd_hist": round(macd_hist, 5),
-            "atr14": round(atr14, 5),
-            "high_20": round(high_20, 5),
-            "low_20": round(low_20, 5),
+            "macd": round(macd_line, p),
+            "macd_signal": round(macd_signal, p),
+            "macd_hist": round(macd_hist, p),
+            "atr14": round(atr14, p),
+            "high_20": round(high_20, p),
+            "low_20": round(low_20, p),
         }
 
-    async def _fetch_crypto_klines(self, symbol: str) -> Dict[str, Any]:
-        """Fetches 1h klines for Crypto from Binance public API for USDT or BTC pairs."""
+    async def _fetch_crypto_klines(self, symbol: str, dec_places: int = 8) -> Optional[Dict[str, Any]]:
+        """Fetches 1h klines for Crypto from Binance public API for USDT or BTC pairs.
+        Strict: Returns None on failure or insufficient bars. Zero synthetic fallbacks."""
         clean = symbol.upper().replace("/", "").replace(":", "_").strip()
         if "BINANCE" in clean:
             clean = clean.split("BINANCE_")[-1]
@@ -134,32 +127,112 @@ class UnifiedSignalEngine:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     klines = resp.json()
-                    closes = [float(k[4]) for k in klines]
-                    highs = [float(k[2]) for k in klines]
-                    lows = [float(k[3]) for k in klines]
-                    return self._calculate_indicators(closes, highs, lows)
+                    if isinstance(klines, list) and len(klines) >= 20:
+                        closes = [float(k[4]) for k in klines]
+                        highs = [float(k[2]) for k in klines]
+                        lows = [float(k[3]) for k in klines]
+                        return self._calculate_indicators(closes, highs, lows, dec_places=dec_places)
+                    else:
+                        logger.warning(f"Insufficient klines ({len(klines) if isinstance(klines, list) else 0}) for {clean}")
+                        return None
         except Exception as e:
             logger.warning(f"Crypto klines fetch failed for {symbol} ({clean}): {e}")
 
-        ref = 100.0
-        return self._calculate_indicators([ref * (1 + 0.001 * i) for i in range(25)], [ref * 1.01] * 25, [ref * 0.99] * 25)
+        # Strict: NEVER RETURN SYNTHETIC CANDLES
+        return None
 
-    async def _fetch_forex_klines(self, inst_id: str) -> Dict[str, Any]:
-        """Fetches klines for Forex/Metals from ForexMarketDataProvider."""
+    async def _fetch_forex_klines(self, inst_id: str, dec_places: int = 5) -> Optional[Dict[str, Any]]:
+        """Fetches klines for Forex/Metals from ForexMarketDataProvider.
+        Strict: Returns None on failure or insufficient bars. Zero synthetic fallbacks."""
         try:
             kline_resp = await forex_market_data.fetch_klines(inst_id, timeframe="1h", limit=50)
             candles = kline_resp.get("candles", [])
-            if candles:
+            if candles and len(candles) >= 20:
                 closes = [c["close"] for c in candles]
                 highs = [c["high"] for c in candles]
                 lows = [c["low"] for c in candles]
-                return self._calculate_indicators(closes, highs, lows)
+                return self._calculate_indicators(closes, highs, lows, dec_places=dec_places)
         except Exception as e:
             logger.warning(f"Forex klines fetch failed for {inst_id}: {e}")
 
-        inst = INSTRUMENT_REGISTRY.get(inst_id, {})
-        ref = 1.1000
-        return self._calculate_indicators([ref] * 25, [ref * 1.005] * 25, [ref * 0.995] * 25)
+        # Strict: NEVER RETURN SYNTHETIC CANDLES
+        return None
+
+    def _build_unavailable_signal(
+        self,
+        instrument_id: str,
+        symbol: str,
+        name: str,
+        market: str,
+        asset_class: str,
+        status_code: str,
+        status_reason: str,
+        base_asset: Optional[str] = None,
+        quote_asset: Optional[str] = None,
+        current_price: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Constructs an explicit non-signal record conforming to the status contract."""
+        now_ts = int(time.time())
+        return {
+            "signal_id": f"sig-{secrets.token_hex(6)}",
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "name": name,
+            "market": market,
+            "asset_class": asset_class,
+            "base_asset": base_asset or (symbol.split("/")[0] if "/" in symbol else symbol),
+            "quote_asset": quote_asset or (symbol.split("/")[1] if "/" in symbol else "USD"),
+            "direction": "NONE",
+            "direction_label": status_code.replace("_", " "),
+            "spot_disclaimer": None,
+            "tab_category": "ALL",
+            "pattern": "None",
+            "score": 0,
+            "score_label": "N/A",
+            "score_disclaimer": status_reason,
+            "reference_price": current_price,
+            "entry_zone": None,
+            "entry_price": None,
+            "stop_loss": None,
+            "target": None,
+            "target_price": None,
+            "risk_reward": "--",
+            "multi_targets": None,
+            "feasibility": None,
+            "breakeven_guidance": status_reason,
+            "breakeven_analysis": None,
+            "timing": {
+                "is_entry_valid": False,
+                "remaining_entry_seconds": 0,
+                "server_time_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "max_holding_duration_guidance": "N/A (No active signal)"
+            },
+            "published_age": "Current",
+            "status": status_code,
+            "availability_status": status_code,
+            "status_explanation": status_reason,
+            "checklist": [],
+            "indicators": None,
+            "directional_meter": {
+                "score": None,
+                "state": status_code,
+                "label": status_code.replace("_", " "),
+                "state_color": "#64748b",
+                "midpoint": 50.0,
+                "needle_angle_deg": 0.0,
+                "explanation": status_reason,
+                "disclaimer": "No indicator calculation possible.",
+                "components": {}
+            },
+            "event_risk": {
+                "status": "UNKNOWN",
+                "is_blackout": False,
+                "policy": "CALENDAR_UNAVAILABLE",
+                "reason": "Macro event risk unknown.",
+                "recommendation": "WAIT_OR_MANUAL_VERIFICATION"
+            },
+            "created_at": now_ts
+        }
 
     def _score_and_build_signal(
         self,
@@ -176,7 +249,9 @@ class UnifiedSignalEngine:
         spread_pips: Optional[float] = None,
         session_info: Optional[Dict[str, Any]] = None,
         force_scalp: bool = False,
-        event_risk: Optional[Dict[str, Any]] = None
+        event_risk: Optional[Dict[str, Any]] = None,
+        quote_asset: str = "USDT",
+        dec_places: int = 4
     ) -> Dict[str, Any]:
         """
         Builds a canonical signal card structure with 0-100 technical confirmation score,
@@ -254,8 +329,14 @@ class UnifiedSignalEngine:
             checklist.append("✓ 24/7 Global Spot Liquidity")
             score += 5
 
-        # Decimal precision formatting
-        dec_places = 5 if market in ("FOREX", "METAL") else (4 if current_price < 10.0 else 2)
+        # Decimal precision formatting (respects passed dec_places with asset-specific bounds)
+        is_btc_quote = quote_asset.upper() == "BTC" or symbol.upper().endswith("/BTC")
+        if is_btc_quote or current_price < 0.0001:
+            dec_places = 8
+        elif current_price < 0.01:
+            dec_places = 6
+        elif dec_places < 4 and current_price < 10.0:
+            dec_places = 4
 
         # Determine Direction and Setup Type
         spot_disclaimer = None
@@ -340,9 +421,9 @@ class UnifiedSignalEngine:
         round_trip_friction_bps = 30
         round_trip_friction_pct = 0.30
 
-        gross_tp1_pct = abs(tp1 - entry_price) / max(entry_price, 0.0001) * 100.0
-        gross_tp2_pct = abs(tp2 - entry_price) / max(entry_price, 0.0001) * 100.0
-        gross_tp3_pct = abs(tp3 - entry_price) / max(entry_price, 0.0001) * 100.0
+        gross_tp1_pct = abs(tp1 - entry_price) / max(entry_price, 1e-12) * 100.0
+        gross_tp2_pct = abs(tp2 - entry_price) / max(entry_price, 1e-12) * 100.0
+        gross_tp3_pct = abs(tp3 - entry_price) / max(entry_price, 1e-12) * 100.0
 
         net_tp1_pct = max(0.0, gross_tp1_pct - round_trip_friction_pct)
         net_tp2_pct = max(0.0, gross_tp2_pct - round_trip_friction_pct)
@@ -414,7 +495,7 @@ class UnifiedSignalEngine:
             # P_exit * (1 - exit_friction) = P_entry * (1 + entry_friction)
             # P_be = P_entry * (1 + entry_friction) / (1 - exit_friction) ~= P_entry * (1 + 0.0030)
             be_price = round(entry_price * ((1.0 + entry_friction_pct / 100.0) / (1.0 - exit_friction_pct / 100.0)), dec_places)
-            be_buffer_pct = round(((be_price - entry_price) / entry_price) * 100.0, 3)
+            be_buffer_pct = round(((be_price - entry_price) / max(entry_price, 1e-12)) * 100.0, 3)
             breakeven_guidance = (
                 f"Upon TP1 achievement (50% closed), adjust protective stop to estimated true net breakeven "
                 f"at {be_price:,.{dec_places}f} (+{be_buffer_pct:.2f}% buffer covering 30 bps round-trip friction). "
@@ -434,7 +515,7 @@ class UnifiedSignalEngine:
         else:
             # Forex Short: Price must drop by (1 - entry_friction) / (1 + exit_friction) to break even net
             be_price = round(entry_price * ((1.0 - entry_friction_pct / 100.0) / (1.0 + exit_friction_pct / 100.0)), dec_places)
-            be_buffer_pct = round(((be_price - entry_price) / entry_price) * 100.0, 3)
+            be_buffer_pct = round(((be_price - entry_price) / max(entry_price, 1e-12)) * 100.0, 3)
             breakeven_guidance = (
                 f"Upon TP1 achievement (50% closed), adjust protective stop to estimated true net breakeven "
                 f"at {be_price:,.{dec_places}f} ({be_buffer_pct:.2f}% buffer covering 30 bps round-trip friction). "
@@ -590,15 +671,22 @@ class UnifiedSignalEngine:
             "breakeven_analysis": breakeven_analysis,
             "timing": timing,
             "published_age": published_age,
-            "status": "Active",
+            "status": "VALID_SIGNAL",
+            "availability_status": "VALID_SIGNAL",
+            "status_explanation": "Valid signal with calculated entry, TP and SL.",
+            "quote_asset": quote_asset,
+            "entry_price": entry_price,
+            "stop_loss": stop_price,
+            "target": target_price,
+            "target_price": target_price,
             "checklist": checklist[:4],
             "indicators": {
                 "rsi": rsi14,
-                "macd_hist": macd_hist,
-                "ema20": ema20,
-                "ema50": ema50,
-                "ema200": ema200,
-                "atr14": atr14
+                "macd_hist": round(macd_hist, dec_places) if macd_hist is not None else None,
+                "ema20": round(ema20, dec_places) if ema20 is not None else None,
+                "ema50": round(ema50, dec_places) if ema50 is not None else None,
+                "ema200": round(ema200, dec_places) if ema200 is not None else None,
+                "atr14": round(atr14, dec_places) if atr14 is not None else None
             },
             "event_risk": event_risk if event_risk is not None else {
                 "status": "UNKNOWN",
@@ -634,7 +722,7 @@ class UnifiedSignalEngine:
         signals: List[Dict[str, Any]] = []
 
         # 1. Fetch Crypto Market Data
-        crypto_data = await fetch_live_market_data()
+        crypto_data = await fetch_live_market_data(force_refresh=force_refresh)
         
         # 2. Concurrently fetch klines and score Crypto pairs (28 USDT and BTC-quoted pairs)
         crypto_tasks = []
@@ -642,13 +730,7 @@ class UnifiedSignalEngine:
             c_info = crypto_data.get(pair_str)
             if not c_info and "/" in pair_str and pair_str.endswith("/USDT"):
                 c_info = crypto_data.get(pair_str.split("/")[0])
-            if c_info and isinstance(c_info, dict):
-                st = c_info.get("status", c_info.get("market_status"))
-                p = c_info.get("price")
-                if st in ("PASS", "NORMAL") and p is not None and isinstance(p, (int, float)) and math.isfinite(p) and p > 0:
-                    crypto_tasks.append(self._process_crypto_pair(pair_str, c_info))
-                else:
-                    logger.debug(f"Skipping crypto pair {pair_str}: market data unavailable or invalid (status={st}, price={p})")
+            crypto_tasks.append(self._process_crypto_pair(pair_str, c_info or {}))
         
         crypto_results = await asyncio.gather(*crypto_tasks, return_exceptions=True)
         for res in crypto_results:
@@ -710,11 +792,24 @@ class UnifiedSignalEngine:
         _CACHE_TIMESTAMP = now
         return payload
 
-    async def _process_crypto_pair(self, pair_str: str, c_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _process_crypto_pair(self, pair_str: str, c_info: Dict[str, Any]) -> Dict[str, Any]:
         """Processes and scores a single Crypto pair (USDT or BTC quoted) with strict validation."""
-        raw_price = c_info.get("price")
+        base, quote, raw_pair = parse_market_pair(pair_str)
+        is_btc_quote = quote.upper() == "BTC" or pair_str.upper().endswith("/BTC")
+
+        raw_price = c_info.get("price") if c_info else None
         if raw_price is None or not isinstance(raw_price, (int, float)) or not math.isfinite(raw_price) or raw_price <= 0:
-            return None
+            return self._build_unavailable_signal(
+                instrument_id=f"crypto:binance:{raw_pair}",
+                symbol=f"{base}/{quote}",
+                name=f"{base}/{quote} Binance Spot",
+                market="CRYPTO",
+                asset_class="CRYPTO",
+                base_asset=base,
+                quote_asset=quote,
+                status_code="MARKET_DATA_UNAVAILABLE",
+                status_reason=f"Live market data for {base}/{quote} is currently unavailable from Binance."
+            )
 
         price = float(raw_price)
         raw_chg = c_info.get("change_24h")
@@ -723,9 +818,32 @@ class UnifiedSignalEngine:
         raw_vol = c_info.get("volume_24h")
         vol = float(raw_vol) if (raw_vol is not None and isinstance(raw_vol, (int, float)) and math.isfinite(raw_vol) and raw_vol >= 0) else 0.0
 
-        base, quote, raw_pair = parse_market_pair(pair_str)
+        # Determine precision based on quote asset and magnitude
+        if is_btc_quote or price < 0.0001:
+            dec_places = 8
+        elif price < 0.01:
+            dec_places = 6
+        elif price < 1.0:
+            dec_places = 4
+        elif price < 100.0:
+            dec_places = 4
+        else:
+            dec_places = 2
 
-        indicators = await self._fetch_crypto_klines(raw_pair)
+        indicators = await self._fetch_crypto_klines(raw_pair, dec_places=dec_places)
+        if not indicators:
+            return self._build_unavailable_signal(
+                instrument_id=f"crypto:binance:{raw_pair}",
+                symbol=f"{base}/{quote}",
+                name=f"{base}/{quote} Binance Spot",
+                market="CRYPTO",
+                asset_class="CRYPTO",
+                base_asset=base,
+                quote_asset=quote,
+                current_price=price,
+                status_code="INSUFFICIENT_DATA",
+                status_reason=f"Insufficient historical bars for {base}/{quote} to compute reliable technical indicators."
+            )
 
         # Check if suitable for SCALPING (tight range and high 24h volume)
         is_scalp = vol > 500000.0 and abs(chg) < 1.0
@@ -748,7 +866,9 @@ class UnifiedSignalEngine:
             ask=price,
             indicators=indicators,
             force_scalp=is_scalp,
-            event_risk=event_risk
+            event_risk=event_risk,
+            quote_asset=quote,
+            dec_places=dec_places
         )
         if sig:
             sig["base_asset"] = base
@@ -763,7 +883,19 @@ class UnifiedSignalEngine:
     async def _process_forex_symbol(self, inst_id: str, meta: Dict[str, Any], session_info: Dict[str, Any]) -> Dict[str, Any]:
         """Processes and scores a single Forex or Metal asset."""
         ticker = await forex_market_data.fetch_ticker(inst_id)
-        indicators = await self._fetch_forex_klines(inst_id)
+        digits = meta.get("digits", 5)
+        indicators = await self._fetch_forex_klines(inst_id, dec_places=digits)
+        if not indicators:
+            return self._build_unavailable_signal(
+                instrument_id=inst_id,
+                symbol=meta.get("clean_symbol", inst_id),
+                name=meta.get("name", inst_id),
+                market="METAL" if meta.get("asset_class") == "metal" else "FOREX",
+                asset_class=meta.get("asset_class", "fx").upper(),
+                status_code="INSUFFICIENT_DATA",
+                status_reason=f"Insufficient candle history for {inst_id} to compute technical indicators.",
+                current_price=ticker.get("mid", ticker.get("price"))
+            )
         price = ticker.get("mid", ticker.get("price", 1.0))
         chg = ticker.get("change_24h", 0.0)
         bid = ticker.get("bid", price)
