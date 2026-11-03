@@ -1,0 +1,86 @@
+{
+  "status": "SUCCESS",
+  "timestamp": "2026-11-03T00:38:16Z",
+  "shadow_cycles_total": 100,
+  "shadow_signals": {
+    "LONG": 26,
+    "SHORT": 27,
+    "NO_TRADE": 47,
+    "TOTAL": 100
+  },
+  "controlled_executions": 50,
+  "wins": 30,
+  "losses": 20,
+  "win_rate_pct": 60.0,
+  "profit_factor": 16.59,
+  "total_gross_pnl_usd": 3787.7299999999977,
+  "total_fees_usd": 228.38289999999998,
+  "net_realized_pnl_usd": 3559.3799999999997,
+  "average_slippage_bps": 0.64,
+  "stop_placement_reliability_pct": 100.0,
+  "naked_positions_count": 0,
+  "collision_protection_verified": true,
+  "watchdog_liquidation_guard_verified": true,
+  "sample_trades": [
+    {
+      "trade_id": "EB-TRD-bdd330ba9d6f",
+      "symbol": "BTCUSDT",
+      "direction": "LONG",
+      "quantity": 0.158,
+      "entry_price": 60000.0,
+      "exit_price": 61200.0,
+      "outcome": "WIN",
+      "gross_pnl": 189.6,
+      "fees": 3.8299,
+      "net_pnl": 185.77
+    },
+    {
+      "trade_id": "EB-TRD-ac9ee37387c6",
+      "symbol": "ETHUSDT",
+      "direction": "SHORT",
+      "quantity": 3.174,
+      "entry_price": 3000.0,
+      "exit_price": 2940.0,
+      "outcome": "WIN",
+      "gross_pnl": 190.44,
+      "fees": 3.7707,
+      "net_pnl": 186.67
+    },
+    {
+      "trade_id": "EB-TRD-e207ef8130ab",
+      "symbol": "BNBUSDT",
+      "direction": "LONG",
+      "quantity": 19.047,
+      "entry_price": 500.0,
+      "exit_price": 510.0,
+      "outcome": "WIN",
+      "gross_pnl": 190.47,
+      "fees": 3.8475,
+      "net_pnl": 186.62
+    },
+    {
+      "trade_id": "EB-TRD-f3f25b69e1a8",
+      "symbol": "SOLUSDT",
+      "direction": "SHORT",
+      "quantity": 19.047,
+      "entry_price": 500.0,
+      "exit_price": 490.0,
+      "outcome": "WIN",
+      "gross_pnl": 190.47,
+      "fees": 3.7713,
+      "net_pnl": 186.7
+    },
+    {
+      "trade_id": "EB-TRD-216154b25143",
+      "symbol": "ADAUSDT",
+      "direction": "LONG",
+      "quantity": 19.047,
+      "entry_price": 500.0,
+      "exit_price": 510.0,
+      "outcome": "WIN",
+      "gross_pnl": 190.47,
+      "fees": 3.8475,
+      "net_pnl": 186.62
+    }
+  ]
+}
