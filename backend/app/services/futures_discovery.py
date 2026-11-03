@@ -1,6 +1,5 @@
 """
-BITDEX Autonomous Futures Market Discovery Service
-===================================================
+BITDEX Autonomous Futures Market Discovery Service (R4 Specification).
 Scans Binance USD(S)-M Futures universe, dynamically filters eligible trading
 pairs, screens liquidity, spreads, volatility, and filters, and ranks candidate pairs.
 """
@@ -19,9 +18,10 @@ logger = logging.getLogger("bitdex.futures.discovery")
 class MarketDiscoveryService:
     """Discovers and filters eligible Binance USD(S)-M Futures pairs for scalping."""
 
-    DEFAULT_MIN_QUOTE_VOLUME_USD = 20_000_000.0  # $20M 24h volume
+    DEFAULT_MIN_QUOTE_VOLUME_USD = 20_000_000.0  # M 24h volume
     DEFAULT_MAX_SPREAD_RATIO = 0.0005             # 0.05% max spread (5 bps)
     DEFAULT_MAX_DATA_AGE_MS = 3000                # 3 seconds freshness limit
+    MAX_FUNDING_RATE_RATIO = 0.0005               # 0.05% funding rate cap per 8h
 
     def __init__(
         self,
@@ -66,6 +66,22 @@ class MarketDiscoveryService:
                 except (ValueError, TypeError):
                     continue
         return book_map
+
+    def fetch_premium_index(self) -> Dict[str, float]:
+        """GET /fapi/v1/premiumIndex - fetch current funding rates."""
+        try:
+            res = self.adapter._request("GET", "/fapi/v1/premiumIndex")
+            items = res if isinstance(res, list) else [res]
+            funding_map = {}
+            for it in items:
+                sym = it.get("symbol")
+                rate = float(it.get("lastFundingRate", 0.0))
+                if sym:
+                    funding_map[sym] = rate
+            return funding_map
+        except Exception as e:
+            logger.warning("Could not fetch premiumIndex funding rates: %s", str(e))
+            return {}
 
     def fetch_klines(self, symbol: str, interval: str = "5m", limit: int = 30) -> List[Dict[str, Any]]:
         """GET /fapi/v1/klines - fetch recent candles."""
@@ -122,6 +138,7 @@ class MarketDiscoveryService:
         try:
             all_tickers = self.fetch_24hr_tickers()
             book_tickers = self.fetch_book_tickers()
+            funding_rates = self.fetch_premium_index()
         except Exception as e:
             logger.error("Failed to fetch ticker data: %s", str(e))
             return {"status": "FAILED", "error": str(e), "candidates": [], "rejected": []}
@@ -132,8 +149,9 @@ class MarketDiscoveryService:
 
         for t in all_tickers:
             sym = t.get("symbol", "")
-            if not sym.endswith("USDT"):
-                continue  # USDT contracts only
+            # Must be pure ASCII letters ending with USDT
+            if not (sym.endswith("USDT") and sym.isascii() and sym[:-4].isalnum()):
+                continue
 
             if universe_override and sym not in universe_override:
                 continue
@@ -143,15 +161,18 @@ class MarketDiscoveryService:
                 rejected_symbols.append({"symbol": sym, "reason": "SYMBOL_META_NOT_FOUND"})
                 continue
 
-            # 1. Trading status
+            # 1. Trading status & contract type
             if meta.get("status") != "TRADING":
                 rejected_symbols.append({"symbol": sym, "reason": f"STATUS_NOT_TRADING ({meta.get('status')})"})
+                continue
+
+            if meta.get("contractType") not in ("PERPETUAL", None):
+                rejected_symbols.append({"symbol": sym, "reason": f"NON_PERPETUAL_CONTRACT ({meta.get('contractType')})"})
                 continue
 
             # 2. Market data freshness
             close_time = int(t.get("closeTime", 0))
             if close_time > 0 and (now_ms - close_time) > self.max_data_age_ms + 10_000:
-                # Allow testnet leeway of 10s if testnet traffic is slower
                 rejected_symbols.append({"symbol": sym, "reason": "STALE_MARKET_DATA"})
                 continue
 
@@ -172,7 +193,13 @@ class MarketDiscoveryService:
                 rejected_symbols.append({"symbol": sym, "reason": f"SPREAD_TOO_WIDE ({spread_ratio*100:.3f}% > {self.max_spread_ratio*100:.3f}%)"})
                 continue
 
-            # 5. Order book depth (lenient on testnet where order book liquidity is thin)
+            # 5. Funding Rate Check
+            f_rate = funding_rates.get(sym, 0.0)
+            if abs(f_rate) > self.MAX_FUNDING_RATE_RATIO:
+                rejected_symbols.append({"symbol": sym, "reason": f"FUNDING_RATE_EXCESSIVE ({f_rate*100:.4f}% > {self.MAX_FUNDING_RATE_RATIO*100:.2f}%)"})
+                continue
+
+            # 6. Order book depth
             depth_usd = min(b_info["bid"] * b_info["bid_qty"], b_info["ask"] * b_info["ask_qty"])
             min_depth = 100.0 if (self.adapter and getattr(self.adapter, "environment", "") == "testnet") else 1000.0
             if depth_usd < min_depth:
@@ -183,7 +210,6 @@ class MarketDiscoveryService:
             price_change_pct = float(t.get("priceChangePercent", 0.0))
 
             # Eligible! Score and rank
-            # Liquidity score (log volume) + tight spread bonus
             vol_score = min(50.0, math.log10(max(1.0, quote_vol)) * 5.0)
             spread_score = max(0.0, (1.0 - (spread_ratio / self.max_spread_ratio)) * 30.0)
             activity_score = min(20.0, abs(price_change_pct) * 2.0)
@@ -197,6 +223,7 @@ class MarketDiscoveryService:
                 "spread_ratio": round(spread_ratio, 6),
                 "spread_bps": round(spread_ratio * 10000, 2),
                 "depth_usd": round(depth_usd, 2),
+                "funding_rate": round(f_rate, 6),
                 "price_change_pct_24h": price_change_pct,
                 "rank_score": overall_rank_score,
                 "base_asset": meta.get("baseAsset"),
