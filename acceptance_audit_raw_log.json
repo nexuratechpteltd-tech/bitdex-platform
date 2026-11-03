@@ -1,0 +1,100 @@
+{
+  "ITEM_2": [
+    "Auditing live Finance Calendar provider & backend endpoint...",
+    "Direct Provider URL: https://www.financecalendar.com/wp-json/fc/v1/calendar?country=US&impact=high&limit=5",
+    "Direct Provider Status: HTTP 200",
+    "Direct Provider Latency: 459.1ms",
+    "Direct Provider Content-Type: application/json; charset=UTF-8",
+    "Direct Provider Event Count: 4 (Total in range: 4)",
+    "Backend Force-Refresh Status: HTTP 200, Latency: 585.1ms",
+    "Backend Event Count: 100",
+    "Backend Provider Status: AVAILABLE",
+    "Backend PKT Timestamp: 2026-10-23 02:04:50 PKT",
+    "Backend Stale Flag: False",
+    "Backend Cached-Read Status: HTTP 200, Latency: 76.8ms",
+    "Cache Speedup Factor: 7.6x faster on cached hit"
+  ],
+  "ITEM_3": [
+    "Auditing dashboard reverse proxy on port 33900...",
+    "Dashboard Proxy Status: HTTP 200",
+    "Dashboard Proxy Event Count: 100",
+    "First Dashboard Event: [US] EigenLayer investor and contributor monthly vesting window \u2014 October 2026 (2026-10-01 05:00:00 PKT)",
+    "Distinction from Mocks: Event ID 'eigen-investors-contributors-monthly-2025-2027-0014' retrieved directly from Finance Calendar API, not mock fixture"
+  ],
+  "ITEM_4": [
+    "Executing End-to-End Trace of FOMC Rate Decision October 2026...",
+    "Stage 1 (Ingestion): Event ID='fomc-rate-decision-october-2026', Title='FOMC Rate Decision October 2026', Scheduled UTC=2026-10-28T18:00:00+00:00",
+    "Stage 2 (Normalization): PKT='2026-10-28 23:00:00 PKT', Impact='HIGH' (Weight=3), Status='confirmed', Currency='USD'",
+    "Stage 3 (Symbol Relevance): BTCUSDT Currency Filter: ['USD'], Policy='CLEAR', Provider Status='AVAILABLE'",
+    "Stage 4 (Signal Generation): Signal='BTC/USDT', Direction='SELL', Signal Event Risk Status='CLEAR'",
+    "Stage 5 (Frozen Evidence Snapshot): Snapshot ID='SNAP-BINANCE:BTCUSDT:1h:20261022_210455', SHA-256='18f8e21312dc9df349e01dff3f19430f256c416be912931db98b0c90bd7062f5', Calendar Provider Status='AVAILABLE', Event Risk='CLEAR'",
+    "Stage 6 (AI Independent Evaluations):",
+    "  Tauric View: BEARISH | Supporting: 1 | Macro Note: Calendar provider is AVAILABLE; event risk status: CLEAR",
+    "  JeV View: BEARISH | Supporting: 1 | Macro Note: Calendar provider state is AVAILABLE",
+    "Stage 7 (Deterministic Reconciliation): Outcome='APPROVED', Agreement='AGREED', Veto Reasons Count=0",
+    "Stage 8 (Displayed Dashboard Conclusion): Dashboard renders signal card with score 80/100, live event-risk badge 'CLEAR', and attribution to Finance Calendar."
+  ],
+  "ITEM_5": [
+    "Testing economic event scenarios (relevance, currencies, prints, missing forecast)...",
+    "Scenario 5a (Relevant US High-Impact for BTCUSDT): Status='BLACKOUT', is_blackout=True, Recommendation='SUSPEND_ENTRY'",
+    "Scenario 5b (Irrelevant DE Low-Impact for USDCAD): Status='CLEAR', is_blackout=False (Correctly ignored DE for CAD pair)",
+    "Scenario 5c (Multiple Currencies): ECB Rate for EURUSD Status='BLACKOUT', is_blackout=True; for GBPUSD Status='BLACKOUT', is_blackout=True",
+    "Scenario 5d (Released Print - US CPI Beat): Status='EVALUATED', Surprise Diff=0.1, Currency Bias='BULLISH', Crypto Bias='BEARISH'",
+    "Scenario 5e (Missing Forecast/Actual): Status='UNAVAILABLE', Surprise Direction='UNKNOWN', Currency Bias='NEUTRAL', Crypto Bias='NEUTRAL' (No unsupported directional claims)"
+  ],
+  "ITEM_6": [
+    "Testing blackout window boundary precision (Configured: -15m post, +30m pre)...",
+    "Boundary 1 (T - 31m): Status='CLEAR', is_blackout=False [Expected: CLEAR]",
+    "Boundary 2 (T - 29m): Status='BLACKOUT', is_blackout=True, Rec='SUSPEND_ENTRY' [Expected: BLACKOUT]",
+    "Boundary 3 (T exactly at event): Status='BLACKOUT', is_blackout=True [Expected: BLACKOUT]",
+    "Boundary 4 (T + 14m): Status='BLACKOUT', is_blackout=True, Rec='SUSPEND_ENTRY' [Expected: BLACKOUT]",
+    "Boundary 5 (T + 16m): Status='CLEAR', is_blackout=False [Expected: CLEAR]",
+    "Boundary 6 (Reconciliation Blackout Gate): Outcome='WAIT', Veto Reasons=['High-impact event blackout window is active'] [Expected: WAIT due to blackout]"
+  ],
+  "ITEM_7": [
+    "Testing fault injection & resilience (timeout, 429, malformed, empty, stale)...",
+    "Fault 7a (Simulated Timeout): Handled cleanly, returned cached 6 events, Error recorded: 'Network or parsing error connecting to Finance Calendar: '",
+    "Fault 7b (Simulated HTTP 429): Error status='AVAILABLE', Cache preserved with 6 events",
+    "Fault 7c (Malformed Payload): Ingested 3 items with 2 bad timestamps -> Safely yielded 1 valid event without crashing",
+    "Fault 7d (Empty Response): Correctly yielded 0 events without error",
+    "Fault 7e (Stale Cache Detection): is_stale=True, Provider Status='STALE', Event Risk Status='STALE', Policy='CALENDAR_UNAVAILABLE' [Expected: STALE / fail-closed]"
+  ],
+  "ITEM_8": [
+    "Inspecting and executing regression suites (Phase 1, 2, 3A, 3B, Macro)...",
+    "Suite 'Phase 1 Universal API': PASSED in 27.37s | Ran 10 tests in 26.889s (Exit Code: 0)",
+    "Suite 'Phase 2 Capability Discovery': PASSED in 13.09s | Ran 12 tests in 12.591s (Exit Code: 0)",
+    "Suite 'Phase 3A Defect Remediation': PASSED in 30.13s | Ran 12 tests in 28.799s (Exit Code: 0)",
+    "Suite 'Phase 3B Order Lifecycle': PASSED in 3.34s | Ran 15 tests in 1.988s (Exit Code: 0)",
+    "Suite 'Macroeconomic Pipeline': PASSED in 7.31s | TEST SUMMARY: 39 PASSED, 0 FAILED (Exit Code: 0)"
+  ],
+  "ITEM_9": [
+    "Verifying attribution, time zones, bounded retries, and free-tier quota...",
+    "Attribution Text: 'Economic calendar data provided by Finance Calendar'",
+    "Attribution Link: 'https://www.financecalendar.com'",
+    "Cost: '$0.00 (100% Free for keyless and free-key tiers)'",
+    "Keyless Limit: 2000 requests/day",
+    "Cache TTL: 300 seconds (prevents excessive queries)",
+    "Total Requests Made in Staging Session: 1 requests (well within 2,000/day)"
+  ],
+  "ITEM_10": [
+    "Confirming live trading locks and read-only mode...",
+    "Config live_trading_locked: True",
+    "Config read_only_mode: True",
+    "POST /api/v1/orders/live/submit Status: HTTP 403",
+    "Response Body: {\"detail\":\"Live trading is hard-locked (`live_trading_locked=true`). Real exchange order submission is strictly blocked.\"}"
+  ],
+  "ITEM_11": [
+    "Auditing provider adapters and Phase 3C coverage matrix...",
+    "Registered Provider Catalog Count: 9",
+    "Provider 'BITGET' (Bitget (Spot V2)): Market=CRYPTO, Demo=True, Verification=VERIFIED_OFFICIAL_REST_V2",
+    "Provider 'BINANCE' (Binance (Spot)): Market=CRYPTO, Demo=True, Verification=VERIFIED_OFFICIAL_TESTNET",
+    "Provider 'BYBIT' (Bybit (Spot V5)): Market=CRYPTO, Demo=True, Verification=VERIFIED_OFFICIAL_TESTNET",
+    "Provider 'COINBASE' (Coinbase (Advanced Trade)): Market=CRYPTO, Demo=True, Verification=VERIFIED_OFFICIAL_SANDBOX",
+    "Provider 'OKX' (OKX (V5)): Market=CRYPTO, Demo=True, Verification=VERIFIED_OFFICIAL_SIMULATOR",
+    "Provider 'KRAKEN' (Kraken (Spot)): Market=CRYPTO, Demo=False, Verification=UNSUPPORTED_SPOT_DEMO",
+    "Provider 'CUSTOM' (Custom Crypto Exchange (REST API)): Market=CRYPTO, Demo=True, Verification=UNVERIFIED_CUSTOM_ENDPOINT",
+    "Provider 'MT5' (MetaTrader 5 (Web API / Gateway)): Market=FOREX, Demo=True, Verification=VERIFIED_OFFICIAL_GATEWAY",
+    "Provider 'CUSTOM_FOREX' (Custom Forex / CFD Broker (REST API)): Market=FOREX, Demo=True, Verification=UNVERIFIED_CUSTOM_ENDPOINT",
+    "Active Adapter Instances: []"
+  ]
+}

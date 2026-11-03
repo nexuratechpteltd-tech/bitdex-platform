@@ -1,0 +1,9 @@
+# BITDEX Robots Configuration
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /trading/api/
+Disallow: /saas/admin/
+Disallow: /dashboard/
+
+Sitemap: https://bitdex.ltd/sitemap.xml

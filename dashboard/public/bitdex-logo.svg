@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 100" fill="none">
+  <defs>
+    <linearGradient id="btdx_logo_bg" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#090D1A"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="btdx_logo_grad" x1="10" y1="10" x2="90" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#06B6D4"/>
+      <stop offset="50%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+    <linearGradient id="btdx_word_grad" x1="115" y1="25" x2="390" y2="75" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="70%" stop-color="#E2E8F0"/>
+      <stop offset="100%" stop-color="#38BDF8"/>
+    </linearGradient>
+  </defs>
+  <!-- Emblem Box -->
+  <rect x="6" y="6" width="88" height="88" rx="22" fill="url(#btdx_logo_bg)" stroke="url(#btdx_logo_grad)" stroke-width="2.5"/>
+  <polygon points="50,18 78,34 78,66 50,82 22,66 22,34" stroke="url(#btdx_logo_grad)" stroke-width="3.2" stroke-linejoin="round" fill="none"/>
+  <polygon points="50,29 68,39.5 68,60.5 50,71 32,60.5 32,39.5" fill="url(#btdx_logo_grad)" fill-opacity="0.18" stroke="#22D3EE" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M40 37H51.5C55.6 37 58.2 39.4 58.2 42.8C58.2 45.4 56.6 47.2 54.1 47.8C57.1 48.5 59.3 50.6 59.3 53.9C59.3 57.9 56.1 60.8 51.4 60.8H40V37ZM45.6 45.9H50.5C52.4 45.9 53.5 44.9 53.5 43.3C53.5 41.7 52.4 40.7 50.5 40.7H45.6V45.9ZM45.6 57H51C53.1 57 54.4 55.9 54.4 54C54.4 52.1 53.1 51 51 51H45.6V57Z" fill="#F8FAFC"/>
+  <circle cx="50" cy="18" r="3" fill="#22D3EE"/>
+  <circle cx="78" cy="34" r="2.6" fill="#3B82F6"/>
+  <circle cx="78" cy="66" r="2.6" fill="#6366F1"/>
+  <circle cx="50" cy="82" r="3" fill="#818CF8"/>
+  <circle cx="22" cy="66" r="2.6" fill="#3B82F6"/>
+  <circle cx="22" cy="34" r="2.6" fill="#22D3EE"/>
+
+  <!-- BITDEX Geometric Wordmark -->
+  <text x="114" y="61" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="44" font-weight="900" letter-spacing="4" fill="url(#btdx_word_grad)">BITDEX</text>
+  <text x="116" y="81" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" font-weight="700" letter-spacing="3.2" fill="#38BDF8">QUANTITATIVE INTELLIGENCE</text>
+</svg>
