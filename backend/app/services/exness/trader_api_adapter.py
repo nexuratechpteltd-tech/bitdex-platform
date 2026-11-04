@@ -348,6 +348,32 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                         "http_status": res.status_code,
                         "reason": "Invalid Exness Trader API Key or Ed25519 Signature.",
                     }
+                elif res.status_code == 429:
+                    self.is_connected = True
+                    self.broker_authenticated = False
+                    return {
+                        "status": "RATE_LIMITED",
+                        "adapter_connected": True,
+                        "broker_authenticated": False,
+                        "is_mock": False,
+                        "broker_mode": "EXNESS_TRADER_API",
+                        "account_id": self.account_id,
+                        "http_status": 429,
+                        "reason": "Exness Trader API rate limit exceeded.",
+                    }
+                elif res.status_code in (502, 503, 504):
+                    self.is_connected = False
+                    self.broker_authenticated = False
+                    return {
+                        "status": "CLUSTER_UNAVAILABLE",
+                        "adapter_connected": False,
+                        "broker_authenticated": False,
+                        "is_mock": False,
+                        "broker_mode": "EXNESS_TRADER_API",
+                        "account_id": self.account_id,
+                        "http_status": res.status_code,
+                        "reason": "Exness trading cluster temporarily unavailable.",
+                    }
         except (ValueError, PermissionError):
             raise
         except Exception as e:
@@ -508,7 +534,9 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "spread": spec["spread"],
             "time_ms": now_ms,
             "source": "EXNESS_TRADER_API",
-            "is_mock": True,
+            "market_type": "CFD",
+            "feed_type": "EXNESS_CFD_CONTRACT",
+            "is_mock": not self.broker_authenticated,
         }
 
     async def get_historical_candles(
