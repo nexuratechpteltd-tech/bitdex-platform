@@ -227,6 +227,8 @@ class HFTPairedSimulationEngine:
         total_trades = 0
         winning_cycles = 0
         losing_cycles = 0
+        gross_profit = 0.0
+        gross_loss = 0.0
         max_drawdown_usd = 0.0
         peak_equity = 5000.0
         current_equity = 5000.0
@@ -323,17 +325,21 @@ class HFTPairedSimulationEngine:
 
             if cycle_realized > 0:
                 winning_cycles += 1
+                gross_profit += cycle_realized
             else:
                 losing_cycles += 1
+                gross_loss += abs(cycle_realized)
 
             equity_curve.append(round(current_equity, 2))
 
         win_rate = (winning_cycles / total_trades * 100) if total_trades > 0 else 0.0
         profit_factor = (
-            abs(realized_pnl / (losing_cycles * 5.0))
-            if losing_cycles > 0
-            else (999.0 if realized_pnl > 0 else 0.0)
+            round(gross_profit / gross_loss, 2)
+            if gross_loss > 0
+            else (999.0 if gross_profit > 0 else 0.0)
         )
+        avg_win = round(gross_profit / winning_cycles, 2) if winning_cycles > 0 else 0.0
+        avg_loss = round(gross_loss / losing_cycles, 2) if losing_cycles > 0 else 0.0
 
         return {
             "status": "COMPLETED",
@@ -345,8 +351,15 @@ class HFTPairedSimulationEngine:
             "winning_cycles": winning_cycles,
             "losing_cycles": losing_cycles,
             "win_rate_pct": round(win_rate, 2),
+            "profit_factor": profit_factor,
+            "gross_profit_usd": round(gross_profit, 2),
+            "gross_loss_usd": round(gross_loss, 2),
+            "average_win_usd": avg_win,
+            "average_loss_usd": avg_loss,
             "initial_balance_usd": 5000.0,
             "final_equity_usd": round(current_equity, 2),
+            "realized_pnl_usd": round(realized_pnl, 2),
+            "unrealized_pnl_usd": round(worst_floating_pnl, 2),
             "net_simulated_pnl_usd": round(realized_pnl, 2),
             "max_drawdown_usd": round(max_drawdown_usd, 2),
             "max_drawdown_pct": round(max_drawdown_usd / 5000.0 * 100, 2),
@@ -354,7 +367,13 @@ class HFTPairedSimulationEngine:
                 "total_spread_cost_usd": round(total_spread_costs, 2),
                 "total_slippage_cost_usd": round(total_slippage_costs, 2),
                 "total_swap_cost_usd": round(total_swap_costs, 2),
-                "total_friction_usd": round(total_spread_costs + total_slippage_costs, 2),
+                "total_commission_cost_usd": round(self.config.commission_per_lot_round * volume_per_leg * 2 * total_trades, 2),
+                "total_friction_usd": round(total_spread_costs + total_slippage_costs + total_swap_costs, 2),
+            },
+            "residual_directional_exposure": {
+                "typical_unhedged_delta_lots": volume_per_leg,
+                "exposure_state": "ASYMMETRIC_SINGLE_LEG" if winning_cycles > 0 else "FLAT",
+                "risk_warning": "When one leg hits Take Profit, the opposing leg is left unhedged with 100% directional exposure until stop-out or expiration.",
             },
             "regime_at_start": {
                 "regime": regime_eval.regime.value,

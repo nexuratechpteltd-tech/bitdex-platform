@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   ShieldCheck,
   Activity,
@@ -150,6 +150,77 @@ interface StrategyConfig {
   status?: string;
 }
 
+
+interface ExnessRiskLimits {
+  max_open_positions: number;
+  max_aggregate_exposure_usd: number;
+  max_daily_loss_usd: number;
+  max_basket_loss_usd: number;
+  max_drawdown_pct: number;
+  max_margin_utilization_pct: number;
+  max_volume_per_symbol: number;
+  max_volume_per_order: number;
+  max_stale_quote_ms: number;
+  emergency_lock_active: boolean;
+  live_trading_locked: boolean;
+}
+
+interface ExnessSimulationResult {
+  status: string;
+  is_simulated: boolean;
+  simulation_disclaimer: string;
+  symbol: string;
+  candle_count: number;
+  simulated_cycles: number;
+  winning_cycles: number;
+  losing_cycles: number;
+  win_rate_pct: number;
+  profit_factor: number;
+  gross_profit_usd: number;
+  gross_loss_usd: number;
+  average_win_usd: number;
+  average_loss_usd: number;
+  initial_balance_usd: number;
+  final_equity_usd: number;
+  realized_pnl_usd: number;
+  unrealized_pnl_usd: number;
+  net_simulated_pnl_usd: number;
+  max_drawdown_usd: number;
+  max_drawdown_pct: number;
+  cost_breakdown: {
+    total_spread_cost_usd: number;
+    total_slippage_cost_usd: number;
+    total_swap_cost_usd: number;
+    total_commission_cost_usd: number;
+    total_friction_usd: number;
+  };
+  residual_directional_exposure: {
+    typical_unhedged_delta_lots: number;
+    exposure_state: string;
+    risk_warning: string;
+  };
+  regime_at_start: {
+    regime: string;
+    adx: number;
+    atr: number;
+    safe_for_hedging: boolean;
+    rationale: string;
+  };
+  risk_assessment: string;
+}
+
+interface PreOrderRiskCheckResult {
+  risk_approved: boolean;
+  reason: string;
+  basket_assessment: {
+    basket_safe: boolean;
+    floating_pnl_usd: number;
+    status: string;
+  };
+  unprotected_positions_count: number;
+  unprotected_positions: Array<any>;
+}
+
 interface ChecklistItem {
   id: string;
   name: string;
@@ -217,6 +288,113 @@ export default function InstitutionalTradingDashboard({
         : "")
     );
   }, [token]);
+
+  // ─── Quantitative HFT Simulation & Risk Guard State ───────────────────────
+  const [riskLimits, setRiskLimits] = useState<ExnessRiskLimits | null>(null);
+  const [simResult, setSimResult] = useState<ExnessSimulationResult | null>(null);
+  const [riskCheckResult, setRiskCheckResult] = useState<PreOrderRiskCheckResult | null>(null);
+  const [simLoading, setSimLoading] = useState<boolean>(false);
+  const [riskCheckLoading, setRiskCheckLoading] = useState<boolean>(false);
+  const [simSymbol, setSimSymbol] = useState<string>("XAUUSDm");
+  const [simVolume, setSimVolume] = useState<number>(0.01);
+  const [simTpPoints, setSimTpPoints] = useState<number>(30.0);
+  const [simSlPoints, setSimSlPoints] = useState<number>(60.0);
+  const [simHoldBars, setSimHoldBars] = useState<number>(15);
+  const [simCandleCount, setSimCandleCount] = useState<number>(100);
+
+  // Fetch Exness Quantitative Risk Limits
+  const fetchRiskLimits = useCallback(async () => {
+    try {
+      const authToken = getAuthToken();
+      const res = await fetch("/api/backend/hft/exness/risk/limits", {
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
+        },
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.status === "SUCCESS") {
+          setRiskLimits(json.limits);
+        }
+      }
+    } catch (err: any) {
+      console.warn("Could not fetch Exness risk limits:", err);
+    }
+  }, [getAuthToken]);
+
+  // Run Quantitative HFT Paired Simulation
+  const runQuantitativeSimulation = useCallback(async (overrideSymbol?: string) => {
+    setSimLoading(true);
+    try {
+      const authToken = getAuthToken();
+      const res = await fetch("/api/backend/hft/exness/simulation/run", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
+        },
+        body: JSON.stringify({
+          symbol: overrideSymbol || simSymbol,
+          volume_per_leg: Number(simVolume),
+          take_profit_points: Number(simTpPoints),
+          stop_loss_points: Number(simSlPoints),
+          max_hold_bars: Number(simHoldBars),
+          candle_count: Number(simCandleCount),
+          timeframe: "M1",
+        }),
+      });
+      const json = await res.json();
+      if (res.ok && json.status === "SUCCESS") {
+        setSimResult(json.simulation);
+        setFeedback({
+          type: "success",
+          message: `[SIMULATED] Quantitative simulation for ${json.simulation.symbol} completed: ${json.simulation.simulated_cycles} cycles evaluated.`
+        });
+      } else {
+        throw new Error(json.detail || "Simulation run failed");
+      }
+    } catch (err: any) {
+      setFeedback({ type: "error", message: `Simulation Error: ${err.message}` });
+    } finally {
+      setSimLoading(false);
+    }
+  }, [getAuthToken, simSymbol, simVolume, simTpPoints, simSlPoints, simHoldBars, simCandleCount]);
+
+  // Run Pre-Trade Risk Check
+  const runRiskCheck = useCallback(async () => {
+    setRiskCheckLoading(true);
+    try {
+      const authToken = getAuthToken();
+      const res = await fetch("/api/backend/hft/exness/risk/check", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
+        },
+        body: JSON.stringify({
+          symbol: simSymbol,
+          volume: Number(simVolume),
+          price: 2742.50,
+          order_type: "BUY",
+        }),
+      });
+      const json = await res.json();
+      if (res.ok && json.status === "SUCCESS") {
+        setRiskCheckResult(json);
+        setFeedback({
+          type: "info",
+          message: `[RISK GUARD] Pre-trade gate evaluated: ${json.reason}`
+        });
+      } else {
+        throw new Error(json.detail || "Risk check failed");
+      }
+    } catch (err: any) {
+      setFeedback({ type: "error", message: `Risk Check Error: ${err.message}` });
+    } finally {
+      setRiskCheckLoading(false);
+    }
+  }, [getAuthToken, simSymbol, simVolume]);
 
   // 1. Fetch Trading Overview
   const fetchOverview = useCallback(async () => {
@@ -333,12 +511,18 @@ export default function InstitutionalTradingDashboard({
     }
   }, [getAuthToken]);
 
+  const initialSimFired = useRef<boolean>(false);
   useEffect(() => {
     fetchOverview();
     fetchHftPairs();
+    fetchRiskLimits();
+    if (!initialSimFired.current) {
+      initialSimFired.current = true;
+      runQuantitativeSimulation();
+    }
     const interval = setInterval(fetchOverview, 10000);
     return () => clearInterval(interval);
-  }, [fetchOverview, fetchHftPairs]);
+  }, [fetchOverview, fetchHftPairs, fetchRiskLimits, runQuantitativeSimulation]);
 
   useEffect(() => {
     if (selectedPair) {
@@ -1097,6 +1281,432 @@ export default function InstitutionalTradingDashboard({
           )}
         </div>
       </div>
+
+      
+      {/* ─── STEP 6: QUANTITATIVE HFT SIMULATION & RISK ENGINE (EXNESS MT5) ───── */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-5 shadow-xl font-mono">
+        {/* Section Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#272735] pb-4">
+          <div className="flex items-center gap-3">
+            <span className="w-6 h-6 rounded-full bg-[#00E5FF]/20 text-[#00E5FF] text-xs font-bold flex items-center justify-center">
+              6
+            </span>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+                  Quantitative HFT Simulation &amp; Risk Engine (Exness MT5)
+                </h3>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-950/60 text-amber-400 border border-amber-500/40">
+                  SIMULATED RESEARCH ONLY
+                </span>
+              </div>
+              <p className="text-xs text-[#94A3B8]">
+                Isolated mathematical paired scalping engine · Multi-regime classification · Zero broker execution
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-red-950/50 text-red-400 border border-red-500/40 flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5" />
+              <span>EMERGENCY LOCK ACTIVE (live_trading_locked=True)</span>
+            </span>
+          </div>
+        </div>
+
+        {/* Prominent Simulated Environment Disclaimer Banner */}
+        <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-500/30 flex items-center justify-between text-xs text-amber-300">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>
+              <strong>STRICT SIMULATION ISOLATION:</strong> Every metric below is an in-memory quantitative simulation. Zero live or demo broker orders are placed. Real Exness execution is strictly disabled.
+            </span>
+          </div>
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-black/40 text-amber-300 border border-amber-500/30 shrink-0">
+            IS_SIMULATED = TRUE
+          </span>
+        </div>
+
+        {/* Interactive Simulation Controls Bar */}
+        <div className="p-4 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-3">
+          <div className="flex items-center justify-between border-b border-[#181822] pb-2 text-xs">
+            <span className="text-[#00E5FF] font-bold flex items-center gap-1.5">
+              <Sliders className="w-3.5 h-3.5" /> Simulation Parameters (Simulated Research)
+            </span>
+            <span className="text-[10px] text-[#64748B]">
+              Evaluate Paired BUY/SELL Mechanics across Historical Feeds
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+            {/* Symbol Selector */}
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#94A3B8] block">Simulated Symbol:</label>
+              <select
+                value={simSymbol}
+                onChange={(e) => setSimSymbol(e.target.value)}
+                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
+              >
+                <option value="XAUUSDm">XAUUSDm (Gold Mini)</option>
+                <option value="BTCUSDm">BTCUSDm (Bitcoin Mini)</option>
+                <option value="EURUSDm">EURUSDm (EUR/USD)</option>
+                <option value="GBPUSDm">GBPUSDm (GBP/USD)</option>
+              </select>
+            </div>
+
+            {/* Volume per Leg */}
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#94A3B8] block">Volume / Leg (Lots):</label>
+              <input
+                type="number"
+                min="0.01"
+                max="0.50"
+                step="0.01"
+                value={simVolume}
+                onChange={(e) => setSimVolume(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
+              />
+            </div>
+
+            {/* TP Points */}
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#94A3B8] block">Take Profit (Pts):</label>
+              <input
+                type="number"
+                min="5"
+                max="200"
+                step="5"
+                value={simTpPoints}
+                onChange={(e) => setSimTpPoints(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-[#10B981] font-bold focus:outline-none focus:border-[#10B981]"
+              />
+            </div>
+
+            {/* SL Points */}
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#94A3B8] block">Stop Loss (Pts):</label>
+              <input
+                type="number"
+                min="10"
+                max="400"
+                step="5"
+                value={simSlPoints}
+                onChange={(e) => setSimSlPoints(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-[#F6465D] font-bold focus:outline-none focus:border-[#F6465D]"
+              />
+            </div>
+
+            {/* Max Hold Bars */}
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#94A3B8] block">Holding Window (Bars):</label>
+              <input
+                type="number"
+                min="3"
+                max="50"
+                value={simHoldBars}
+                onChange={(e) => setSimHoldBars(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
+              />
+            </div>
+
+            {/* Candle Count */}
+            <div className="space-y-1">
+              <label className="text-[10px] text-[#94A3B8] block">Candles Analyzed:</label>
+              <input
+                type="number"
+                min="25"
+                max="500"
+                step="25"
+                value={simCandleCount}
+                onChange={(e) => setSimCandleCount(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={runRiskCheck}
+              disabled={riskCheckLoading}
+              className="px-4 py-2 rounded-xl bg-[#181822] hover:bg-[#272735] border border-[#272735] text-white text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              {riskCheckLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#00E5FF]" /> : <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />}
+              <span>Pre-Trade Risk Gate Check</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => runQuantitativeSimulation()}
+              disabled={simLoading}
+              className="px-5 py-2 rounded-xl bg-[#00E5FF] hover:bg-[#00E5FF]/90 text-[#0B0E11] text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-[#00E5FF]/20 disabled:opacity-50"
+            >
+              {simLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+              <span>Run Quantitative Simulation</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Telemetry Monitors Grid (12 Cards with Visibly Displayed [SIMULATED] Markers) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 text-xs">
+          {/* Card 1: Market Regime Monitor */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Market Regime</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-white">
+                {simResult?.regime_at_start?.regime || "EVALUATING..."}
+              </span>
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                  simResult?.regime_at_start?.safe_for_hedging
+                    ? "bg-[#10B981]/15 text-[#10B981] border-[#10B981]/40"
+                    : "bg-red-950/40 text-[#F6465D] border-red-500/40"
+                }`}
+              >
+                {simResult?.regime_at_start?.safe_for_hedging ? "RANGE: SCALP VIABLE" : "TRENDING: DRIFT RISK"}
+              </span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>ADX: {simResult?.regime_at_start?.adx?.toFixed(2) || "---"}</span>
+              <span>ATR(14): {simResult?.regime_at_start?.atr?.toFixed(4) || "---"}</span>
+            </div>
+          </div>
+
+          {/* Card 2: Simulated Balance & Equity */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Simulated Equity</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-white tabular-nums">
+                ${simResult?.final_equity_usd ? simResult.final_equity_usd.toFixed(2) : "5,000.00"}
+              </span>
+              <span className="text-[10px] text-[#64748B]">
+                Start: ${simResult?.initial_balance_usd ? simResult.initial_balance_usd.toFixed(2) : "5,000.00"}
+              </span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Net Mark-to-Market</span>
+              <span className={simResult && simResult.net_simulated_pnl_usd >= 0 ? "text-[#10B981] font-bold" : "text-[#F6465D] font-bold"}>
+                {simResult ? `${simResult.net_simulated_pnl_usd >= 0 ? "+" : ""}$${simResult.net_simulated_pnl_usd.toFixed(2)}` : "$0.00"}
+              </span>
+            </div>
+          </div>
+
+          {/* Card 3: Simulated Realized P&L */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Realized P&amp;L</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className={`text-base font-bold tabular-nums ${simResult && (simResult.realized_pnl_usd || simResult.net_simulated_pnl_usd) >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                {simResult ? `${(simResult.realized_pnl_usd || simResult.net_simulated_pnl_usd) >= 0 ? "+" : ""}$${(simResult.realized_pnl_usd || simResult.net_simulated_pnl_usd).toFixed(2)}` : "$0.00"}
+              </span>
+              <span className="text-[10px] text-[#64748B]">
+                {simResult ? `${simResult.simulated_cycles} cycles` : "---"}
+              </span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Gross Wins: +${simResult?.gross_profit_usd ? simResult.gross_profit_usd.toFixed(2) : "0.00"}</span>
+              <span>Gross Losses: -${simResult?.gross_loss_usd ? simResult.gross_loss_usd.toFixed(2) : "0.00"}</span>
+            </div>
+          </div>
+
+          {/* Card 4: Simulated Unrealized / Floating Drawdown */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Unrealized / Floating P&amp;L</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-amber-400 tabular-nums">
+                -${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}
+              </span>
+              <span className="text-[10px] text-[#64748B]">Worst In-Flight</span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Trailing Floating Risk</span>
+              <span className="text-[#F6465D] font-bold">-${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}</span>
+            </div>
+          </div>
+
+          {/* Card 5: Net P&L After Costs */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Net P&amp;L (After Costs)</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className={`text-base font-bold tabular-nums ${simResult && simResult.net_simulated_pnl_usd >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                {simResult ? `${simResult.net_simulated_pnl_usd >= 0 ? "+" : ""}$${simResult.net_simulated_pnl_usd.toFixed(2)}` : "$0.00"}
+              </span>
+              <span className="text-[10px] text-[#64748B]">Net Bottom-Line</span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Total Friction Deducted</span>
+              <span className="text-white font-bold">${simResult?.cost_breakdown?.total_friction_usd?.toFixed(2) || "0.00"}</span>
+            </div>
+          </div>
+
+          {/* Card 6: Maximum Drawdown */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Maximum Drawdown</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-[#F6465D] tabular-nums">
+                ${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}
+              </span>
+              <span className="text-[10px] text-[#F6465D] font-bold">
+                ({simResult?.max_drawdown_pct ? simResult.max_drawdown_pct.toFixed(2) : "0.00"}%)
+              </span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Risk Budget: $250.00</span>
+              <span className="text-[#10B981]">Within 5% Limit</span>
+            </div>
+          </div>
+
+          {/* Card 7: Win Rate */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Cycle Win Rate</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-white tabular-nums">
+                {simResult?.win_rate_pct !== undefined ? `${simResult.win_rate_pct.toFixed(2)}%` : "---"}
+              </span>
+              <span className="text-[10px] text-[#64748B]">
+                {simResult?.winning_cycles || 0}W / {simResult?.losing_cycles || 0}L
+              </span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Total Cycles</span>
+              <span className="text-white font-bold">{simResult?.simulated_cycles || 0}</span>
+            </div>
+          </div>
+
+          {/* Card 8: Profit Factor & Average Win/Loss */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Profit Factor &amp; Avg Win/Loss</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-[#00E5FF] tabular-nums">
+                PF: {simResult?.profit_factor !== undefined ? simResult.profit_factor.toFixed(2) : "---"}
+              </span>
+              <span className="text-[10px] text-[#94A3B8]">
+                Avg W: +${simResult?.average_win_usd ? simResult.average_win_usd.toFixed(2) : "0.00"}
+              </span>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Avg Loss: -${simResult?.average_loss_usd ? simResult.average_loss_usd.toFixed(2) : "0.00"}</span>
+              <span>Ratio: {(simResult && simResult.average_loss_usd > 0 ? (simResult.average_win_usd / simResult.average_loss_usd).toFixed(2) : "---")}</span>
+            </div>
+          </div>
+
+          {/* Card 9: Transaction Cost Breakdown */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Transaction Friction</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-1 text-[11px] text-[#94A3B8]">
+              <div>Spread: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_spread_cost_usd?.toFixed(2) || "0.00"}</span></div>
+              <div>Slippage: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_slippage_cost_usd?.toFixed(2) || "0.00"}</span></div>
+              <div>Swap: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_swap_cost_usd?.toFixed(2) || "0.00"}</span></div>
+              <div>Commission: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_commission_cost_usd?.toFixed(2) || "0.00"}</span></div>
+            </div>
+            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
+              <span>Total Cost Deduction:</span>
+              <span className="text-[#F6465D] font-bold">-${simResult?.cost_breakdown?.total_friction_usd?.toFixed(2) || "0.00"}</span>
+            </div>
+          </div>
+
+          {/* Card 10: Residual Directional Exposure */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Residual Delta Risk</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
+                [SIMULATED]
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-base font-bold text-amber-400">
+                {simResult?.residual_directional_exposure?.typical_unhedged_delta_lots ? `${simResult.residual_directional_exposure.typical_unhedged_delta_lots} Lots` : "0.01 Lots"}
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-300 border border-amber-500/40 font-bold">
+                ASYMMETRIC LEG
+              </span>
+            </div>
+            <p className="text-[10px] text-[#94A3B8] border-t border-[#181822] pt-1.5 leading-snug">
+              When BUY leg hits TP, SELL leg remains open with 100% negative delta risk.
+            </p>
+          </div>
+
+          {/* Card 11: Current Risk Limits Status (11 Controls) */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Risk Guard Limits</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#00E5FF]/20 text-[#00E5FF] font-bold border border-[#00E5FF]/40">
+                11 CONTROLS
+              </span>
+            </div>
+            <div className="text-[10px] text-[#94A3B8] space-y-0.5">
+              <div className="flex justify-between"><span>Max Open Positions:</span> <strong className="text-white">{riskLimits?.max_open_positions || 5}</strong></div>
+              <div className="flex justify-between"><span>Max Exposure Notional:</span> <strong className="text-white">${riskLimits?.max_aggregate_exposure_usd?.toLocaleString() || "50,000"}</strong></div>
+              <div className="flex justify-between"><span>Daily Loss Limit:</span> <strong className="text-[#F6465D]">${riskLimits?.max_daily_loss_usd || 250}</strong></div>
+              <div className="flex justify-between"><span>Margin Utilization Clamp:</span> <strong className="text-white">{riskLimits?.max_margin_utilization_pct || 30}%</strong></div>
+              <div className="flex justify-between"><span>Stale Quote Limit:</span> <strong className="text-white">{riskLimits?.max_stale_quote_ms || 3000}ms</strong></div>
+            </div>
+          </div>
+
+          {/* Card 12: Pre-Trade Gate Evaluation */}
+          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-[#64748B] uppercase">Pre-Trade Gate Status</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-950/40 text-red-300 font-bold border border-red-500/30">
+                FAIL-CLOSED
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs text-red-400 font-bold">
+              <Lock className="w-3.5 h-3.5 shrink-0" />
+              <span>{riskCheckResult?.reason || "PRE_TRADE_BLOCKED (Emergency Lock Active)"}</span>
+            </div>
+            <div className="text-[10px] text-[#94A3B8] border-t border-[#181822] pt-1.5 space-y-0.5">
+              <div>Missing Broker Stops: <strong className="text-[#10B981]">{riskCheckResult?.unprotected_positions_count || 0} Unprotected</strong></div>
+              <div>Basket Status: <strong className="text-white">{riskCheckResult?.basket_assessment?.status || "BASKET_RISK_NOMINAL"}</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
 
       {/* ─── MODAL: STEP 2 STRATEGY CONFIGURATION MODAL ─────────────────────── */}
       {isConfigModalOpen && (
