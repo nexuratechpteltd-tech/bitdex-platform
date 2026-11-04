@@ -30,8 +30,8 @@ interface OverviewViewProps {
 }
 
 export default function OverviewView({
-  balance = 5000.0,
-  equity = 5000.0,
+  balance = 0.0,
+  equity = 0.0,
   unrealizedPnl = 0.0,
   realizedPnl = 0.0,
   exnessConnected = false,

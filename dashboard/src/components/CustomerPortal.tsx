@@ -1594,11 +1594,11 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 min-w-0">
           {currentNav === "OVERVIEW" && (
             <OverviewView
-              balance={balancesData?.total_usd || 5000.0}
-              equity={balancesData?.total_usd || 5000.0}
+              balance={balancesData?.total_usd ?? 0.0}
+              equity={balancesData?.total_usd ?? 0.0}
               unrealizedPnl={0.0}
               realizedPnl={0.0}
-              exnessConnected={false}
+              exnessConnected={Boolean(connections.find(c => (c.provider === "EXNESS" || c.exchange === "EXNESS") && (c.status === "CONNECTED" || c.status === "ACTIVE") && c.is_active))}
               tickerItems={tickerItems || []}
               onNavigate={navigateTo}
               onSelectPair={(p) => {
@@ -1640,7 +1640,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {currentNav === "CONNECTIONS" && (
             <ExchangeConnectionsView
-              exnessConnected={false}
+              exnessConnected={Boolean(connections.find(c => (c.provider === "EXNESS" || c.exchange === "EXNESS") && (c.status === "CONNECTED" || c.status === "ACTIVE") && c.is_active))}
               onRefresh={() => fetchConnections()}
               token={token}
             />
@@ -1652,9 +1652,9 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {currentNav === "BALANCES" && (
             <BalancesView
-              balance={balancesData?.total_usd || 5000.0}
-              equity={balancesData?.total_usd || 5000.0}
-              freeMargin={balancesData?.total_usd || 5000.0}
+              balance={balancesData?.total_usd ?? 0.0}
+              equity={balancesData?.total_usd ?? 0.0}
+              freeMargin={balancesData?.free_margin ?? balancesData?.total_usd ?? 0.0}
               usedMargin={0.0}
               realizedPnl={0.0}
               unrealizedPnl={0.0}
