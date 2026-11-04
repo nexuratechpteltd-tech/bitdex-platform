@@ -1621,6 +1621,8 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
                 // Execution guarded
               }}
               isLoadingPrices={!selectedSearchPair && tickerItems.length === 0}
+              token={token}
+              onNavigateToConnections={() => navigateTo("CONNECTIONS")}
             />
           )}
 
@@ -1640,6 +1642,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             <ExchangeConnectionsView
               exnessConnected={false}
               onRefresh={() => fetchConnections()}
+              token={token}
             />
           )}
 

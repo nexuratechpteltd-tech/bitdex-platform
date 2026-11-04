@@ -204,32 +204,122 @@ def apply_exness_migrations(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE exness_demo_connections ADD COLUMN adapter_mode TEXT DEFAULT 'DETERMINISTIC_MOCK_DEMO';"
             )
             logger.info("Added adapter_mode column to exness_demo_connections.")
+        if "is_preferred" not in columns:
+            conn.execute(
+                "ALTER TABLE exness_demo_connections ADD COLUMN is_preferred INTEGER DEFAULT 0;"
+            )
+            logger.info("Added is_preferred column to exness_demo_connections.")
+        if "account_label" not in columns:
+            conn.execute(
+                "ALTER TABLE exness_demo_connections ADD COLUMN account_label TEXT DEFAULT '';"
+            )
+            logger.info("Added account_label column to exness_demo_connections.")
 
     logger.info("Successfully verified and applied additive Exness schema migrations.")
 
 
-def get_user_exness_connection(conn: sqlite3.Connection, user_id: str, account_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Retrieves the active Exness connection for a user. Supports DEMO and REAL filtering."""
-    if account_type:
+def get_user_exness_connection(
+    conn: sqlite3.Connection,
+    user_id: str,
+    account_type: Optional[str] = None,
+    connection_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Retrieves the active Exness connection for a user with strict tenant isolation.
+    Prioritizes connection_id if supplied, then preferred account, then latest updated.
+    Guarantees no user can access another user's Exness connection.
+    """
+    if connection_id:
         row = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1",
+            (user_id, connection_id),
+        ).fetchone()
+    elif account_type:
+        row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 ORDER BY is_preferred DESC, updated_at DESC LIMIT 1",
             (user_id, account_type.upper()),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY is_preferred DESC, updated_at DESC LIMIT 1",
             (user_id,),
         ).fetchone()
     return dict(row) if row else None
 
 
-def get_all_user_exness_connections(conn: sqlite3.Connection, user_id: str) -> List[Dict[str, Any]]:
-    """Retrieves all active Exness connections (Demo and Real) for a user."""
-    rows = conn.execute(
-        "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY account_type ASC, updated_at DESC",
-        (user_id,),
-    ).fetchall()
+def get_all_user_exness_connections(
+    conn: sqlite3.Connection, user_id: str, account_type: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Retrieves all active Exness connections for a user, isolated by user_id."""
+    if account_type:
+        rows = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 ORDER BY is_preferred DESC, updated_at DESC",
+            (user_id, account_type.upper()),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY account_type ASC, is_preferred DESC, updated_at DESC",
+            (user_id,),
+        ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_user_exness_connection_by_mode(
+    conn: sqlite3.Connection, user_id: str, adapter_mode: str
+) -> Optional[Dict[str, Any]]:
+    """Retrieves the active connection matching a specific adapter mode (e.g. EXNESS_TRADER_API)."""
+    row = conn.execute(
+        "SELECT * FROM exness_demo_connections WHERE user_id = ? AND adapter_mode = ? AND is_active = 1 ORDER BY is_preferred DESC, updated_at DESC LIMIT 1",
+        (user_id, adapter_mode),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def disconnect_exness_connection(
+    conn: sqlite3.Connection, user_id: str, connection_id: str
+) -> bool:
+    """
+    Disconnects and invalidates stored credentials for a customer connection.
+    Enforces strict tenant isolation: user can only disconnect their own connections.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with conn:
+        res = conn.execute(
+            """
+            UPDATE exness_demo_connections
+            SET is_active = 0, is_preferred = 0, encrypted_credentials = '{}', updated_at = ?
+            WHERE user_id = ? AND connection_id = ?
+            """,
+            (now, user_id, connection_id),
+        )
+        return res.rowcount > 0
+
+
+def set_preferred_account(
+    conn: sqlite3.Connection, user_id: str, connection_id: str
+) -> bool:
+    """Sets a customer's connection as the preferred active account for its environment/type."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with conn:
+        row = conn.execute(
+            "SELECT account_type FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1",
+            (user_id, connection_id),
+        ).fetchone()
+        if not row:
+            return False
+        acct_type = row["account_type"]
+
+        # Reset preferred flag on other accounts of same type for this user
+        conn.execute(
+            "UPDATE exness_demo_connections SET is_preferred = 0, updated_at = ? WHERE user_id = ? AND account_type = ?",
+            (now, user_id, acct_type),
+        )
+        # Set preferred on target
+        res = conn.execute(
+            "UPDATE exness_demo_connections SET is_preferred = 1, updated_at = ? WHERE user_id = ? AND connection_id = ?",
+            (now, user_id, connection_id),
+        )
+        return res.rowcount > 0
 
 
 def save_exness_connection(
@@ -240,46 +330,86 @@ def save_exness_connection(
     enc_credentials: Dict[str, Any],
     adapter_mode: str = "DETERMINISTIC_MOCK_DEMO",
     account_type: str = "DEMO",
-    balance: float = 5000.0,
-    equity: float = 5000.0,
-    leverage: int = 2000,
+    balance: float = 0.0,
+    equity: float = 0.0,
+    leverage: int = 200,
     currency: str = "USD",
+    account_label: str = "",
+    is_preferred: int = 1,
 ) -> str:
-    """Creates or updates an Exness connection with explicit adapter_mode and account_type persistence."""
-    conn_id = f"EXN-CONN-{secrets.token_hex(6).upper()}"
+    """Creates or updates an Exness connection with explicit tenant isolation and preference tracking."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     acct_type = (account_type or "DEMO").upper()
 
     with conn:
-        conn.execute(
-            "UPDATE exness_demo_connections SET is_active = 0 WHERE user_id = ? AND account_type = ?",
-            (user_id, acct_type),
-        )
-        conn.execute(
-            """
-            INSERT INTO exness_demo_connections (
-                connection_id, user_id, account_login, server_name, account_type,
-                adapter_mode, encrypted_credentials, is_active, is_read_only, balance_usd,
-                equity_usd, leverage, currency, last_reconciled_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                conn_id,
-                user_id,
-                login,
-                server,
-                acct_type,
-                adapter_mode,
-                json.dumps(enc_credentials),
-                balance,
-                equity,
-                leverage,
-                currency,
-                now,
-                now,
-                now,
-            ),
-        )
+        # If preferred, reset previous preferred of same type for this user
+        if is_preferred:
+            conn.execute(
+                "UPDATE exness_demo_connections SET is_preferred = 0 WHERE user_id = ? AND account_type = ?",
+                (user_id, acct_type),
+            )
+
+        # Check if identical (user_id, account_login, server_name) exists
+        existing = conn.execute(
+            "SELECT connection_id FROM exness_demo_connections WHERE user_id = ? AND account_login = ? AND server_name = ?",
+            (user_id, login, server),
+        ).fetchone()
+
+        if existing:
+            conn_id = existing["connection_id"]
+            conn.execute(
+                """
+                UPDATE exness_demo_connections
+                SET account_type = ?, adapter_mode = ?, encrypted_credentials = ?,
+                    is_active = 1, balance_usd = ?, equity_usd = ?, leverage = ?,
+                    currency = ?, account_label = COALESCE(NULLIF(?, ''), account_label),
+                    is_preferred = ?, updated_at = ?
+                WHERE connection_id = ? AND user_id = ?
+                """,
+                (
+                    acct_type,
+                    adapter_mode,
+                    json.dumps(enc_credentials),
+                    balance,
+                    equity,
+                    leverage,
+                    currency,
+                    account_label,
+                    is_preferred,
+                    now,
+                    conn_id,
+                    user_id,
+                ),
+            )
+        else:
+            conn_id = f"EXN-CONN-{secrets.token_hex(6).upper()}"
+            conn.execute(
+                """
+                INSERT INTO exness_demo_connections (
+                    connection_id, user_id, account_login, server_name, account_type,
+                    adapter_mode, encrypted_credentials, is_active, is_read_only, balance_usd,
+                    equity_usd, leverage, currency, account_label, is_preferred,
+                    last_reconciled_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
+                (
+                    conn_id,
+                    user_id,
+                    login,
+                    server,
+                    acct_type,
+                    adapter_mode,
+                    json.dumps(enc_credentials),
+                    balance,
+                    equity,
+                    leverage,
+                    currency,
+                    account_label,
+                    is_preferred,
+                    now,
+                    now,
+                ),
+            )
     return conn_id
 
 

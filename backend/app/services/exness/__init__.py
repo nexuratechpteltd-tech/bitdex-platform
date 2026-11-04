@@ -1,5 +1,5 @@
 """
-Exness HFT Services Package (Phase 4 Dual-Environment Architecture)
+Exness HFT Services Package (Phase 4.1 Architecture)
 """
 
 from .base_adapter import ExnessBaseAdapter
@@ -12,6 +12,9 @@ from .exness_db import (
     apply_exness_migrations,
     get_user_exness_connection,
     get_all_user_exness_connections,
+    get_user_exness_connection_by_mode,
+    disconnect_exness_connection,
+    set_preferred_account,
     save_exness_connection,
     create_exness_transfer,
     get_exness_transfer_by_idempotency,
@@ -37,6 +40,9 @@ __all__ = [
     "apply_exness_migrations",
     "get_user_exness_connection",
     "get_all_user_exness_connections",
+    "get_user_exness_connection_by_mode",
+    "disconnect_exness_connection",
+    "set_preferred_account",
     "save_exness_connection",
     "create_exness_transfer",
     "get_exness_transfer_by_idempotency",

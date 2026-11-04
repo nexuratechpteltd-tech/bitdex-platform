@@ -32,6 +32,8 @@ interface TradingTerminalViewProps {
   openPositions: any[];
   onInitiateOrder: (spec: any) => void;
   isLoadingPrices?: boolean;
+  token?: string;
+  onNavigateToConnections?: () => void;
 }
 
 export default function TradingTerminalView({
@@ -41,6 +43,8 @@ export default function TradingTerminalView({
   openPositions = [],
   onInitiateOrder,
   isLoadingPrices = false,
+  token,
+  onNavigateToConnections,
 }: TradingTerminalViewProps) {
   const sym = selectedPair?.canonical_symbol || selectedPair?.symbol || "BTC/USDT";
   const market = selectedPair?.market || selectedPair?.asset_class || "CRYPTO";
@@ -462,6 +466,8 @@ export default function TradingTerminalView({
         entryPrice={entryPrice}
         stopLoss={stopLoss}
         takeProfit={takeProfit}
+        token={token}
+        onNavigateToConnections={onNavigateToConnections}
       />
     </div>
   );
