@@ -146,7 +146,7 @@ try {
 
 Write-Host "================================================================================" -ForegroundColor Cyan
 Write-Host "WINDOWS MT5 GATEWAY CONFIGURATION COMPLETE" -ForegroundColor Cyan
-Write-Host "Auth Token: $AuthToken" -ForegroundColor Yellow
+Write-Host "Auth Token: $($AuthToken.Substring(0, 8))...$($AuthToken.Substring($AuthToken.Length - 4)) [MASKED FOR SECURITY]" -ForegroundColor Yellow
 Write-Host "Configured Port: $GatewayPort" -ForegroundColor Yellow
 Write-Host "Staging Allowlist: $StagingIP, $TunnelIP" -ForegroundColor Yellow
 Write-Host "To run in background: Use install_service_nssm.bat" -ForegroundColor Cyan

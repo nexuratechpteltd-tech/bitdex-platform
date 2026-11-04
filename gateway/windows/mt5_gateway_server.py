@@ -39,6 +39,10 @@ logger = logging.getLogger("bitdex.mt5.gateway")
 # 1. Startup Secret Configuration & Validation (Fail-Closed)
 # ─────────────────────────────────────────────────────────────
 
+REVOKED_TOKENS = {
+    "6372b1ea1cd5cdd49100d5369e30bb6b78ca5233bca48d229ac018ee14e7d928",  # Phase 4.3 retired token
+}
+
 WEAK_SECRETS = {
     "bitdex_mt5_gateway_secure_ipc_token_2026",
     "default",
@@ -55,10 +59,11 @@ def validate_gateway_token(token: Optional[str]) -> str:
             "CRITICAL SECURITY FAILURE: EXNESS_GATEWAY_AUTH_TOKEN must be configured with "
             "a strong secret of at least 32 characters. Found missing or insufficient token."
         )
-    if token.strip().lower() in WEAK_SECRETS:
+    clean = token.strip().lower()
+    if clean in WEAK_SECRETS or clean in REVOKED_TOKENS:
         raise RuntimeError(
             "CRITICAL SECURITY FAILURE: EXNESS_GATEWAY_AUTH_TOKEN is using a known weak or "
-            "default value. You must generate a cryptographically strong secret."
+            "revoked value. You must generate a cryptographically strong secret."
         )
     return token.strip()
 
@@ -149,6 +154,15 @@ async def require_gateway_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing X-Gateway-Auth-Token header.",
         )
+
+    # Constant-time comparison against revoked tokens
+    for revoked in REVOKED_TOKENS:
+        if hmac.compare_digest(x_gateway_auth_token.encode("utf-8"), revoked.encode("utf-8")):
+            logger.warning("Gateway authentication rejected: Revoked token presented.")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token revoked: Rotate your gateway authentication token.",
+            )
 
     current_token = GATEWAY_AUTH_TOKEN or os.getenv("EXNESS_GATEWAY_AUTH_TOKEN", "")
     if not current_token:

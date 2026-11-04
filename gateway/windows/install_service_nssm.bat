@@ -42,7 +42,7 @@ echo.
 echo Installing %SERVICE_NAME%...
 %NSSM_CMD% install %SERVICE_NAME% "python.exe" "%APP_DIR%\mt5_gateway_server.py"
 %NSSM_CMD% set %SERVICE_NAME% AppDirectory "%APP_DIR%"
-%NSSM_CMD% set %SERVICE_NAME% Description "BITDEX Exness MT5 Gateway Service (Fail-Closed DEMO API)"
+%NSSM_CMD% set %SERVICE_NAME% Description "BITDEX Exness MT5 Gateway Service (Fail-Closed Dual-Environment DEMO & REAL API)"
 %NSSM_CMD% set %SERVICE_NAME% Start SERVICE_AUTO_START
 %NSSM_CMD% set %SERVICE_NAME% AppStdout "%LOG_DIR%\gateway_stdout.log"
 %NSSM_CMD% set %SERVICE_NAME% AppStderr "%LOG_DIR%\gateway_stderr.log"

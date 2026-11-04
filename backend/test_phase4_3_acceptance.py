@@ -179,8 +179,8 @@ async def run_phase4_3_acceptance():
 
         # ─── TEST 5: Secure Gateway Token Authentication (Entropy & Headers) ─
         try:
-            token = os.getenv("EXNESS_GATEWAY_AUTH_TOKEN", "6372b1ea1cd5cdd49100d5369e30bb6b78ca5233bca48d229ac018ee14e7d928")
-            assert len(token) >= 32, f"Token entropy insufficient: len={len(token)}"
+            token = os.getenv("EXNESS_GATEWAY_AUTH_TOKEN")
+            assert token and len(token) >= 32, "EXNESS_GATEWAY_AUTH_TOKEN missing or has insufficient entropy"
             adapter = ExnessMT5GatewayAdapter(account_id="149827361", server="Exness-MT5Trial", auth_token=token)
             headers = adapter._get_headers()
             assert "X-Gateway-Auth-Token" in headers
