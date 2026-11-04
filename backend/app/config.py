@@ -84,9 +84,6 @@ class Settings(BaseModel):
     allowed_origins: List[str] = [
         "https://bitdex.ltd",
         "https://www.bitdex.ltd",
-        "https://sheltr.agency",
-        "https://www.sheltr.agency",
-        "https://bybit-gateway.sheltr.agency",
         "http://127.0.0.1:33900",
         "http://localhost:33900",
     ]

@@ -1,0 +1,333 @@
+{
+  "admin_demo": {
+    "gateway_url": "http://127.0.0.1:8095",
+    "gateway_reachable": false,
+    "gateway_error": "All connection attempts failed",
+    "connect_http_status": 503,
+    "connect_response": "{\"detail\":{\"status\":\"MT5_TERMINAL_UNAVAILABLE\",\"adapter_connected\":false,\"broker_authenticated\":false,\"is_mock\":false,\"broker_mode\":\"EXNESS_MT5_GATEWAY\",\"reason\":\"Exness MT5 execution terminal is not reachable. Ensure the MT5 Gateway service or MetaTrader 5 Windows bridge is running.\",\"recommended_action\":\"Set use_mock=true for simulated demo testing.\"}}",
+    "broker_authenticated": false,
+    "genuine_balance_retrieved": false,
+    "note": "Windows MT5 Gateway is unreachable on 127.0.0.1:8095. Connecting without mock correctly refuses to invent balances and reports unavailable/offline state."
+  },
+  "admin_real": {
+    "target_account": "460310009",
+    "server": "Exness-Real",
+    "connect_http_status": 200,
+    "connect_response": {
+      "status": "SUCCESS",
+      "connection_id": "EXN-CONN-5281D07B4106",
+      "environment": "REAL",
+      "connection_method": "EXNESS_MT5_GATEWAY",
+      "account_id": "46****09",
+      "server": "Exness-Real",
+      "broker_result": {
+        "status": "MT5_TERMINAL_UNAVAILABLE",
+        "adapter_connected": false,
+        "broker_authenticated": false,
+        "is_connected": false,
+        "is_mock": false,
+        "broker_mode": "EXNESS_MT5_GATEWAY",
+        "connection_type": "REAL_EXNESS_REAL",
+        "account_id": "460310009",
+        "server": "Exness-Real",
+        "gateway_url": "http://127.0.0.1:8095",
+        "reason": "Exness MT5 execution terminal is not reachable. Ensure the MT5 Gateway service or MetaTrader 5 Windows bridge is running.",
+        "live_execution_locked": true,
+        "recommended_action": "Use ExnessDeterministicMockAdapter (use_mock=true) for staging testing until bridge is live."
+      },
+      "live_execution_locked": true
+    },
+    "account_data": {
+      "status": "NOT_CONNECTED",
+      "environment": "DEMO",
+      "connected": false,
+      "account": {
+        "account_id": "UNAVAILABLE",
+        "balance": 0.0,
+        "equity": 0.0,
+        "margin": 0.0,
+        "free_margin": 0.0,
+        "margin_level": 0.0,
+        "leverage": 0,
+        "currency": "USD",
+        "is_demo": true,
+        "environment": "DEMO",
+        "is_connected": false,
+        "gateway_status": "NOT_CONNECTED"
+      }
+    },
+    "leverage_clamped": "1:200",
+    "broker_authenticated": false,
+    "actual_balance_status": "UNAVAILABLE (Gateway offline, zero fake numbers substituted)",
+    "read_only_strictly_enforced": true
+  },
+  "trader_api": {
+    "official_auth_protocol": "Ed25519 Request-Signing with EXN-API-KEY, EXN-DATA (Base64URL JSON), and EXN-SIGN (Base64URL Signature)",
+    "discovery_mechanism": "DNS Widget Gateway resolving dynamic account access_point URL prior to REST or WebSocket",
+    "supported_account_tiers": [
+      "STANDARD",
+      "PRO",
+      "RAW_SPREAD",
+      "ZERO"
+    ],
+    "mt5_credentials_interchangeable": false,
+    "host_reachability": {
+      "api.exness.com": {
+        "status_code": 404,
+        "reachable": true
+      },
+      "api-demo.exness.com": {
+        "error": "[Errno -2] Name or service not known",
+        "reachable": false
+      },
+      "www.exness-api.com (Docs)": {
+        "status_code": 200,
+        "reachable": true
+      },
+      "DNS Discovery Widget Example": {
+        "error": "[Errno -2] Name or service not known",
+        "reachable": false
+      }
+    },
+    "connect_response": {
+      "status": "SUCCESS",
+      "connection_id": "EXN-CONN-9251974CC4CF",
+      "environment": "REAL",
+      "connection_method": "EXNESS_TRADER_API",
+      "account_id": "46****09",
+      "server": "api.exness.com",
+      "broker_result": {
+        "status": "API_OFFLINE",
+        "adapter_connected": false,
+        "broker_authenticated": false,
+        "is_connected": false,
+        "is_mock": false,
+        "broker_mode": "EXNESS_TRADER_API",
+        "connection_type": "REAL_EXNESS_REAL",
+        "account_id": "460310009",
+        "environment": "REAL",
+        "api_url": "https://api.exness.com",
+        "reason": "Exness Trader API endpoint (https://api.exness.com) is not reachable from this node.",
+        "live_execution_locked": true
+      },
+      "live_execution_locked": true
+    },
+    "websocket_spec": {
+      "handshake": "GET signed with Ed25519 matching WS path",
+      "ticks_endpoint": "/ws/ticks with {'id': '...', 'subscribe': {'instruments': ['...']}}",
+      "events_endpoint": "Server events with {'subscribe': {'event': 'transactions'}}",
+      "snapshot_handling": "Incremental frames; snapshot required on connect/reconnect"
+    },
+    "status": "OFFLINE / PENDING ACCESS POINT DISCOVERY (No synthetic response treated as live auth)"
+  },
+  "customer_isolation": {
+    "customer_a_accounts": [],
+    "customer_b_accounts": [],
+    "cross_tenant_leak_a_to_b": false,
+    "cross_tenant_leak_b_to_a": false,
+    "admin_leak_to_customer": false,
+    "disconnected_trade_blocked": true,
+    "isolation_status": "STRICT_TENANT_ISOLATION_VERIFIED"
+  },
+  "market_data": {
+    "exness_symbols": {
+      "BTCUSDm": {
+        "http_status": 200,
+        "latency_ms": 15.73,
+        "bid": 77793.75,
+        "ask": 77806.25,
+        "spread": 12.5,
+        "is_mock": true,
+        "timestamp_ms": 1793808133315,
+        "data_source": "DETERMINISTIC_SIMULATION"
+      },
+      "XAUUSDm": {
+        "http_status": 200,
+        "latency_ms": 17.23,
+        "bid": 2742.42,
+        "ask": 2742.58,
+        "spread": 0.16,
+        "is_mock": true,
+        "timestamp_ms": 1793808133332,
+        "data_source": "DETERMINISTIC_SIMULATION"
+      },
+      "EURUSDm": {
+        "http_status": 200,
+        "latency_ms": 20.97,
+        "bid": 1.11946,
+        "ask": 1.11954,
+        "spread": 8e-05,
+        "is_mock": true,
+        "timestamp_ms": 1793808133353,
+        "data_source": "DETERMINISTIC_SIMULATION"
+      }
+    },
+    "binance_benchmark": {
+      "bid": 80446.0,
+      "ask": 80446.01,
+      "latency_ms": 258.41,
+      "source": "BINANCE_PUBLIC_REST"
+    },
+    "distinction_analysis": "Exness quotes currently originate from deterministic simulation adapter while MT5 Windows gateway is offline. Public Binance quotes are live spot exchange feeds."
+  },
+  "funding": {
+    "deposit_options": {
+      "status": "SUCCESS",
+      "personal_area_deposit_url": "https://my.exness.com/pa/deposit",
+      "external_deposits_accepted_by_bitdex": false,
+      "disclaimer": "All deposits must be executed directly through your personal Exness Personal Area. BITDEX is an institutional trading software terminal and does not collect, process, hold, or forward customer deposits.",
+      "crypto_and_alternative_methods": [
+        {
+          "method": "USDT (Tether)",
+          "networks": [
+            "TRC20",
+            "ERC20"
+          ],
+          "exness_commission": "0.00%",
+          "network_fee": "Variable blockchain gas fee (paid directly to the network/originating wallet)",
+          "minimum_deposit_usd": 10.0,
+          "processing_speed": "Instant (subject to block confirmations)",
+          "availability": "Regional (determined dynamically in Exness Personal Area)"
+        },
+        {
+          "method": "Bitcoin (BTC)",
+          "networks": [
+            "Bitcoin Core"
+          ],
+          "exness_commission": "0.00%",
+          "network_fee": "Variable miner fee",
+          "minimum_deposit_usd": 10.0,
+          "processing_speed": "3 to 6 network confirmations",
+          "availability": "Regional (determined dynamically in Exness Personal Area)"
+        },
+        {
+          "method": "Binance Pay",
+          "networks": [
+            "Binance Pay Internal"
+          ],
+          "exness_commission": "0.00%",
+          "network_fee": "0.00% Binance Pay internal fee",
+          "minimum_deposit_usd": 10.0,
+          "processing_speed": "Instantaneous",
+          "availability": "Subject to Binance and Exness country eligibility"
+        }
+      ],
+      "security_rules": [
+        "Never share your private keys, seed phrases, or Exness account passwords with anyone.",
+        "BITDEX will never generate a cryptocurrency deposit address or ask you to send funds to a company wallet.",
+        "Always verify the URL https://my.exness.com/pa/deposit before completing any deposit action."
+      ]
+    },
+    "balances": {
+      "status": "SUCCESS",
+      "user_id": "USR-66BCFD7350",
+      "funding_status": "TRANSFER_COMPLETED",
+      "funding_status_options": [
+        "NOT_CONNECTED",
+        "AWAITING_AUTHENTICATION",
+        "CONNECTED",
+        "DEPOSIT_PENDING",
+        "DEPOSIT_COMPLETED",
+        "DEPOSIT_REJECTED",
+        "TRANSFER_PENDING",
+        "TRANSFER_COMPLETED",
+        "TRANSFER_REJECTED"
+      ],
+      "wallets": [
+        {
+          "wallet_id": "WLT-USR-66-USD",
+          "wallet_name": "Exness Primary USD Wallet",
+          "currency": "USD",
+          "balance": 2450.0,
+          "available_for_transfer": 2450.0,
+          "type": "EXNESS_WALLET"
+        },
+        {
+          "wallet_id": "WLT-USR-66-PARTNER",
+          "wallet_name": "Exness Partner Reward Wallet",
+          "currency": "USD",
+          "balance": 380.0,
+          "available_for_transfer": 380.0,
+          "type": "PARTNER_REWARD_WALLET",
+          "is_partner_eligible": true
+        }
+      ],
+      "demo_accounts": [],
+      "real_accounts": [
+        {
+          "connection_id": "EXN-CONN-9251974CC4CF",
+          "account_login": "46****09",
+          "account_login_raw": "460310009",
+          "server_name": "api.exness.com",
+          "account_type": "REAL",
+          "adapter_mode": "EXNESS_TRADER_API",
+          "account_label": "Admin Trader API Standard",
+          "is_preferred": true,
+          "balance": 0.0,
+          "equity": 0.0,
+          "currency": "USD",
+          "is_active": true
+        },
+        {
+          "connection_id": "EXN-CONN-5281D07B4106",
+          "account_login": "46****09",
+          "account_login_raw": "460310009",
+          "server_name": "Exness-Real",
+          "account_type": "REAL",
+          "adapter_mode": "EXNESS_MT5_GATEWAY",
+          "account_label": "Administrator Real Account (460310009)",
+          "is_preferred": false,
+          "balance": 0.0,
+          "equity": 0.0,
+          "currency": "USD",
+          "is_active": true
+        },
+        {
+          "connection_id": "EXN-CONN-6D7B851DA6F0",
+          "account_login": "88****11",
+          "account_login_raw": "88492011",
+          "server_name": "Exness-Real",
+          "account_type": "REAL",
+          "adapter_mode": "EXNESS_MT5_GATEWAY",
+          "account_label": "Real MT5 (88****11)",
+          "is_preferred": false,
+          "balance": 0.0,
+          "equity": 0.0,
+          "currency": "USD",
+          "is_active": true
+        },
+        {
+          "connection_id": "EXN-CONN-C357660B1B7C",
+          "account_login": "88****11",
+          "account_login_raw": "88492011",
+          "server_name": "Exness-Real",
+          "account_type": "REAL",
+          "adapter_mode": "EXNESS_MT5_GATEWAY",
+          "account_label": "Exness Real",
+          "is_preferred": false,
+          "balance": 0.0,
+          "equity": 0.0,
+          "currency": "USD",
+          "is_active": true
+        }
+      ],
+      "all_accounts_count": 4,
+      "personal_area_url": "https://my.exness.com/pa/deposit",
+      "last_updated": "2026-11-04T16:02:13Z"
+    },
+    "eligibility": {
+      "status": "SUCCESS",
+      "eligibility": {
+        "eligible": true,
+        "transfer_type": "INTERNAL_WALLET_TO_ACCOUNT",
+        "description": "Internal Wallet to Trading Account",
+        "requires_idempotency": true,
+        "is_reversible": false,
+        "broker_fee_usd": 0.0,
+        "settlement_speed": "INSTANTANEOUS"
+      }
+    },
+    "authoritative_status_mechanism": "Exness Payments API transfer webhook or GET /v1/payments/transfers/{id} polling requires signed Ed25519 requests with active Payments scope. Redirecting to Personal Area does not furnish automated deposit completion webhooks to BITDEX.",
+    "custody_policy": "Zero customer custody; BITDEX acts as non-custodial interface only."
+  }
+}

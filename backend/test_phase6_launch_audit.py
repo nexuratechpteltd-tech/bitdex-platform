@@ -195,6 +195,7 @@ def run_phase6_launch_audit() -> List[Tuple[int, str, str, str]]:
         assert "*" not in settings.allowed_origins, "Wildcard origin '*' must NOT be in allowed_origins!"
         assert "https://bitdex.ltd" in settings.allowed_origins
         assert "https://www.bitdex.ltd" in settings.allowed_origins
+        assert not any("sheltr.agency" in o for o in settings.allowed_origins), "Obsolete sheltr.agency origin detected!"
 
         results.append((6, "Strict CORS Configuration & Origin Whitelisting", "PASSED",
                         "Allowed origins strictly whitelisted to bitdex.ltd domains; zero wildcard origin with credentials"))
@@ -217,10 +218,14 @@ def run_phase6_launch_audit() -> List[Tuple[int, str, str, str]]:
 
     # ─── TEST 8: API Performance Latency Benchmarks (p50 / p95) ───────────────
     try:
+        session = requests.Session()
+        session.headers.update(headers_cust_a)
+        session.get(f"{BASE_URL}/hft/exness/status", timeout=5)  # HTTP keep-alive warmup
+
         latencies = []
         for _ in range(20):
             t0 = time.perf_counter()
-            r = requests.get(f"{BASE_URL}/hft/exness/status", headers=headers_cust_a, timeout=5)
+            r = session.get(f"{BASE_URL}/hft/exness/status", timeout=5)
             latencies.append((time.perf_counter() - t0) * 1000.0)
 
         latencies.sort()
@@ -228,7 +233,7 @@ def run_phase6_launch_audit() -> List[Tuple[int, str, str, str]]:
         p95 = latencies[int(len(latencies) * 0.95)]
 
         assert p50 < 200.0, f"p50 latency too high: {p50:.2f}ms"
-        assert p95 < 400.0, f"p95 latency too high: {p95:.2f}ms"
+        assert p95 < 250.0, f"p95 latency too high: {p95:.2f}ms"
 
         results.append((8, "API Performance Latency Benchmarks (p50/p95)", "PASSED",
                         f"Core status latency: p50 = {p50:.1f}ms | p95 = {p95:.1f}ms (Target: < 250ms)"))
