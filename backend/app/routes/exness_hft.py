@@ -8,7 +8,7 @@ Specification reference: Master Exness HFT Implementation Specification, Part 4 
 import json
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ..services.saas_db import get_db_connection
@@ -80,15 +80,9 @@ def get_user_adapter(
                     environment=env,
                 )
             elif mode == "EXNESS_TRADER_API":
-                sec = ""
-                try:
-                    dec = ExnessCredentialVault.decrypt_credentials(user_id, db_conn["encrypted_credentials"])
-                    sec = dec.get("password", "") or ""
-                except Exception:
-                    pass
                 adapter = ExnessTraderAPIAdapter(
                     api_key=login,
-                    api_secret=sec,
+                    api_secret="",
                     account_id=login,
                     environment=env,
                 )
@@ -310,6 +304,13 @@ async def connect_exness_demo(
     """
     user_id = user["user_id"]
 
+    clean_login = req.account_login.strip()
+    if not clean_login.isdigit():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid account login format: MetaTrader 5 account numbers must be numeric.",
+        )
+
     # Encrypt credentials via vault
     enc_creds = ExnessCredentialVault.encrypt_credentials(
         user_id=user_id,
@@ -462,6 +463,14 @@ async def connect_exness_real(
     """
     user_id = user["user_id"]
     method = req.connection_method.upper().strip()
+
+    if method == "MT5_GATEWAY":
+        clean_login = req.account_login.strip()
+        if not clean_login.isdigit():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid account login format: MetaTrader 5 account numbers must be numeric.",
+            )
 
     label = req.account_label or (f"Trader API ({mask_id(req.account_login)})" if method == "TRADER_API" else f"Real MT5 ({mask_id(req.account_login)})")
 
