@@ -80,9 +80,15 @@ def get_user_adapter(
                     environment=env,
                 )
             elif mode == "EXNESS_TRADER_API":
+                sec = ""
+                try:
+                    dec = ExnessCredentialVault.decrypt_credentials(user_id, db_conn["encrypted_credentials"])
+                    sec = dec.get("password", "") or ""
+                except Exception:
+                    pass
                 adapter = ExnessTraderAPIAdapter(
                     api_key=login,
-                    api_secret="",
+                    api_secret=sec,
                     account_id=login,
                     environment=env,
                 )
