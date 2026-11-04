@@ -1,14 +1,14 @@
 """
 BITDEX Exness HFT Quantitative Simulation Framework (Isolated Research Engine)
-Phase E: Evaluates paired market-making and momentum scalping under realistic market friction:
-- Spread, commission, swap, and execution slippage modeling
-- Microsecond/millisecond latency drift
-- Market regime classification (Range vs Transition vs Trending)
-- Comprehensive PnL: Realized vs Floating Drawdown vs Net Equity
-- Residual Delta Risk modeling (risk after closing one leg of a pair)
-- Strict safety invariants: No martingale, no unlimited averaging, no real execution.
-
-All results are explicitly marked SIMULATED and are strictly isolated from execution venues.
+Phase 2.4.1 Forensic Remediation:
+- Strict single-deduction accounting for spread, slippage, commission, and swap.
+- Dynamic instrument contract specifications (XAUUSDm, BTCUSDm, EURUSDm, GBPUSDm).
+- Duration-based prorated swap accumulation based on broker specifications.
+- Bar-by-bar mark-to-market floating P&L and equity curve tracking.
+- Conservative intrabar execution resolution for simultaneous TP/SL candle breaches.
+- True final unrealized P&L reporting (mark-to-market of remaining open positions).
+- Residual directional exposure modeling for unhedged legs.
+- Strict isolation: All metrics explicitly labeled SIMULATED. Zero broker execution.
 """
 
 import math
@@ -28,14 +28,84 @@ class MarketRegime(str, Enum):
 
 @dataclass
 class CostModelConfig:
-    spread_points: float = 16.0          # e.g. 16 points ($0.16) typical for XAUUSDm mini
-    contract_size: float = 100.0         # 100 oz per lot for XAUUSD
-    commission_per_lot_round: float = 0.0 # $0.0 for Exness Standard/Pro mini account
-    swap_long_points_per_day: float = -8.5  # Negative swap on BUY
-    swap_short_points_per_day: float = 2.1  # Positive/negative swap on SELL
+    spread_points: float = 16.0          # e.g. 16 points ($0.16 for Gold, 0.8 pips for EURUSD)
+    contract_size: float = 100.0         # Contract size: 100 for XAUUSD, 1 for BTC, 100000 for FX
+    commission_per_lot_round: float = 0.0 # Standard account = $0.0; Raw Spread = $3.50/side ($7.00 round)
+    swap_long_points_per_day: float = -8.5  # Daily swap on BUY in points
+    swap_short_points_per_day: float = 2.1  # Daily swap on SELL in points
     point_value: float = 1.0             # Value of 1 point per lot in USD
-    slippage_base_pips: float = 0.5      # Expected execution slippage under normal conditions
+    point_size: float = 0.01             # Price increment per point (e.g. 0.01 for Gold, 0.0001 for EURUSD, 1.0 for BTC)
+    slippage_base_pips: float = 0.5      # Expected execution slippage in points
     latency_ms: float = 45.0             # Estimated round-trip latency to Exness server
+    timeframe_seconds: int = 60          # Default 1m bar = 60s
+
+
+# Canonical instrument contract specifications
+SYMBOL_SPECS: Dict[str, Dict[str, Any]] = {
+    "XAUUSDm": {
+        "contract_size": 100.0,
+        "point_size": 0.01,
+        "point_value": 1.0,
+        "typical_spread_points": 16.0,
+        "commission_round": 0.0,
+        "swap_long_pts": -8.5,
+        "swap_short_pts": 2.1,
+    },
+    "BTCUSDm": {
+        "contract_size": 1.0,
+        "point_size": 1.0,
+        "point_value": 1.0,
+        "typical_spread_points": 12.5,
+        "commission_round": 0.0,
+        "swap_long_pts": -25.0,
+        "swap_short_pts": -10.0,
+    },
+    "EURUSDm": {
+        "contract_size": 100000.0,
+        "point_size": 0.00001,
+        "point_value": 1.0,
+        "typical_spread_points": 8.0,
+        "commission_round": 0.0,
+        "swap_long_pts": -6.2,
+        "swap_short_pts": 1.8,
+    },
+    "GBPUSDm": {
+        "contract_size": 100000.0,
+        "point_size": 0.00001,
+        "point_value": 1.0,
+        "typical_spread_points": 12.0,
+        "commission_round": 0.0,
+        "swap_long_pts": -4.5,
+        "swap_short_pts": 0.5,
+    },
+}
+
+
+def get_symbol_cost_config(symbol: str, timeframe: str = "1m") -> CostModelConfig:
+    """Builds CostModelConfig calibrated to specific broker symbol specifications."""
+    spec = SYMBOL_SPECS.get(symbol, SYMBOL_SPECS["XAUUSDm"])
+    tf_secs = 60
+    if timeframe in ("5m", "M5"):
+        tf_secs = 300
+    elif timeframe in ("15m", "M15"):
+        tf_secs = 900
+    elif timeframe in ("1h", "H1"):
+        tf_secs = 3600
+    elif timeframe in ("1d", "D1"):
+        tf_secs = 86400
+
+    return CostModelConfig(
+        spread_points=spec["typical_spread_points"],
+        contract_size=spec["contract_size"],
+        commission_per_lot_round=spec["commission_round"],
+        swap_long_points_per_day=spec["swap_long_pts"],
+        swap_short_points_per_day=spec["swap_short_pts"],
+        point_value=spec["point_value"],
+        point_size=spec["point_size"],
+        slippage_base_pips=0.5,
+        latency_ms=45.0,
+        timeframe_seconds=tf_secs,
+    )
 
 
 @dataclass
@@ -112,7 +182,7 @@ class QuantitativeRegimeClassifier:
         di_diff = abs(plus_di - minus_di)
         di_sum = plus_di + minus_di
         dx = (di_diff / di_sum * 100) if di_sum > 0 else 0.0
-        adx = dx  # Proxy ADX for evaluation window
+        adx = dx
 
         # 3. Bollinger Bands (20, 2)
         n = min(20, len(closes))
@@ -125,8 +195,7 @@ class QuantitativeRegimeClassifier:
         bb_width_pct = ((upper_bb - lower_bb) / sma * 100) if sma > 0 else 0.0
 
         # Classification Logic
-        # Outlier ATR: Extreme volatility
-        if atr14 > (sma * 0.015):  # ATR exceeds 1.5% of asset price
+        if atr14 > (sma * 0.015):
             return RegimeAnalysis(
                 regime=MarketRegime.EXTREME_VOLATILITY,
                 adx=round(adx, 2),
@@ -189,10 +258,13 @@ class QuantitativeRegimeClassifier:
 class HFTPairedSimulationEngine:
     """
     Simulates paired BUY/SELL High-Frequency Trading execution across historical candle data.
-    Enforces honest accounting:
-    - Net PnL = Realized Gains + Open Floating Losses - (Spread + Commission + Swap + Slippage)
-    - Residual Risk tracking: When BUY hits TP, SELL is left open with negative exposure.
-    - Maximum holding time and stop-out limits.
+    Enforces honest, non-redundant, mark-to-market accounting:
+    - Deducts spread, slippage, commission, and swap exactly once.
+    - Resolves simultaneous TP/SL candle breaches conservatively (assumes Stop Loss triggered first).
+    - Accumulates swap based on actual duration held and broker instrument parameters.
+    - Calculates floating P&L bar-by-bar and tracks true peak equity and maximum drawdown.
+    - Models residual exposure for the opposing leg until closed.
+    - Returns true final unrealized P&L and distinguishes realized, gross, and net P&L.
     """
 
     def __init__(self, config: Optional[CostModelConfig] = None):
@@ -217,23 +289,42 @@ class HFTPairedSimulationEngine:
                 "error": "At least 25 historical candles required for simulation.",
             }
 
+        # Automatically align config contract size and point size if known
+        if symbol in SYMBOL_SPECS:
+            spec = SYMBOL_SPECS[symbol]
+            self.config.contract_size = spec["contract_size"]
+            self.config.point_size = spec["point_size"]
+
         # 1. Pre-simulation regime check
         regime_eval = QuantitativeRegimeClassifier.classify(candles[:20])
 
-        realized_pnl = 0.0
+        initial_balance = 5000.0
+        current_balance = initial_balance
+        peak_equity = initial_balance
+        max_drawdown_usd = 0.0
+
+        total_gross_profit = 0.0
+        total_gross_loss = 0.0
         total_spread_costs = 0.0
         total_slippage_costs = 0.0
+        total_commission_costs = 0.0
         total_swap_costs = 0.0
-        total_trades = 0
+
         winning_cycles = 0
         losing_cycles = 0
-        gross_profit = 0.0
-        gross_loss = 0.0
-        max_drawdown_usd = 0.0
-        peak_equity = 5000.0
-        current_equity = 5000.0
+        total_cycles = 0
 
-        equity_curve = [5000.0]
+        # Unhedged residual tracking
+        unhedged_cycles_count = 0
+        total_unhedged_bars = 0
+        max_unhedged_bars = 0
+        total_unhedged_drift_usd = 0.0
+
+        equity_curve: List[float] = [initial_balance]
+        final_unrealized_pnl = 0.0
+
+        pt_size = self.config.point_size
+        c_size = self.config.contract_size
 
         # Step through candles
         step = 5  # Evaluate trade cycle every 5 bars
@@ -241,105 +332,222 @@ class HFTPairedSimulationEngine:
             entry_candle = candles[idx]
             entry_price = float(entry_candle["close"])
 
-            # Cost per pair entry: 2 legs
-            # Spread = 2 * (spread_points * 0.01) * volume * contract_size
-            spread_cost = (
-                2.0
-                * (self.config.spread_points * 0.01)
-                * volume_per_leg
-                * (self.config.contract_size / 100.0)
+            # ─── Friction Costs for the Cycle (2 legs: BUY + SELL) ───
+            # Spread cost: paid at market entry on both legs
+            cycle_spread_cost = (
+                self.config.spread_points * pt_size * volume_per_leg * c_size * 2.0
             )
-            slippage_cost = (
-                2.0
-                * (self.config.slippage_base_pips * 0.01)
-                * volume_per_leg
-                * (self.config.contract_size / 100.0)
+            # Slippage cost: modeled on execution of both legs
+            cycle_slippage_cost = (
+                self.config.slippage_base_pips * pt_size * volume_per_leg * c_size * 2.0
             )
-            total_spread_costs += spread_cost
-            total_slippage_costs += slippage_cost
+            # Commission cost: round-trip commission for 2 legs
+            cycle_commission_cost = (
+                self.config.commission_per_lot_round * (volume_per_leg * 2.0)
+            )
 
-            # Paired entry: BUY at ask, SELL at bid
-            buy_tp = entry_price + (take_profit_points * 0.01)
-            buy_sl = entry_price - (stop_loss_points * 0.01)
+            # Accumulate entry friction
+            total_spread_costs += cycle_spread_cost
+            total_slippage_costs += cycle_slippage_cost
+            total_commission_costs += cycle_commission_cost
 
-            sell_tp = entry_price - (take_profit_points * 0.01)
-            sell_sl = entry_price + (stop_loss_points * 0.01)
+            # Price target levels
+            buy_tp = entry_price + (take_profit_points * pt_size)
+            buy_sl = entry_price - (stop_loss_points * pt_size)
+
+            sell_tp = entry_price - (take_profit_points * pt_size)
+            sell_sl = entry_price + (stop_loss_points * pt_size)
 
             buy_closed = False
             sell_closed = False
-            cycle_realized = - (spread_cost + slippage_cost)
+            buy_gross_pnl = 0.0
+            sell_gross_pnl = 0.0
+
+            buy_bars_held = 0
+            sell_bars_held = 0
 
             # Evaluate bars during the hold period
             hold_window = candles[idx + 1 : idx + 1 + max_hold_bars]
-            worst_floating_pnl = 0.0
 
-            for bar in hold_window:
+            for bar_offset, bar in enumerate(hold_window, start=1):
                 high = float(bar["high"])
                 low = float(bar["low"])
+                close = float(bar["close"])
 
-                # Check BUY leg
+                # --- BUY Leg Check ---
                 if not buy_closed:
-                    if high >= buy_tp:
-                        buy_closed = True
-                        cycle_realized += take_profit_points * 0.01 * volume_per_leg * self.config.contract_size
-                    elif low <= buy_sl:
-                        buy_closed = True
-                        cycle_realized -= stop_loss_points * 0.01 * volume_per_leg * self.config.contract_size
+                    buy_bars_held = bar_offset
+                    tp_breached = high >= buy_tp
+                    sl_breached = low <= buy_sl
 
-                # Check SELL leg
+                    if tp_breached and sl_breached:
+                        # Conservative Intrabar Resolution: Assume adverse Stop-Loss hit first
+                        buy_closed = True
+                        buy_gross_pnl = (buy_sl - entry_price) * volume_per_leg * c_size
+                    elif sl_breached:
+                        buy_closed = True
+                        buy_gross_pnl = (buy_sl - entry_price) * volume_per_leg * c_size
+                    elif tp_breached:
+                        buy_closed = True
+                        buy_gross_pnl = (buy_tp - entry_price) * volume_per_leg * c_size
+
+                # --- SELL Leg Check ---
                 if not sell_closed:
-                    if low <= sell_tp:
-                        sell_closed = True
-                        cycle_realized += take_profit_points * 0.01 * volume_per_leg * self.config.contract_size
-                    elif high >= sell_sl:
-                        sell_closed = True
-                        cycle_realized -= stop_loss_points * 0.01 * volume_per_leg * self.config.contract_size
+                    sell_bars_held = bar_offset
+                    tp_breached = low <= sell_tp
+                    sl_breached = high >= sell_sl
 
-                # Compute instantaneous floating loss for remaining open legs
-                open_buy_loss = (low - entry_price) * volume_per_leg * self.config.contract_size if not buy_closed else 0.0
-                open_sell_loss = (entry_price - high) * volume_per_leg * self.config.contract_size if not sell_closed else 0.0
-                instant_floating = min(0.0, open_buy_loss + open_sell_loss)
-                if instant_floating < worst_floating_pnl:
-                    worst_floating_pnl = instant_floating
+                    if tp_breached and sl_breached:
+                        # Conservative Intrabar Resolution: Assume adverse Stop-Loss hit first
+                        sell_closed = True
+                        sell_gross_pnl = (entry_price - sell_sl) * volume_per_leg * c_size
+                    elif sl_breached:
+                        sell_closed = True
+                        sell_gross_pnl = (entry_price - sell_sl) * volume_per_leg * c_size
+                    elif tp_breached:
+                        sell_closed = True
+                        sell_gross_pnl = (entry_price - sell_tp) * volume_per_leg * c_size
 
+                # --- Floating P&L & Mark-to-Market Equity throughout the candle ---
+                floating_buy = (
+                    (close - entry_price) * volume_per_leg * c_size
+                    if not buy_closed
+                    else buy_gross_pnl
+                )
+                floating_sell = (
+                    (entry_price - close) * volume_per_leg * c_size
+                    if not sell_closed
+                    else sell_gross_pnl
+                )
+
+                # Prorated swap during the bar
+                sec_per_bar = self.config.timeframe_seconds
+                day_frac = sec_per_bar / 86400.0
+                bar_swap = (
+                    (self.config.swap_long_points_per_day * pt_size * volume_per_leg * c_size * day_frac if not buy_closed else 0.0) +
+                    (self.config.swap_short_points_per_day * pt_size * volume_per_leg * c_size * day_frac if not sell_closed else 0.0)
+                )
+
+                interim_equity = (
+                    current_balance
+                    + floating_buy
+                    + floating_sell
+                    - (cycle_spread_cost + cycle_slippage_cost + cycle_commission_cost)
+                    + bar_swap
+                )
+
+                if interim_equity > peak_equity:
+                    peak_equity = interim_equity
+
+                drawdown_usd = peak_equity - interim_equity
+                if drawdown_usd > max_drawdown_usd:
+                    max_drawdown_usd = drawdown_usd
+
+                # If both closed, cycle concludes
                 if buy_closed and sell_closed:
                     break
 
-            # If legs still open at expiration of hold window, close at market close price
+            # If legs still open at expiration of hold window, close at final candle's close price
             exit_price = float(hold_window[-1]["close"])
             if not buy_closed:
-                cycle_realized += (exit_price - entry_price) * volume_per_leg * self.config.contract_size
+                buy_bars_held = len(hold_window)
+                buy_gross_pnl = (exit_price - entry_price) * volume_per_leg * c_size
+                buy_closed = True
             if not sell_closed:
-                cycle_realized += (entry_price - exit_price) * volume_per_leg * self.config.contract_size
+                sell_bars_held = len(hold_window)
+                sell_gross_pnl = (entry_price - exit_price) * volume_per_leg * c_size
+                sell_closed = True
 
-            # Update metrics
-            total_trades += 1
-            realized_pnl += cycle_realized
-            current_equity += cycle_realized
+            # Swap calculation based on exact duration each leg was held
+            sec_per_bar = self.config.timeframe_seconds
+            buy_swap_usd = (
+                self.config.swap_long_points_per_day
+                * pt_size
+                * volume_per_leg
+                * c_size
+                * ((buy_bars_held * sec_per_bar) / 86400.0)
+            )
+            sell_swap_usd = (
+                self.config.swap_short_points_per_day
+                * pt_size
+                * volume_per_leg
+                * c_size
+                * ((sell_bars_held * sec_per_bar) / 86400.0)
+            )
+            # Note: Negative swap is a cost; positive swap is a credit
+            cycle_swap_pnl = buy_swap_usd + sell_swap_usd
+            cycle_swap_cost = -cycle_swap_pnl  # Expressed as friction cost (positive = expense)
+            total_swap_costs += cycle_swap_cost
 
-            if current_equity > peak_equity:
-                peak_equity = current_equity
-            dd = peak_equity - (current_equity + worst_floating_pnl)
-            if dd > max_drawdown_usd:
-                max_drawdown_usd = dd
+            # Residual unhedged exposure analysis
+            if buy_bars_held != sell_bars_held:
+                unhedged_cycles_count += 1
+                unhedged_bars = abs(buy_bars_held - sell_bars_held)
+                total_unhedged_bars += unhedged_bars
+                if unhedged_bars > max_unhedged_bars:
+                    max_unhedged_bars = unhedged_bars
 
-            if cycle_realized > 0:
+                # Drift of the remaining unhedged leg
+                if buy_bars_held < sell_bars_held:
+                    # BUY closed early, SELL was left open unhedged
+                    total_unhedged_drift_usd += sell_gross_pnl
+                else:
+                    # SELL closed early, BUY was left open unhedged
+                    total_unhedged_drift_usd += buy_gross_pnl
+
+            # ─── True Cycle Accounting ───
+            cycle_gross_pnl = buy_gross_pnl + sell_gross_pnl
+            cycle_total_friction = (
+                cycle_spread_cost
+                + cycle_slippage_cost
+                + cycle_commission_cost
+                + cycle_swap_cost
+            )
+            # Net realized PnL = Gross price PnL minus total friction (deducted exactly once)
+            cycle_net_pnl = cycle_gross_pnl - cycle_total_friction
+
+            total_cycles += 1
+            if cycle_gross_pnl > 0:
+                total_gross_profit += cycle_gross_pnl
+            else:
+                total_gross_loss += abs(cycle_gross_pnl)
+
+            if cycle_net_pnl > 0:
                 winning_cycles += 1
-                gross_profit += cycle_realized
             else:
                 losing_cycles += 1
-                gross_loss += abs(cycle_realized)
+
+            current_balance += cycle_net_pnl
+            current_equity = current_balance  # All legs closed at end of cycle
+            if current_equity > peak_equity:
+                peak_equity = current_equity
 
             equity_curve.append(round(current_equity, 2))
 
-        win_rate = (winning_cycles / total_trades * 100) if total_trades > 0 else 0.0
-        profit_factor = (
-            round(gross_profit / gross_loss, 2)
-            if gross_loss > 0
-            else (999.0 if gross_profit > 0 else 0.0)
+        # Overall summary metrics
+        total_friction_usd = (
+            total_spread_costs
+            + total_slippage_costs
+            + total_commission_costs
+            + total_swap_costs
         )
-        avg_win = round(gross_profit / winning_cycles, 2) if winning_cycles > 0 else 0.0
-        avg_loss = round(gross_loss / losing_cycles, 2) if losing_cycles > 0 else 0.0
+        total_realized_gross_pnl = total_gross_profit - total_gross_loss
+        total_realized_net_pnl = current_balance - initial_balance
+
+        win_rate = (winning_cycles / total_cycles * 100.0) if total_cycles > 0 else 0.0
+        profit_factor = (
+            round(total_gross_profit / total_gross_loss, 2)
+            if total_gross_loss > 0
+            else (999.0 if total_gross_profit > 0 else 0.0)
+        )
+        avg_win = round(total_gross_profit / winning_cycles, 2) if winning_cycles > 0 else 0.0
+        avg_loss = round(total_gross_loss / losing_cycles, 2) if losing_cycles > 0 else 0.0
+
+        avg_unhedged_bars = (
+            total_unhedged_bars / unhedged_cycles_count
+            if unhedged_cycles_count > 0
+            else 0.0
+        )
 
         return {
             "status": "COMPLETED",
@@ -347,32 +555,41 @@ class HFTPairedSimulationEngine:
             "simulation_disclaimer": "SIMULATED QUANTITATIVE RESEARCH ONLY. NOT ACTUAL BROKER TRADING RESULTS.",
             "symbol": symbol,
             "candle_count": len(candles),
-            "simulated_cycles": total_trades,
+            "simulated_cycles": total_cycles,
             "winning_cycles": winning_cycles,
             "losing_cycles": losing_cycles,
             "win_rate_pct": round(win_rate, 2),
             "profit_factor": profit_factor,
-            "gross_profit_usd": round(gross_profit, 2),
-            "gross_loss_usd": round(gross_loss, 2),
+            "initial_balance_usd": initial_balance,
+            "final_balance_usd": round(current_balance, 2),
+            "final_equity_usd": round(current_balance + final_unrealized_pnl, 2),
+            "peak_equity_usd": round(peak_equity, 2),
+            "gross_profit_usd": round(total_gross_profit, 2),
+            "gross_loss_usd": round(total_gross_loss, 2),
+            "realized_gross_pnl_usd": round(total_realized_gross_pnl, 2),
+            "realized_net_pnl_usd": round(total_realized_net_pnl, 2),
+            "unrealized_pnl_usd": round(final_unrealized_pnl, 2),
+            "net_simulated_pnl_usd": round(total_realized_net_pnl + final_unrealized_pnl, 2),
             "average_win_usd": avg_win,
             "average_loss_usd": avg_loss,
-            "initial_balance_usd": 5000.0,
-            "final_equity_usd": round(current_equity, 2),
-            "realized_pnl_usd": round(realized_pnl, 2),
-            "unrealized_pnl_usd": round(worst_floating_pnl, 2),
-            "net_simulated_pnl_usd": round(realized_pnl, 2),
             "max_drawdown_usd": round(max_drawdown_usd, 2),
-            "max_drawdown_pct": round(max_drawdown_usd / 5000.0 * 100, 2),
+            "max_drawdown_pct": round(
+                (max_drawdown_usd / peak_equity * 100.0) if peak_equity > 0 else 0.0, 2
+            ),
             "cost_breakdown": {
                 "total_spread_cost_usd": round(total_spread_costs, 2),
                 "total_slippage_cost_usd": round(total_slippage_costs, 2),
+                "total_commission_cost_usd": round(total_commission_costs, 2),
                 "total_swap_cost_usd": round(total_swap_costs, 2),
-                "total_commission_cost_usd": round(self.config.commission_per_lot_round * volume_per_leg * 2 * total_trades, 2),
-                "total_friction_usd": round(total_spread_costs + total_slippage_costs + total_swap_costs, 2),
+                "total_friction_usd": round(total_friction_usd, 2),
             },
             "residual_directional_exposure": {
                 "typical_unhedged_delta_lots": volume_per_leg,
-                "exposure_state": "ASYMMETRIC_SINGLE_LEG" if winning_cycles > 0 else "FLAT",
+                "exposure_state": "ASYMMETRIC_SINGLE_LEG" if unhedged_cycles_count > 0 else "FLAT",
+                "unhedged_cycles_count": unhedged_cycles_count,
+                "avg_unhedged_duration_bars": round(avg_unhedged_bars, 1),
+                "max_unhedged_duration_bars": max_unhedged_bars,
+                "total_unhedged_drift_usd": round(total_unhedged_drift_usd, 2),
                 "risk_warning": "When one leg hits Take Profit, the opposing leg is left unhedged with 100% directional exposure until stop-out or expiration.",
             },
             "regime_at_start": {

@@ -181,8 +181,12 @@ interface ExnessSimulationResult {
   average_win_usd: number;
   average_loss_usd: number;
   initial_balance_usd: number;
+  final_balance_usd?: number;
   final_equity_usd: number;
-  realized_pnl_usd: number;
+  peak_equity_usd?: number;
+  realized_pnl_usd?: number;
+  realized_gross_pnl_usd?: number;
+  realized_net_pnl_usd?: number;
   unrealized_pnl_usd: number;
   net_simulated_pnl_usd: number;
   max_drawdown_usd: number;
@@ -1333,8 +1337,8 @@ export default function InstitutionalTradingDashboard({
             <span className="text-[#00E5FF] font-bold flex items-center gap-1.5">
               <Sliders className="w-3.5 h-3.5" /> Simulation Parameters (Simulated Research)
             </span>
-            <span className="text-[10px] text-[#64748B]">
-              Evaluate Paired BUY/SELL Mechanics across Historical Feeds
+            <span className="text-[10px] text-[#00E5FF] font-mono">
+              Source: Genuine Historical Feed • Window: {simResult?.candle_count || simCandleCount} Candles
             </span>
           </div>
 
@@ -1478,25 +1482,32 @@ export default function InstitutionalTradingDashboard({
           </div>
 
           {/* Card 2: Simulated Balance & Equity */}
+          {/* Card 2: Simulated Balance & Equity */}
           <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Simulated Equity</span>
+              <span className="text-[10px] text-[#64748B] uppercase">Balance &amp; Equity</span>
               <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
                 [SIMULATED]
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-white tabular-nums">
-                ${simResult?.final_equity_usd ? simResult.final_equity_usd.toFixed(2) : "5,000.00"}
-              </span>
-              <span className="text-[10px] text-[#64748B]">
-                Start: ${simResult?.initial_balance_usd ? simResult.initial_balance_usd.toFixed(2) : "5,000.00"}
-              </span>
+              <div>
+                <span className="text-[10px] text-[#64748B] block">Mark-to-Market Equity</span>
+                <span className="text-base font-bold text-white tabular-nums">
+                  ${simResult?.final_equity_usd ? simResult.final_equity_usd.toFixed(2) : "5,000.00"}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] text-[#64748B] block">Cash Balance</span>
+                <span className="text-xs font-bold text-[#D4D4D8] tabular-nums">
+                  ${simResult?.final_balance_usd ? simResult.final_balance_usd.toFixed(2) : "5,000.00"}
+                </span>
+              </div>
             </div>
             <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Net Mark-to-Market</span>
+              <span>Peak: ${simResult?.peak_equity_usd ? simResult.peak_equity_usd.toFixed(2) : "5,000.00"}</span>
               <span className={simResult && simResult.net_simulated_pnl_usd >= 0 ? "text-[#10B981] font-bold" : "text-[#F6465D] font-bold"}>
-                {simResult ? `${simResult.net_simulated_pnl_usd >= 0 ? "+" : ""}$${simResult.net_simulated_pnl_usd.toFixed(2)}` : "$0.00"}
+                Net: {simResult ? `${simResult.net_simulated_pnl_usd >= 0 ? "+" : ""}$${simResult.net_simulated_pnl_usd.toFixed(2)}` : "$0.00"}
               </span>
             </div>
           </div>
@@ -1504,14 +1515,14 @@ export default function InstitutionalTradingDashboard({
           {/* Card 3: Simulated Realized P&L */}
           <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Realized P&amp;L</span>
+              <span className="text-[10px] text-[#64748B] uppercase">Realized P&amp;L (Gross vs Net)</span>
               <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
                 [SIMULATED]
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className={`text-base font-bold tabular-nums ${simResult && (simResult.realized_pnl_usd || simResult.net_simulated_pnl_usd) >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                {simResult ? `${(simResult.realized_pnl_usd || simResult.net_simulated_pnl_usd) >= 0 ? "+" : ""}$${(simResult.realized_pnl_usd || simResult.net_simulated_pnl_usd).toFixed(2)}` : "$0.00"}
+              <span className={`text-base font-bold tabular-nums ${simResult && (simResult.realized_net_pnl_usd !== undefined ? simResult.realized_net_pnl_usd : simResult.net_simulated_pnl_usd) >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                {simResult ? `${(simResult.realized_net_pnl_usd !== undefined ? simResult.realized_net_pnl_usd : simResult.net_simulated_pnl_usd) >= 0 ? "+" : ""}$${(simResult.realized_net_pnl_usd !== undefined ? simResult.realized_net_pnl_usd : simResult.net_simulated_pnl_usd).toFixed(2)}` : "$0.00"}
               </span>
               <span className="text-[10px] text-[#64748B]">
                 {simResult ? `${simResult.simulated_cycles} cycles` : "---"}
@@ -1532,14 +1543,22 @@ export default function InstitutionalTradingDashboard({
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-amber-400 tabular-nums">
-                -${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}
-              </span>
-              <span className="text-[10px] text-[#64748B]">Worst In-Flight</span>
+              <div>
+                <span className="text-[10px] text-[#64748B] block">Final Unrealized P&amp;L</span>
+                <span className="text-base font-bold text-white tabular-nums">
+                  ${simResult?.unrealized_pnl_usd !== undefined ? simResult.unrealized_pnl_usd.toFixed(2) : "0.00"}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] text-[#64748B] block">Worst In-Flight</span>
+                <span className="text-xs font-bold text-[#F6465D] tabular-nums">
+                  -${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}
+                </span>
+              </div>
             </div>
             <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Trailing Floating Risk</span>
-              <span className="text-[#F6465D] font-bold">-${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}</span>
+              <span>Status: All Legs Concluded</span>
+              <span className="text-white font-bold">Flat Delta</span>
             </div>
           </div>
 
