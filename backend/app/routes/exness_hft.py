@@ -144,11 +144,14 @@ class PreOrderRiskCheckRequest(BaseModel):
 
 
 class TradeExecutionRequest(BaseModel):
-    environment: str = Field(..., description="'DEMO' or 'REAL'")
+    environment: Optional[str] = Field(default=None, description="'DEMO' or 'REAL'")
+    trade_mode: Optional[str] = Field(default=None, description="Alias for environment ('DEMO' or 'REAL')")
     connection_id: Optional[str] = Field(default=None, description="Customer-selected specific connection ID")
+    account_id: Optional[str] = Field(default=None, description="Optional account login alias")
     symbol: str = Field(..., min_length=3)
     side: str = Field(default="BUY", description="'BUY' or 'SELL'")
-    volume: float = Field(..., gt=0, description="Volume in standard lots")
+    volume: Optional[float] = Field(default=None, gt=0, description="Volume in standard lots")
+    quantity: Optional[float] = Field(default=None, gt=0, description="Alias for volume in standard lots")
     order_type: str = Field(default="MARKET")
     price: Optional[float] = None
     stop_loss: Optional[float] = None
@@ -893,9 +896,14 @@ async def execute_customer_trade(
     # Mandatory $20.00 USD HFT Account Activation Gate
     assert_hft_activated(user)
 
-    env = req.environment.upper().strip()
+    env = (req.environment or req.trade_mode or "DEMO").upper().strip()
     if env not in ("DEMO", "REAL"):
         raise HTTPException(status_code=400, detail="Invalid environment: must be 'DEMO' or 'REAL'.")
+
+    if req.volume is None and req.quantity is not None:
+        req.volume = req.quantity
+    if req.volume is None:
+        raise HTTPException(status_code=400, detail="Volume or quantity is required.")
 
     # 1. Customer account ownership check
     conn = get_db_connection()
@@ -964,7 +972,23 @@ async def execute_customer_trade(
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
-    # 5. If DEMO environment: Execute simulated / mock trade
+    # 5. DEMO environment: also fail-closed while global locks are enabled (no simulated fills with fabricated prices)
+    from ..config import settings as _settings
+    if _settings.live_trading_locked or _settings.read_only_mode:
+        return {
+            "status": "BLOCKED_BY_SAFETY_LOCK",
+            "barrier": "READ_ONLY_MODE",
+            "environment": "DEMO",
+            "account_id": masked_login,
+            "server": db_conn["server_name"],
+            "symbol": req.symbol,
+            "side": req.side.upper(),
+            "volume": req.volume,
+            "message": "Order submission blocked: read_only_mode/live_trading_locked are enabled. No Demo order was submitted and no fill was simulated.",
+            "risk_guard_assessment": {"is_safe": is_safe, "reason": risk_reason},
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
     ticket = f"DEMO-{secrets.token_hex(4).upper()}"
     fill_price = req.price or (2745.50 if "XAU" in req.symbol else 78500.0 if "BTC" in req.symbol else 1.0850)
     spread_pts = 18.0 if "XAU" in req.symbol else 350.0 if "BTC" in req.symbol else 6.0
