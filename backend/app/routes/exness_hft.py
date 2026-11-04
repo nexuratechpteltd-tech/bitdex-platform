@@ -217,6 +217,14 @@ async def connect_exness_demo(
                     "reason": str(exc),
                 },
             )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "status": "CONFIG_ERROR",
+                    "reason": str(exc),
+                },
+            )
 
         # If gateway is offline or unauthenticated, fail closed without accidental mock fallback
         if not conn_res.get("broker_authenticated", False):

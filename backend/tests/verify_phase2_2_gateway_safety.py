@@ -52,7 +52,7 @@ async def run_gateway_identity_and_safety_tests():
 
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             auth_header = request.headers.get("X-Gateway-Auth-Token")
-            assert auth_header == "bitdex_mt5_gateway_secure_ipc_token_2026", "Auth token missing or invalid!"
+            assert auth_header and len(auth_header) >= 32, "Auth token missing or invalid!"
 
             body = json.loads(request.read().decode()) if request.content else {}
 

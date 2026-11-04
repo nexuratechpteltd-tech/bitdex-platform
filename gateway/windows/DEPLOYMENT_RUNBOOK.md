@@ -1,4 +1,4 @@
-# BITDEX — Windows MT5 Gateway Deployment Runbook
+# BITDEX — Windows MT5 Gateway Deployment Runbook (Hardened Phase 2.3.1)
 
 ## 1. Overview
 The BITDEX Exness HFT architecture connects the Linux staging backend (`169.58.218.168`) to a dedicated Windows VPS running the official Exness MetaTrader 5 Terminal and the `bitdex-mt5-gateway` daemon.
@@ -28,6 +28,7 @@ Because MetaTrader 5 requires Windows 64-bit native IPC APIs (`MetaTrader5.dll` 
    - Password: `<your-demo-password>`
    - Server: `Exness-MT5Trial` (or designated trial server)
 4. Ensure the status bar in the bottom right corner turns green with data transfer (e.g. `124/18 kb`).
+5. **Strict DEMO Verification**: The account MUST show as Demo (`trade_mode=0`). Any REAL, LIVE, or CONTEST accounts are rejected by the gateway daemon.
 
 ### Step 2: Install Gateway Python Dependencies
 Open PowerShell or Command Prompt as Administrator:
@@ -36,39 +37,51 @@ cd C:\bitdex-mt5-gateway
 pip install -r requirements.txt
 ```
 
-### Step 3: Run the Gateway Daemon
+### Step 3: Configure Gateway Authentication Secret
+Generate a cryptographically secure 32-byte secret (e.g., via Python):
+```cmd
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+Set the environment variable on the Windows VPS:
+```cmd
+setx EXNESS_GATEWAY_AUTH_TOKEN "your_generated_64_character_hex_token"
+```
+
+### Step 4: Run the Gateway Daemon
 ```cmd
 run_gateway.bat
 ```
-The gateway will start listening on port `8095` with endpoint:
-`http://0.0.0.0:8095`
+The gateway will start listening on port `8095` bound to `127.0.0.1` (or configured private IP).
 
 ---
 
-## 4. Secure Communication & Network Configuration
+## 4. Secure Transport & Network Configuration
+
+**CRITICAL:** The gateway MUST NOT be exposed over unrestricted plain HTTP.
 
 ### Option A: Cloudflare Tunnel / Tailscale / Wireguard (Recommended)
 1. Install Wireguard or Cloudflare Tunnel on the Windows VPS.
-2. Expose port `8095` only to the Linux Staging Server IP (`169.58.218.168`).
-3. Set Windows Firewall rule:
+2. Route traffic securely between the Linux Staging Server (`169.58.218.168`) and the Windows Gateway over an encrypted tunnel.
+3. Restrict Windows Firewall inbound rule strictly to the staging backend IP:
    ```powershell
    New-NetFirewallRule -DisplayName "BITDEX MT5 Gateway" -Direction Inbound -LocalPort 8095 -Protocol TCP -Action Allow -RemoteAddress 169.58.218.168
    ```
 
 ### Option B: TLS Reverse Proxy (Caddy / Nginx on Windows)
-1. Use Caddy on Windows with an SSL certificate for `mt5-gateway-staging.bitdex.ltd`.
+1. Use Caddy or Nginx on Windows with an SSL certificate for `mt5-gateway-staging.bitdex.ltd`.
 2. Reverse proxy `https://mt5-gateway-staging.bitdex.ltd` -> `http://127.0.0.1:8095`.
+3. Configure `REQUIRE_HTTPS=true` and `ALLOWED_CLIENT_IPS=169.58.218.168,127.0.0.1`.
 
 ---
 
 ## 5. Linux Staging Backend Configuration
 
-Once the Windows Gateway is reachable, set the following environment variables in `/opt/tauric-platform-staging/backend/.env`:
+Set the matching credentials in `/opt/tauric-platform-staging/backend/.env`:
 
 ```env
 # Exness MT5 Gateway Configuration
-EXNESS_MT5_GATEWAY_URL="http://<WINDOWS_VPS_IP_OR_HOSTNAME>:8095"
-EXNESS_GATEWAY_AUTH_TOKEN="bitdex_mt5_gateway_secure_ipc_token_2026"
+EXNESS_MT5_GATEWAY_URL="https://<WINDOWS_GATEWAY_HOST_OR_IP>:8095"
+EXNESS_GATEWAY_AUTH_TOKEN="<MATCHING_STRONG_SECRET_MIN_32_CHARS>"
 ```
 
 Reload backend on staging:
@@ -80,10 +93,10 @@ pm2 reload tauric-backend-staging
 
 ## 6. Secure Demo Credential Entry (Zero Chat Exposure)
 
-Do **NOT** paste credentials into chat, commit them to git, or store them in plaintext files.
+Do **NOT** paste passwords or tokens into chat, commit them to git, or store them in plaintext files.
 
 To securely connect the demo account:
-1. Log in to the BITDEX Customer Portal or use the authenticated REST API endpoint:
+1. Submit credentials via the authenticated REST API endpoint:
    ```bash
    POST https://bitdex.ltd/api/v1/hft/exness/demo/connect
    Authorization: Bearer <CUSTOMER_JWT_TOKEN>
@@ -96,6 +109,6 @@ To securely connect the demo account:
      "use_mock": false
    }
    ```
-2. The password is immediately encrypted into the database using AES-256-GCM via `ExnessCredentialVault`.
+2. The password is encrypted in memory using the AES-256-GCM vault with tenant-bound authentication data (`AAD`) and `key_version`.
 3. The password is never logged and never stored in plaintext.
-4. The gateway verifies the account is strictly `DEMO` before completing authentication.
+4. The gateway verifies the account is strictly `DEMO` (`trade_mode=0`) before completing authentication.

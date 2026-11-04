@@ -41,7 +41,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         self.account_id = str(account_id).strip()
         self.server = str(server).strip()
         self.gateway_url = (gateway_url or os.getenv("EXNESS_MT5_GATEWAY_URL", "http://127.0.0.1:8095")).rstrip("/")
-        self.auth_token = auth_token or os.getenv("EXNESS_GATEWAY_AUTH_TOKEN", "bitdex_mt5_gateway_secure_ipc_token_2026")
+        self.auth_token = auth_token or os.getenv("EXNESS_GATEWAY_AUTH_TOKEN")
         self.is_connected = False
         self.broker_authenticated = False
         self.live_execution_locked = True  # Strict safety requirement
@@ -50,7 +50,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
     def _get_headers(self) -> Dict[str, str]:
         return {
             "Content-Type": "application/json",
-            "X-Gateway-Auth-Token": self.auth_token,
+            "X-Gateway-Auth-Token": self.auth_token or "",
             "User-Agent": "Bitdex-HFT-Engine/2.2",
         }
 
@@ -59,6 +59,15 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         Attempts connection and authentication with the MT5 gateway bridge.
         Validates account login, server name, and strictly enforces DEMO account type.
         """
+        # Strict validation: Reject missing or weak gateway token
+        if not self.auth_token or len(self.auth_token.strip()) < 32 or self.auth_token.strip().lower() in (
+            "bitdex_mt5_gateway_secure_ipc_token_2026", "default", "changeme", "password", "secret", "1234567890"
+        ):
+            raise RuntimeError(
+                "CRITICAL SECURITY CONFIGURATION FAILURE: EXNESS_GATEWAY_AUTH_TOKEN must be configured "
+                "with a strong secret (min 32 characters). Default or missing tokens are strictly rejected."
+            )
+
         payload = {
             "login": self.account_id,
             "server": self.server,
@@ -95,16 +104,17 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
                             f"Server mismatch: requested {self.server}, gateway connected to {ret_server}."
                         )
 
-                    # 3. Non-demo rejection
+                    # 3. Non-demo rejection: STRICTLY only DEMO or TRIAL (CONTEST, REAL, LIVE rejected)
                     ret_acct_type = str(data.get("account_type", "")).strip().upper()
-                    if ret_acct_type and ret_acct_type not in ("DEMO", "CONTEST", "TRIAL"):
+                    if not ret_acct_type or ret_acct_type not in ("DEMO", "TRIAL"):
                         self.is_connected = False
                         self.broker_authenticated = False
                         logger.critical(
                             f"REJECTED: Non-demo account type '{ret_acct_type}' detected on staging! Immediate disconnect."
                         )
                         raise PermissionError(
-                            f"CRITICAL REJECTION: Non-demo account type '{ret_acct_type}' is strictly prohibited on staging."
+                            f"CRITICAL REJECTION: Non-demo account type '{ret_acct_type}' is strictly prohibited on staging. "
+                            "Only verified DEMO accounts are authorized."
                         )
 
                     is_auth = bool(data.get("broker_authenticated", False) and data.get("terminal_connected", False))
@@ -200,45 +210,51 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
 
     async def get_symbols(self) -> List[str]:
         if not self.is_connected or not self.broker_authenticated:
-            return []
+            raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 res = await client.get(f"{self.gateway_url}/symbols", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("symbols", [])
-        except Exception:
-            return []
-        return []
+                raise ConnectionError(f"Gateway returned HTTP {res.status_code} querying symbols: {res.text}")
+        except Exception as e:
+            raise ConnectionError(f"Failed to query symbols from gateway: {e}") from e
 
     async def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         if not self.is_connected or not self.broker_authenticated:
-            return None
+            raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 res = await client.get(f"{self.gateway_url}/symbol/{symbol}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("symbol_info")
-        except Exception:
-            return None
-        return None
+                if res.status_code == 404:
+                    return None
+                raise ConnectionError(f"Gateway returned HTTP {res.status_code} for symbol '{symbol}': {res.text}")
+        except Exception as e:
+            if isinstance(e, ConnectionError):
+                raise
+            raise ConnectionError(f"Failed to query symbol info from gateway: {e}") from e
 
     async def get_latest_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
         if not self.is_connected or not self.broker_authenticated:
-            return None
+            raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 res = await client.get(f"{self.gateway_url}/tick/{symbol}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("latest_tick")
-        except Exception:
-            return None
-        return None
+                raise ConnectionError(f"Gateway returned HTTP {res.status_code} for tick '{symbol}': {res.text}")
+        except Exception as e:
+            if isinstance(e, ConnectionError):
+                raise
+            raise ConnectionError(f"Failed to query tick from gateway: {e}") from e
 
     async def get_historical_candles(
         self, symbol: str, timeframe: str = "M1", count: int = 100
     ) -> List[Dict[str, Any]]:
         if not self.is_connected or not self.broker_authenticated:
-            return []
+            raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
                 res = await client.get(
@@ -247,9 +263,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
                 )
                 if res.status_code == 200:
                     return res.json().get("candles", [])
-        except Exception:
-            return []
-        return []
+                raise ConnectionError(f"Gateway returned HTTP {res.status_code} for candles: {res.text}")
+        except Exception as e:
+            if isinstance(e, ConnectionError):
+                raise
+            raise ConnectionError(f"Failed to query candles from gateway: {e}") from e
 
     async def calculate_margin(
         self, symbol: str, order_type: str, volume: float
@@ -265,9 +283,9 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
                 )
                 if res.status_code == 200:
                     return res.json().get("margin_check", {})
+                return {"status": "BLOCKED", "reason": f"GATEWAY_HTTP_{res.status_code}: {res.text}"}
         except Exception as e:
             return {"status": "BLOCKED", "reason": f"GATEWAY_ERROR: {e}"}
-        return {"status": "BLOCKED", "reason": "GATEWAY_ERROR"}
 
     async def submit_order(self, order_req: Dict[str, Any]) -> Dict[str, Any]:
         raise PermissionError(
@@ -291,39 +309,45 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
         if not self.is_connected or not self.broker_authenticated:
-            return []
+            raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 res = await client.get(f"{self.gateway_url}/positions", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("positions", [])
-        except Exception:
-            return []
-        return []
+                raise ConnectionError(f"Gateway returned HTTP {res.status_code} for open positions: {res.text}")
+        except Exception as e:
+            if isinstance(e, ConnectionError):
+                raise
+            raise ConnectionError(f"Failed to query open positions from gateway: {e}") from e
 
     async def get_order_history(self, limit: int = 100) -> List[Dict[str, Any]]:
         if not self.is_connected or not self.broker_authenticated:
-            return []
+            raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 res = await client.get(f"{self.gateway_url}/orders/history?limit={limit}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("orders", [])
-        except Exception:
-            return []
-        return []
+                raise ConnectionError(f"Gateway returned HTTP {res.status_code} for order history: {res.text}")
+        except Exception as e:
+            if isinstance(e, ConnectionError):
+                raise
+            raise ConnectionError(f"Failed to query order history from gateway: {e}") from e
 
     async def get_trade_history(self, limit: int = 100) -> List[Dict[str, Any]]:
         if not self.is_connected or not self.broker_authenticated:
-            return []
+            raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 res = await client.get(f"{self.gateway_url}/trades/history?limit={limit}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("trades", [])
-        except Exception:
-            return []
-        return []
+                raise ConnectionError(f"Gateway returned HTTP {res.status_code} for trade history: {res.text}")
+        except Exception as e:
+            if isinstance(e, ConnectionError):
+                raise
+            raise ConnectionError(f"Failed to query trade history from gateway: {e}") from e
 
     async def verify_protective_stop(self, ticket: str) -> Dict[str, Any]:
         if not self.is_connected or not self.broker_authenticated:
