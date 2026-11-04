@@ -156,6 +156,25 @@ EXNESS_DDL_STATEMENTS = [
         FOREIGN KEY(connection_id) REFERENCES exness_demo_connections(connection_id)
     );
     """,
+    # 8. Exness Payments API Customer Transfers
+    """
+    CREATE TABLE IF NOT EXISTS exness_transfers (
+        transfer_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        transfer_type TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        amount REAL NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        status TEXT NOT NULL,
+        idempotency_key TEXT UNIQUE NOT NULL,
+        broker_transfer_id TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(user_id)
+    );
+    """,
 ]
 
 EXNESS_INDEXES = [
@@ -164,6 +183,8 @@ EXNESS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_exness_basket_user ON exness_hft_baskets(user_id, status);",
     "CREATE INDEX IF NOT EXISTS idx_exness_legs_basket ON exness_hft_orders_and_legs(basket_id);",
     "CREATE INDEX IF NOT EXISTS idx_exness_events_user ON exness_hft_execution_events(user_id, created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_exness_transfers_user ON exness_transfers(user_id, created_at);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_exness_transfers_idemp ON exness_transfers(idempotency_key);",
 ]
 
 
@@ -187,13 +208,28 @@ def apply_exness_migrations(conn: sqlite3.Connection) -> None:
     logger.info("Successfully verified and applied additive Exness schema migrations.")
 
 
-def get_user_exness_connection(conn: sqlite3.Connection, user_id: str) -> Optional[Dict[str, Any]]:
-    """Retrieves the active Exness connection for a user."""
-    row = conn.execute(
-        "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
-        (user_id,),
-    ).fetchone()
+def get_user_exness_connection(conn: sqlite3.Connection, user_id: str, account_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Retrieves the active Exness connection for a user. Supports DEMO and REAL filtering."""
+    if account_type:
+        row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+            (user_id, account_type.upper()),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
     return dict(row) if row else None
+
+
+def get_all_user_exness_connections(conn: sqlite3.Connection, user_id: str) -> List[Dict[str, Any]]:
+    """Retrieves all active Exness connections (Demo and Real) for a user."""
+    rows = conn.execute(
+        "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY account_type ASC, updated_at DESC",
+        (user_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def save_exness_connection(
@@ -203,40 +239,150 @@ def save_exness_connection(
     server: str,
     enc_credentials: Dict[str, Any],
     adapter_mode: str = "DETERMINISTIC_MOCK_DEMO",
+    account_type: str = "DEMO",
     balance: float = 5000.0,
     equity: float = 5000.0,
     leverage: int = 2000,
+    currency: str = "USD",
 ) -> str:
-    """Creates or updates an Exness demo connection with explicit adapter_mode persistence."""
+    """Creates or updates an Exness connection with explicit adapter_mode and account_type persistence."""
     conn_id = f"EXN-CONN-{secrets.token_hex(6).upper()}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    acct_type = (account_type or "DEMO").upper()
 
     with conn:
-        conn.execute("UPDATE exness_demo_connections SET is_active = 0 WHERE user_id = ?", (user_id,))
+        conn.execute(
+            "UPDATE exness_demo_connections SET is_active = 0 WHERE user_id = ? AND account_type = ?",
+            (user_id, acct_type),
+        )
         conn.execute(
             """
             INSERT INTO exness_demo_connections (
                 connection_id, user_id, account_login, server_name, account_type,
                 adapter_mode, encrypted_credentials, is_active, is_read_only, balance_usd,
                 equity_usd, leverage, currency, last_reconciled_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'DEMO', ?, ?, 1, 0, ?, ?, ?, 'USD', ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 conn_id,
                 user_id,
                 login,
                 server,
+                acct_type,
                 adapter_mode,
                 json.dumps(enc_credentials),
                 balance,
                 equity,
                 leverage,
+                currency,
                 now,
                 now,
                 now,
             ),
         )
     return conn_id
+
+
+def create_exness_transfer(
+    conn: sqlite3.Connection,
+    user_id: str,
+    transfer_type: str,
+    source_id: str,
+    destination_id: str,
+    amount: float,
+    currency: str,
+    idempotency_key: str,
+    status: str = "PENDING",
+    broker_transfer_id: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Records an Exness Payments API customer transfer with idempotency key."""
+    transfer_id = f"TRF-{secrets.token_hex(6).upper()}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO exness_transfers (
+                transfer_id, user_id, transfer_type, source_id, destination_id,
+                amount, currency, status, idempotency_key, broker_transfer_id,
+                error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                transfer_id,
+                user_id,
+                transfer_type,
+                source_id,
+                destination_id,
+                amount,
+                currency,
+                status,
+                idempotency_key,
+                broker_transfer_id,
+                error_message,
+                now,
+                now,
+            ),
+        )
+    return {
+        "transfer_id": transfer_id,
+        "user_id": user_id,
+        "transfer_type": transfer_type,
+        "source_id": source_id,
+        "destination_id": destination_id,
+        "amount": amount,
+        "currency": currency,
+        "status": status,
+        "idempotency_key": idempotency_key,
+        "broker_transfer_id": broker_transfer_id,
+        "error_message": error_message,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def get_exness_transfer_by_idempotency(
+    conn: sqlite3.Connection, idempotency_key: str
+) -> Optional[Dict[str, Any]]:
+    """Retrieves an existing transfer by unique idempotency key to prevent double transfers."""
+    row = conn.execute(
+        "SELECT * FROM exness_transfers WHERE idempotency_key = ? LIMIT 1",
+        (idempotency_key,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_exness_transfers(
+    conn: sqlite3.Connection, user_id: str, limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Retrieves customer transfer history."""
+    rows = conn.execute(
+        "SELECT * FROM exness_transfers WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_exness_transfer_status(
+    conn: sqlite3.Connection,
+    transfer_id: str,
+    status: str,
+    broker_transfer_id: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> bool:
+    """Updates status and broker details of an initiated transfer."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with conn:
+        cursor = conn.execute(
+            """
+            UPDATE exness_transfers
+            SET status = ?, broker_transfer_id = COALESCE(?, broker_transfer_id),
+                error_message = COALESCE(?, error_message), updated_at = ?
+            WHERE transfer_id = ?
+            """,
+            (status, broker_transfer_id, error_message, now, transfer_id),
+        )
+        return cursor.rowcount > 0
 
 
 def get_active_local_positions(conn: sqlite3.Connection, user_id: str) -> List[Dict[str, Any]]:

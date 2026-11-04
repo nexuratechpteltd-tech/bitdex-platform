@@ -55,6 +55,7 @@ import PairSearchSelector, { PairItem } from "./search/PairSearchSelector";
 import OverviewView from "./dashboard/OverviewView";
 import TradingTerminalView from "./dashboard/TradingTerminalView";
 import ExchangeConnectionsView from "./dashboard/ExchangeConnectionsView";
+import FundingTransfersView from "./dashboard/FundingTransfersView";
 import BalancesView from "./dashboard/BalancesView";
 import OrdersHoldingsView from "./dashboard/OrdersHoldingsView";
 import CustomerSettingsView from "./dashboard/CustomerSettingsView";
@@ -83,6 +84,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
       if (h === "#long-term" || h === "#signals" || h === "#dashboard") return "LONG_TERM";
       if (h === "#hft" || h === "#scalp") return "HFT";
       if (h === "#connections" || h === "#wallets" || h === "#account") return "CONNECTIONS";
+      if (h === "#funding" || h === "#transfer" || h === "#deposit") return "FUNDING";
       if (h === "#balances") return "BALANCES";
       if (h === "#orders" || h === "#pnl" || h === "#positions" || h === "#holdings") return "ORDERS";
       if (h === "#settings" || h === "#security" || h === "#billing") return "SETTINGS";
@@ -100,6 +102,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
         LONG_TERM: "long-term",
         HFT: "hft",
         CONNECTIONS: "connections",
+        FUNDING: "funding",
         BALANCES: "balances",
         ORDERS: "orders",
         SETTINGS: "settings",
@@ -107,7 +110,26 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
       };
       window.location.hash = hashMap[dest] || "overview";
     }
-    if (dest === "LONG_TERM") {
+  useEffect(() => {
+    const handleHashChange = () => {
+      const h = window.location.hash.toLowerCase();
+      if (h === "#overview") setCurrentNav("OVERVIEW");
+      else if (h === "#terminal" || h === "#trading") setCurrentNav("TERMINAL");
+      else if (h === "#long-term" || h === "#signals" || h === "#dashboard") setCurrentNav("LONG_TERM");
+      else if (h === "#hft" || h === "#scalp") setCurrentNav("HFT");
+      else if (h === "#connections" || h === "#wallets" || h === "#account") setCurrentNav("CONNECTIONS");
+      else if (h === "#funding" || h === "#transfer" || h === "#deposit") setCurrentNav("FUNDING");
+      else if (h === "#balances") setCurrentNav("BALANCES");
+      else if (h === "#orders" || h === "#pnl" || h === "#positions" || h === "#holdings") setCurrentNav("ORDERS");
+      else if (h === "#settings" || h === "#security" || h === "#billing") setCurrentNav("SETTINGS");
+      else if (h === "#support") setCurrentNav("SUPPORT");
+    };
+
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
+
+  if (dest === "LONG_TERM") {
       setActiveTab("TRADING");
       setTradingMode("LONG_TERM");
     } else if (dest === "HFT") {
@@ -186,6 +208,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
       else if (h === "#long-term" || h === "#signals" || h === "#dashboard" || h === "#longterm") { setCurrentNav("LONG_TERM"); setActiveTab("TRADING"); setTradingMode("LONG_TERM"); }
       else if (h === "#trading") { setCurrentNav("TERMINAL"); setActiveTab("TRADING"); }
       else if (h === "#connections" || h === "#wallets" || h === "#account") { setCurrentNav("CONNECTIONS"); setActiveTab("CONNECTIONS"); }
+      else if (h === "#funding" || h === "#transfer" || h === "#transfers" || h === "#deposit") { setCurrentNav("FUNDING"); }
       else if (h === "#balances") { setCurrentNav("BALANCES"); setActiveTab("BALANCES"); }
       else if (h === "#orders" || h === "#pnl" || h === "#positions" || h === "#ledger" || h === "#trades" || h === "#holdings") { setCurrentNav("ORDERS"); setActiveTab("PROFIT_LOSS"); }
       else if (h === "#settings" || h === "#security" || h === "#2fa" || h === "#billing" || h === "#notifications" || h === "#guardrails") { setCurrentNav("SETTINGS"); setActiveTab("SETTINGS"); }
@@ -1618,6 +1641,10 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               exnessConnected={false}
               onRefresh={() => fetchConnections()}
             />
+          )}
+
+          {currentNav === "FUNDING" && (
+            <FundingTransfersView token={token} user={user} />
           )}
 
           {currentNav === "BALANCES" && (

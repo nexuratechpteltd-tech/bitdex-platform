@@ -4,6 +4,7 @@ import React from "react";
 import {
   LayoutGrid,
   TrendingUp,
+  ArrowLeftRight,
   Compass,
   Zap,
   Link2,
@@ -24,6 +25,7 @@ export type NavDestination =
   | "LONG_TERM"
   | "HFT"
   | "CONNECTIONS"
+  | "FUNDING"
   | "BALANCES"
   | "ORDERS"
   | "SETTINGS"
@@ -110,6 +112,14 @@ export default function SidebarNav({
       ) : (
         <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#EF4444]/15 text-[#EF4444]">DISCONNECTED</span>
       ),
+    },
+    {
+      id: "FUNDING" as NavDestination,
+      label: "Funding & Transfers",
+      hash: "funding",
+      icon: ArrowLeftRight,
+      group: "ACCOUNT & BROKER",
+      badge: <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30">EXNESS</span>,
     },
     {
       id: "BALANCES" as NavDestination,

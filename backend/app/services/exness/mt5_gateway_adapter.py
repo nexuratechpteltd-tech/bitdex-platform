@@ -37,6 +37,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         server: str,
         gateway_url: Optional[str] = None,
         auth_token: Optional[str] = None,
+        environment: str = "DEMO",
     ):
         self.account_id = str(account_id).strip()
         self.server = str(server).strip()
@@ -45,7 +46,8 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         self.is_connected = False
         self.broker_authenticated = False
         self.live_execution_locked = True  # Strict safety requirement
-        self.account_type: Optional[str] = None
+        self.environment = (environment or "DEMO").upper()
+        self.account_type: Optional[str] = self.environment
 
     def _get_headers(self) -> Dict[str, str]:
         return {
@@ -68,10 +70,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
                 "with a strong secret (min 32 characters). Default or missing tokens are strictly rejected."
             )
 
+        expected_type = self.environment
         payload = {
             "login": self.account_id,
             "server": self.server,
-            "expected_account_type": "DEMO",
+            "expected_account_type": expected_type,
         }
         if password:
             payload["password"] = password
@@ -104,23 +107,35 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
                             f"Server mismatch: requested {self.server}, gateway connected to {ret_server}."
                         )
 
-                    # 3. Non-demo rejection: STRICTLY only DEMO or TRIAL (CONTEST, REAL, LIVE rejected)
+                    # 3. Environment validation: verify returned type matches expected mode
                     ret_acct_type = str(data.get("account_type", "")).strip().upper()
-                    if not ret_acct_type or ret_acct_type not in ("DEMO", "TRIAL"):
-                        self.is_connected = False
-                        self.broker_authenticated = False
-                        logger.critical(
-                            f"REJECTED: Non-demo account type '{ret_acct_type}' detected on staging! Immediate disconnect."
-                        )
-                        raise PermissionError(
-                            f"CRITICAL REJECTION: Non-demo account type '{ret_acct_type}' is strictly prohibited on staging. "
-                            "Only verified DEMO accounts are authorized."
-                        )
+                    if expected_type == "DEMO":
+                        if not ret_acct_type or ret_acct_type not in ("DEMO", "TRIAL"):
+                            self.is_connected = False
+                            self.broker_authenticated = False
+                            logger.critical(
+                                f"REJECTED: Non-demo account type '{ret_acct_type}' detected for expected DEMO account! Immediate disconnect."
+                            )
+                            raise PermissionError(
+                                f"CRITICAL REJECTION: Non-demo account type '{ret_acct_type}' returned for expected DEMO account. "
+                                "Only verified DEMO accounts are authorized in DEMO mode."
+                            )
+                    elif expected_type == "REAL":
+                        if not ret_acct_type or ret_acct_type not in ("REAL", "LIVE", "PRODUCTION"):
+                            self.is_connected = False
+                            self.broker_authenticated = False
+                            logger.critical(
+                                f"REJECTED: Non-real account type '{ret_acct_type}' detected for expected REAL account! Immediate disconnect."
+                            )
+                            raise PermissionError(
+                                f"CRITICAL REJECTION: Account type '{ret_acct_type}' returned for expected REAL account. "
+                                "Only verified REAL/LIVE accounts are authorized in REAL mode."
+                            )
 
                     is_auth = bool(data.get("broker_authenticated", False) and data.get("terminal_connected", False))
                     self.is_connected = True
                     self.broker_authenticated = is_auth
-                    self.account_type = "DEMO"
+                    self.account_type = expected_type
 
                     return {
                         "status": "CONNECTED" if is_auth else "AUTHENTICATION_FAILED",
@@ -128,10 +143,10 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
                         "broker_authenticated": is_auth,
                         "is_mock": False,
                         "broker_mode": "EXNESS_MT5_GATEWAY",
-                        "connection_type": "REAL_EXNESS_DEMO",
+                        "connection_type": f"REAL_EXNESS_{expected_type}",
                         "account_id": self.account_id,
                         "server": self.server,
-                        "account_type": "DEMO",
+                        "account_type": expected_type,
                         "connected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     }
         except (ValueError, PermissionError):
@@ -149,7 +164,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             "is_connected": False,
             "is_mock": False,
             "broker_mode": "EXNESS_MT5_GATEWAY",
-            "connection_type": "REAL_EXNESS_DEMO",
+            "connection_type": f"REAL_EXNESS_{self.environment}",
             "account_id": self.account_id,
             "server": self.server,
             "gateway_url": self.gateway_url,
@@ -188,7 +203,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             "broker_authenticated": self.broker_authenticated,
             "is_mock": False,
             "broker_mode": "EXNESS_MT5_GATEWAY",
-            "connection_type": "REAL_EXNESS_DEMO",
+            "connection_type": f"REAL_EXNESS_{self.environment}",
             "broker_server": self.server,
             "account_id": self.account_id,
             "gateway_url": self.gateway_url,

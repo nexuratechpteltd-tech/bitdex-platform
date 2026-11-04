@@ -19,8 +19,11 @@ import {
   Search,
   Database,
   Radio,
+  Cpu,
+  Zap,
 } from "lucide-react";
 import StatusBadge from "../common/StatusBadge";
+import TradeExecutionModal from "../trading/TradeExecutionModal";
 
 interface TradingTerminalViewProps {
   selectedPair: any;
@@ -79,6 +82,7 @@ export default function TradingTerminalView({
   const ask = price !== null ? (selectedPair?.ask ?? (price + (spreadPts * 0.5 * (price > 100 ? 0.1 : 0.0001)))) : null;
 
   const [activeTimeframe, setActiveTimeframe] = useState("1H");
+  const [isExecutionModalOpen, setIsExecutionModalOpen] = useState(false);
   const timeframes = ["1m", "5m", "15m", "1H", "4H", "1D"];
 
   return (
@@ -391,19 +395,24 @@ export default function TradingTerminalView({
               </div>
             </div>
 
-            {/* Execution CTA (Guarded) */}
+            {/* Execution CTA (Dual Environment) */}
             <div className="pt-2 border-t border-[#1E2736] space-y-2">
-              <div className="p-2.5 rounded bg-[#F59E0B]/10 border border-[#F59E0B]/30 text-[#F59E0B] text-[10px] flex items-center gap-1.5">
-                <Lock className="w-3.5 h-3.5 shrink-0" />
-                <span>Live trading locked (live_trading_locked=True)</span>
+              <div className="p-2.5 rounded bg-[#38BDF8]/10 border border-[#38BDF8]/30 text-[#38BDF8] text-[10px] flex items-center justify-between">
+                <span className="flex items-center gap-1.5 font-bold">
+                  <Cpu className="w-3.5 h-3.5 shrink-0" />
+                  <span>Dual Exness Execution Engine</span>
+                </span>
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#38BDF8]/20 font-bold">
+                  DEMO &amp; REAL
+                </span>
               </div>
               <button
                 type="button"
-                disabled
-                className="w-full py-2.5 rounded-lg bg-[#1E2736] text-[#64748B] font-bold text-xs flex items-center justify-center gap-2 cursor-not-allowed border border-[#1E2736]"
+                onClick={() => setIsExecutionModalOpen(true)}
+                className="w-full py-2.5 rounded-lg bg-[#38BDF8] hover:bg-[#0284C7] text-[#080B10] font-bold text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#38BDF8]/20 transition-all"
               >
-                <Lock className="w-3.5 h-3.5" />
-                <span>Execution Guarded (Demo Mode Only)</span>
+                <Zap className="w-3.5 h-3.5" />
+                <span>EXECUTE TRADE (DEMO / REAL)</span>
               </button>
             </div>
           </div>
@@ -444,6 +453,16 @@ export default function TradingTerminalView({
           </div>
         </div>
       </div>
+      {/* Trade Execution Modal */}
+      <TradeExecutionModal
+        isOpen={isExecutionModalOpen}
+        onClose={() => setIsExecutionModalOpen(false)}
+        symbol={sym}
+        currentPrice={price}
+        entryPrice={entryPrice}
+        stopLoss={stopLoss}
+        takeProfit={takeProfit}
+      />
     </div>
   );
 }
