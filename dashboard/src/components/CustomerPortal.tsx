@@ -93,61 +93,6 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
     return "OVERVIEW";
   });
 
-  const navigateTo = (dest: NavDestination) => {
-    setCurrentNav(dest);
-    if (typeof window !== "undefined") {
-      const hashMap: Record<NavDestination, string> = {
-        OVERVIEW: "overview",
-        TERMINAL: "terminal",
-        LONG_TERM: "long-term",
-        HFT: "hft",
-        CONNECTIONS: "connections",
-        FUNDING: "funding",
-        BALANCES: "balances",
-        ORDERS: "orders",
-        SETTINGS: "settings",
-        SUPPORT: "support",
-      };
-      window.location.hash = hashMap[dest] || "overview";
-    }
-  useEffect(() => {
-    const handleHashChange = () => {
-      const h = window.location.hash.toLowerCase();
-      if (h === "#overview") setCurrentNav("OVERVIEW");
-      else if (h === "#terminal" || h === "#trading") setCurrentNav("TERMINAL");
-      else if (h === "#long-term" || h === "#signals" || h === "#dashboard") setCurrentNav("LONG_TERM");
-      else if (h === "#hft" || h === "#scalp") setCurrentNav("HFT");
-      else if (h === "#connections" || h === "#wallets" || h === "#account") setCurrentNav("CONNECTIONS");
-      else if (h === "#funding" || h === "#transfer" || h === "#deposit") setCurrentNav("FUNDING");
-      else if (h === "#balances") setCurrentNav("BALANCES");
-      else if (h === "#orders" || h === "#pnl" || h === "#positions" || h === "#holdings") setCurrentNav("ORDERS");
-      else if (h === "#settings" || h === "#security" || h === "#billing") setCurrentNav("SETTINGS");
-      else if (h === "#support") setCurrentNav("SUPPORT");
-    };
-
-    window.addEventListener("hashchange", handleHashChange);
-    return () => window.removeEventListener("hashchange", handleHashChange);
-  }, []);
-
-  if (dest === "LONG_TERM") {
-      setActiveTab("TRADING");
-      setTradingMode("LONG_TERM");
-    } else if (dest === "HFT") {
-      setActiveTab("TRADING");
-      setTradingMode("HFT");
-    } else if (dest === "CONNECTIONS") {
-      setActiveTab("CONNECTIONS");
-    } else if (dest === "BALANCES") {
-      setActiveTab("BALANCES");
-    } else if (dest === "ORDERS") {
-      setActiveTab("PROFIT_LOSS");
-    } else if (dest === "SETTINGS") {
-      setActiveTab("SETTINGS");
-    } else if (dest === "SUPPORT") {
-      setActiveTab("SUPPORT");
-    }
-  };
-
   const [activeTab, setActiveTab] = useState<"TRADING" | "CONNECTIONS" | "BALANCES" | "BILLING" | "SECURITY" | "SUPPORT" | "PROFIT_LOSS" | "SETTINGS">(() => {
     if (typeof window !== "undefined") {
       const h = window.location.hash.toLowerCase();
@@ -180,6 +125,42 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
     return "LONG_TERM";
   });
 
+  const navigateTo = (dest: NavDestination) => {
+    setCurrentNav(dest);
+    if (typeof window !== "undefined") {
+      const hashMap: Record<NavDestination, string> = {
+        OVERVIEW: "overview",
+        TERMINAL: "terminal",
+        LONG_TERM: "long-term",
+        HFT: "hft",
+        CONNECTIONS: "connections",
+        FUNDING: "funding",
+        BALANCES: "balances",
+        ORDERS: "orders",
+        SETTINGS: "settings",
+        SUPPORT: "support",
+      };
+      window.location.hash = hashMap[dest] || "overview";
+    }
+    if (dest === "LONG_TERM") {
+      setActiveTab("TRADING");
+      setTradingMode("LONG_TERM");
+    } else if (dest === "HFT") {
+      setActiveTab("TRADING");
+      setTradingMode("HFT");
+    } else if (dest === "CONNECTIONS") {
+      setActiveTab("CONNECTIONS");
+    } else if (dest === "BALANCES") {
+      setActiveTab("BALANCES");
+    } else if (dest === "ORDERS") {
+      setActiveTab("PROFIT_LOSS");
+    } else if (dest === "SETTINGS") {
+      setActiveTab("SETTINGS");
+    } else if (dest === "SUPPORT") {
+      setActiveTab("SUPPORT");
+    }
+  };
+
   // Notification Rules State (Phase 6)
   const [notifyExecReceipts, setNotifyExecReceipts] = useState<boolean>(true);
   const [notifyPriceAlerts, setNotifyPriceAlerts] = useState<boolean>(true);
@@ -196,6 +177,24 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
   const [isEmergencyKillModalOpen, setIsEmergencyKillModalOpen] = useState<boolean>(false);
   const [emergencyKillSuccess, setEmergencyKillSuccess] = useState<boolean>(false);
   const [guardrailSavedToast, setGuardrailSavedToast] = useState<boolean>(false);
+
+  // Enforce strict noindex, nofollow on authenticated Customer Portal views
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let meta = document.querySelector('meta[name="robots"]') as HTMLMetaElement | null;
+    const prevContent = meta ? meta.getAttribute("content") : null;
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.name = "robots";
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute("content", "noindex, nofollow, noarchive");
+    return () => {
+      if (meta && prevContent) {
+        meta.setAttribute("content", prevContent);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const handleHash = () => {
@@ -289,9 +288,9 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
   const fetchLedgerData = async () => {
     setIsLedgerLoading(true);
     try {
-      const token = localStorage.getItem("bitdex_auth_token") || localStorage.getItem("tauric_token");
+      const activeToken = token || localStorage.getItem("tauric_session_token") || localStorage.getItem("bitdex_auth_token") || localStorage.getItem("tauric_token");
       const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      if (activeToken) headers["Authorization"] = `Bearer ${activeToken}`;
 
       const posRes = await fetch(`/trading/api/backend/orders/positions?environment=${ledgerEnv}&market_type=ALL`, { headers });
       if (posRes.ok) {
@@ -313,9 +312,9 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
   const handleCancelWorkingOrder = async (order: any) => {
     try {
-      const token = localStorage.getItem("bitdex_auth_token") || localStorage.getItem("tauric_token");
+      const activeToken = token || localStorage.getItem("tauric_session_token") || localStorage.getItem("bitdex_auth_token") || localStorage.getItem("tauric_token");
       const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      if (activeToken) headers["Authorization"] = `Bearer ${activeToken}`;
       const res = await fetch("/trading/api/backend/orders/cancel", {
         method: "POST",
         headers,

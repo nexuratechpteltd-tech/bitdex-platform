@@ -871,6 +871,7 @@ async def evaluate_pre_order_risk(
     }
 
 
+@router.post("/order")
 @router.post("/trade/execute")
 async def execute_customer_trade(
     req: TradeExecutionRequest, user: Dict[str, Any] = Depends(get_current_user)
@@ -887,6 +888,10 @@ async def execute_customer_trade(
     from datetime import datetime, timezone
     import secrets
     from ..services.exness.risk_guard import ExnessRiskGuard
+    from ..services.activation_service import assert_hft_activated
+
+    # Mandatory $20.00 USD HFT Account Activation Gate
+    assert_hft_activated(user)
 
     env = req.environment.upper().strip()
     if env not in ("DEMO", "REAL"):

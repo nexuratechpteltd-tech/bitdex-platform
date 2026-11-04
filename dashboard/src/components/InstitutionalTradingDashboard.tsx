@@ -281,6 +281,14 @@ export default function InstitutionalTradingDashboard({
     "NOT_CONFIGURED" | "CONFIGURED" | "VALIDATING" | "READY" | "ACTIVE" | "STOPPING" | "STOPPED" | "FAILED"
   >("NOT_CONFIGURED");
 
+  // ─── Phase 2: $20.00 USD One-Time HFT Account Activation State ───────────
+  const [activationStatus, setActivationStatus] = useState<string>("NOT_ACTIVATED");
+  const [activationInfo, setActivationInfo] = useState<any>(null);
+  const [isActivationModalOpen, setIsActivationModalOpen] = useState<boolean>(false);
+  const [activationProvider, setActivationProvider] = useState<string>("BINANCE_PAY");
+  const [activationCheckoutData, setActivationCheckoutData] = useState<any>(null);
+  const [activationBusy, setActivationBusy] = useState<boolean>(false);
+
   const getAuthToken = useCallback(() => {
     return (
       token ||
@@ -305,6 +313,114 @@ export default function InstitutionalTradingDashboard({
   const [simSlPoints, setSimSlPoints] = useState<number>(60.0);
   const [simHoldBars, setSimHoldBars] = useState<number>(15);
   const [simCandleCount, setSimCandleCount] = useState<number>(100);
+
+  // Fetch Customer $20 HFT Activation Status
+  const fetchActivationStatus = useCallback(async () => {
+    try {
+      const authToken = getAuthToken();
+      if (!authToken) return;
+      const res = await fetch("/api/backend/saas/customer/hft/activation/status", {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + authToken,
+        },
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.activation) {
+          setActivationInfo(json.activation);
+          setActivationStatus(json.activation.activation_status || "NOT_ACTIVATED");
+        }
+      }
+    } catch (err) {
+      console.warn("Could not fetch HFT activation status:", err);
+    }
+  }, [getAuthToken]);
+
+  // Initiate $20.00 USD Activation Checkout
+  const handleInitiateActivationCheckout = async () => {
+    setActivationBusy(true);
+    setFeedback(null);
+    try {
+      const authToken = getAuthToken();
+      const res = await fetch("/api/backend/saas/customer/hft/activation/checkout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
+        },
+        body: JSON.stringify({ provider: activationProvider }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        const msg = typeof json.detail === "object" ? json.detail.message : json.detail;
+        throw new Error(msg || "Failed to initiate $20.00 USD activation checkout.");
+      }
+      if (json.status === "ALREADY_ACTIVE") {
+        setActivationStatus("ACTIVE");
+        setActivationInfo(json.activation);
+        setIsActivationModalOpen(false);
+        setFeedback({ type: "success", message: "Your BITDEX HFT account is already activated." });
+        return;
+      }
+      setActivationCheckoutData(json.checkout);
+      if (json.activation) {
+        setActivationInfo(json.activation);
+        setActivationStatus(json.activation.activation_status);
+      }
+    } catch (err: any) {
+      setFeedback({ type: "error", message: err.message || "Activation checkout error" });
+    } finally {
+      setActivationBusy(false);
+    }
+  };
+
+  // Complete & Verify Signed $20.00 USD Activation Payment
+  const handleCompleteActivationPayment = async () => {
+    if (!activationCheckoutData) return;
+    setActivationBusy(true);
+    setFeedback(null);
+    try {
+      const authToken = getAuthToken();
+      const res = await fetch("/api/backend/saas/customer/hft/activation/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
+        },
+        body: JSON.stringify({
+          payment_reference: activationCheckoutData.payment_reference,
+          amount: 20.0,
+          currency: "USD",
+          signature: activationCheckoutData.verification_signature,
+          provider: activationCheckoutData.provider,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        const msg = typeof json.detail === "object" ? json.detail.message : json.detail;
+        throw new Error(msg || "Payment verification failed.");
+      }
+      if (json.activation) {
+        setActivationInfo(json.activation);
+        setActivationStatus(json.activation.activation_status || "ACTIVE");
+      } else {
+        setActivationStatus("ACTIVE");
+      }
+      setActivationCheckoutData(null);
+      setIsActivationModalOpen(false);
+      setFeedback({
+        type: "success",
+        message: "Account Activated ($20.00 USD verified). High-Frequency Trading configuration and execution controls are now unlocked.",
+      });
+      await runValidation(selectedPair);
+      await fetchOverview();
+    } catch (err: any) {
+      setFeedback({ type: "error", message: err.message || "Payment verification failed" });
+    } finally {
+      setActivationBusy(false);
+    }
+  };
 
   // Fetch Exness Quantitative Risk Limits
   const fetchRiskLimits = useCallback(async () => {
@@ -520,6 +636,7 @@ export default function InstitutionalTradingDashboard({
     fetchOverview();
     fetchHftPairs();
     fetchRiskLimits();
+    fetchActivationStatus();
     if (!initialSimFired.current) {
       initialSimFired.current = true;
       runQuantitativeSimulation();
@@ -605,7 +722,13 @@ export default function InstitutionalTradingDashboard({
 
       const resJson = await res.json();
       if (!res.ok) {
-        throw new Error(resJson.detail || "Failed to save strategy configuration.");
+        if (res.status === 403 && resJson.detail?.error === "ACCOUNT_ACTIVATION_REQUIRED") {
+          setIsConfigModalOpen(false);
+          setIsActivationModalOpen(true);
+          throw new Error(resJson.detail.message || "One-time $20.00 USD Account Activation required.");
+        }
+        const errMsg = typeof resJson.detail === "object" ? resJson.detail.message : resJson.detail;
+        throw new Error(errMsg || "Failed to save strategy configuration.");
       }
 
       setFeedback({
@@ -639,7 +762,12 @@ export default function InstitutionalTradingDashboard({
 
       const resJson = await res.json();
       if (!res.ok) {
-        throw new Error(resJson.detail || "Failed to arm HFT session.");
+        if (res.status === 403 && resJson.detail?.error === "ACCOUNT_ACTIVATION_REQUIRED") {
+          setIsActivationModalOpen(true);
+          throw new Error(resJson.detail.message || "One-time $20.00 USD Account Activation required.");
+        }
+        const errMsg = typeof resJson.detail === "object" ? resJson.detail.message : resJson.detail;
+        throw new Error(errMsg || "Failed to arm HFT session.");
       }
 
       setFeedback({
@@ -756,7 +884,28 @@ export default function InstitutionalTradingDashboard({
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {activationStatus === "ACTIVE" ? (
+            <div
+              id="hft-activation-badge"
+              data-status="ACTIVE"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#10B981]/15 border border-[#10B981]/40 text-xs font-mono font-bold text-[#10B981]"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>HFT ACTIVATED ($20 VERIFIED)</span>
+            </div>
+          ) : (
+            <button
+              type="button"
+              id="hft-activation-badge"
+              data-status={activationStatus}
+              onClick={() => setIsActivationModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-xs font-mono font-bold text-amber-400 cursor-pointer transition-all"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>UNACTIVATED — ACTIVATE HFT ($20.00)</span>
+            </button>
+          )}
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#10B981]/10 border border-[#10B981]/30 text-xs font-mono text-[#10B981]">
             <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
             <span>Execution Gate: Standby Validation</span>
@@ -943,11 +1092,17 @@ export default function InstitutionalTradingDashboard({
               <button
                 type="button"
                 id="btn-open-config-modal"
-                onClick={() => setIsConfigModalOpen(true)}
+                onClick={() => {
+                  if (activationStatus !== "ACTIVE") {
+                    setIsActivationModalOpen(true);
+                  } else {
+                    setIsConfigModalOpen(true);
+                  }
+                }}
                 className="px-3 py-1.5 rounded-lg bg-[#00E5FF]/15 hover:bg-[#00E5FF] border border-[#00E5FF]/40 text-[#00E5FF] hover:text-[#0B0E11] text-xs font-mono font-bold transition-all flex items-center gap-1.5 cursor-pointer"
               >
                 <Sliders className="w-3.5 h-3.5" />
-                <span>Configure Strategy</span>
+                <span>{activationStatus === "ACTIVE" ? "Configure Strategy" : "Configure Strategy ($20 Unlock)"}</span>
               </button>
             </div>
 
@@ -1149,20 +1304,30 @@ export default function InstitutionalTradingDashboard({
               <button
                 type="button"
                 id="btn-start-hft-session"
-                onClick={handleStartSession}
-                disabled={!isReady || sessionActionLoading}
+                onClick={() => {
+                  if (activationStatus !== "ACTIVE") {
+                    setIsActivationModalOpen(true);
+                  } else {
+                    handleStartSession();
+                  }
+                }}
+                disabled={(activationStatus === "ACTIVE" && !isReady) || sessionActionLoading}
                 className={`px-5 py-2.5 rounded-xl font-bold transition-all flex items-center gap-2 ${
-                  isReady && !sessionActionLoading
+                  activationStatus !== "ACTIVE"
+                    ? "bg-amber-500 hover:bg-amber-400 text-[#0B0E11] cursor-pointer shadow-lg shadow-amber-500/20"
+                    : isReady && !sessionActionLoading
                     ? "bg-[#10B981] hover:bg-[#10B981]/90 text-[#0B0E11] cursor-pointer shadow-lg shadow-[#10B981]/20"
                     : "bg-[#181822] text-[#64748B] border border-[#272735] cursor-not-allowed opacity-60"
                 }`}
               >
                 {sessionActionLoading ? (
                   <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : activationStatus !== "ACTIVE" ? (
+                  <Lock className="w-4 h-4" />
                 ) : (
                   <Play className="w-4 h-4 fill-current" />
                 )}
-                <span>Arm &amp; Start Session</span>
+                <span>{activationStatus !== "ACTIVE" ? "Activate Account ($20.00) to Start HFT" : "Arm & Start Session"}</span>
               </button>
             )}
           </div>
@@ -1939,6 +2104,150 @@ export default function InstitutionalTradingDashboard({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* ─── PHASE 2: $20.00 USD ONE-TIME HFT ACCOUNT ACTIVATION MODAL ─────── */}
+      {isActivationModalOpen && (
+        <div
+          id="hft-activation-modal"
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div className="bg-[#121218] border border-[#272735] rounded-2xl max-w-lg w-full p-5 sm:p-6 space-y-5 shadow-2xl font-mono">
+            <div className="flex items-start justify-between gap-3 border-b border-[#272735] pb-4">
+              <div className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-400 text-[10px] font-bold uppercase">
+                  <Lock className="w-3 h-3" />
+                  <span>One-Time HFT Account Activation</span>
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-white">
+                  Activate Your BITDEX Account
+                </h3>
+                <p className="text-xs text-[#94A3B8]">
+                  Your account must be activated before you can use High-Frequency Trading.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsActivationModalOpen(false)}
+                className="text-[#94A3B8] hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Fee Display Card */}
+            <div className="p-4 rounded-xl bg-[#0A0A0E] border border-[#00E5FF]/40 flex items-center justify-between">
+              <div>
+                <span className="text-[11px] text-[#94A3B8] block uppercase">One-Time Activation Fee</span>
+                <span className="text-2xl font-extrabold text-[#00E5FF]">$20.00 USD</span>
+              </div>
+              <div className="text-right text-[11px] text-[#10B981]">
+                <span className="font-bold block">LIFETIME HFT ACCESS</span>
+                <span className="text-[#94A3B8]">No recurring monthly fee</span>
+              </div>
+            </div>
+
+            {/* What Activation Unlocks */}
+            <div className="space-y-2 text-xs text-[#94A3B8]">
+              <div className="text-white font-bold">What $20.00 Activation Unlocks:</div>
+              <div className="flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
+                <span>Unlocks HFT Strategy Configuration &amp; Autonomous Session Controls</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
+                <span>Enables Exness MT5 &amp; Binance Futures HFT Execution Gateways</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
+                <span>Activates Real-Time Pre-Trade Quantitative Risk Guard &amp; Watchdog</span>
+              </div>
+            </div>
+
+            {/* Payment Method & Verification Step */}
+            {!activationCheckoutData ? (
+              <div className="space-y-3 pt-1">
+                <label className="block text-xs text-[#94A3B8]">
+                  Select Payment Settlement Method:
+                </label>
+                <div className="grid grid-cols-2 gap-2.5 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setActivationProvider("BINANCE_PAY")}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      activationProvider === "BINANCE_PAY"
+                        ? "bg-[#00E5FF]/15 border-[#00E5FF] text-white font-bold"
+                        : "bg-[#0A0A0E] border-[#272735] text-[#94A3B8]"
+                    }`}
+                  >
+                    <div className="text-white font-bold">Binance Pay</div>
+                    <div className="text-[10px] text-[#94A3B8]">Instant $20 USDT/USD</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActivationProvider("CRYPTO_USDT")}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      activationProvider === "CRYPTO_USDT"
+                        ? "bg-[#00E5FF]/15 border-[#00E5FF] text-white font-bold"
+                        : "bg-[#0A0A0E] border-[#272735] text-[#94A3B8]"
+                    }`}
+                  >
+                    <div className="text-white font-bold">USDT Direct</div>
+                    <div className="text-[10px] text-[#94A3B8]">TRC20 / ERC20 Verified</div>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-amber-500/40 space-y-2 text-xs">
+                <div className="flex items-center justify-between text-amber-400 font-bold">
+                  <span>Payment Invoice Generated</span>
+                  <span>{activationCheckoutData.payment_reference}</span>
+                </div>
+                <div className="text-[11px] text-[#94A3B8]">
+                  Amount Due: <strong className="text-white">${Number(activationCheckoutData.amount).toFixed(2)} {activationCheckoutData.currency}</strong> via <strong className="text-white">{activationCheckoutData.provider}</strong>
+                </div>
+              </div>
+            )}
+
+            {/* Modal Footer Buttons */}
+            <div className="pt-3 border-t border-[#272735] flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                id="btn-continue-viewing-hft"
+                onClick={() => {
+                  setActivationCheckoutData(null);
+                  setIsActivationModalOpen(false);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-[#181822] hover:bg-[#272735] text-[#94A3B8] hover:text-white text-xs font-bold cursor-pointer"
+              >
+                Continue Viewing Dashboard
+              </button>
+
+              {!activationCheckoutData ? (
+                <button
+                  type="button"
+                  id="btn-pay-activate-20"
+                  disabled={activationBusy}
+                  onClick={handleInitiateActivationCheckout}
+                  className="px-5 py-2.5 rounded-xl bg-[#00E5FF] hover:bg-[#00E5FF]/90 text-[#0B0E11] text-xs font-extrabold cursor-pointer shadow-lg shadow-[#00E5FF]/20 flex items-center gap-2"
+                >
+                  {activationBusy && <RefreshCw className="w-4 h-4 animate-spin" />}
+                  <span>Pay $20.00 &amp; Activate Account</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  id="btn-confirm-activate-20"
+                  disabled={activationBusy}
+                  onClick={handleCompleteActivationPayment}
+                  className="px-5 py-2.5 rounded-xl bg-[#10B981] hover:bg-[#10B981]/90 text-[#0B0E11] text-xs font-extrabold cursor-pointer shadow-lg shadow-[#10B981]/20 flex items-center gap-2"
+                >
+                  {activationBusy && <RefreshCw className="w-4 h-4 animate-spin" />}
+                  <span>Verify $20.00 Payment &amp; Unlock HFT</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

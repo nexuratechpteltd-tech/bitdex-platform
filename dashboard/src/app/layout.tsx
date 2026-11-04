@@ -10,8 +10,17 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://bitdex.ltd"),
-  title: "BITDEX — Quantitative AI Intelligence & Multi-Market Research Terminal",
-  description: "Institutional algorithmic intelligence, AI market analysis, and multi-tenant SaaS platform.",
+  title: "BITDEX — Institutional Quantitative AI & Trading Terminal",
+  description: "Non-custodial quantitative AI intelligence, chartless multi-market regime analysis, and risk-guarded execution terminal for Exness and Binance traders.",
+  keywords: [
+    "BITDEX",
+    "quantitative trading terminal",
+    "institutional AI market analysis",
+    "Exness MT5 gateway",
+    "Binance futures scalping",
+    "non-custodial trading intelligence",
+    "chartless trading terminal"
+  ],
   alternates: {
     canonical: "https://bitdex.ltd",
   },
@@ -27,8 +36,8 @@ export const metadata: Metadata = {
     },
   },
   openGraph: {
-    title: "BITDEX — Institutional Quantitative AI & Execution",
-    description: "Institutional algorithmic intelligence, AI market analysis, and multi-tenant SaaS platform.",
+    title: "BITDEX — Institutional Quantitative AI & Trading Terminal",
+    description: "Non-custodial quantitative AI intelligence, chartless multi-market regime analysis, and risk-guarded execution terminal for Exness and Binance traders.",
     url: "https://bitdex.ltd",
     siteName: "BITDEX",
     images: [
@@ -44,8 +53,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "BITDEX — Institutional Quantitative AI & Execution",
-    description: "Institutional algorithmic intelligence, AI market analysis, and multi-tenant SaaS platform.",
+    title: "BITDEX — Institutional Quantitative AI & Trading Terminal",
+    description: "Non-custodial quantitative AI intelligence, chartless multi-market regime analysis, and risk-guarded execution terminal for Exness and Binance traders.",
     images: ["https://bitdex.ltd/bitdex-logo.svg"],
   },
   icons: {
@@ -67,8 +76,7 @@ const structuredData = {
       "name": "BITDEX",
       "url": "https://bitdex.ltd",
       "logo": "https://bitdex.ltd/bitdex-logo.svg",
-      "description": "Institutional Quantitative AI & Execution Platform for Modern Digital Asset Traders",
-      "sameAs": []
+      "description": "Institutional Quantitative AI & Execution Platform for Modern Digital Asset and Multi-Asset Traders"
     },
     {
       "@type": "WebSite",
@@ -76,6 +84,16 @@ const structuredData = {
       "url": "https://bitdex.ltd",
       "name": "BITDEX",
       "publisher": { "@id": "https://bitdex.ltd/#organization" }
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://bitdex.ltd/#application",
+      "name": "BITDEX Institutional Terminal",
+      "applicationCategory": "FinanceApplication",
+      "operatingSystem": "Web",
+      "url": "https://bitdex.ltd",
+      "provider": { "@id": "https://bitdex.ltd/#organization" },
+      "description": "Chartless institutional trading terminal featuring multi-agent AI regime analysis, pre-trade risk guardrails, and non-custodial execution."
     },
     {
       "@type": "FinancialService",

@@ -43,6 +43,7 @@ PUBLIC_EXEMPT_PATHS = {
     "/api/v1/saas/webhooks/kyc",
     "/api/v1/saas/webhooks/payment",
     "/api/v1/saas/webhooks/binance-pay",
+    "/api/v1/saas/customer/hft/activation/webhook",
 }
 
 CREDENTIAL_SUBMISSION_PATHS = (

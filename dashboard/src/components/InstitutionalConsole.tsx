@@ -65,9 +65,16 @@ async function apiFetch(path: string, opts?: RequestInit) {
   } else if (!normalizedPath.endsWith("/")) {
     normalizedPath = normalizedPath + "/";
   }
+  const tok = typeof window !== "undefined"
+    ? (localStorage.getItem("tauric_session_token") || localStorage.getItem("bitdex_auth_token") || localStorage.getItem("tauric_token") || "")
+    : "";
   const res = await fetch(`${API_BASE}${normalizedPath}`, {
     ...opts,
-    headers: { "Content-Type": "application/json", ...opts?.headers },
+    headers: {
+      "Content-Type": "application/json",
+      ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+      ...opts?.headers,
+    },
   });
   return res;
 }

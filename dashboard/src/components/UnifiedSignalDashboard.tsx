@@ -2003,7 +2003,8 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
   // ─── Universal Strategy Orchestration Handlers ──────────────────────────
   const fetchStrategyRuns = async () => {
     try {
-      const res = await fetch(`${getApiBase()}/orchestration/runs/`);
+      const _tokOrch = saasAuthToken || (typeof window !== "undefined" ? (localStorage.getItem("tauric_session_token") || localStorage.getItem("bitdex_token") || localStorage.getItem("tauric_token")) : null);
+      const res = await fetch(`${getApiBase()}/orchestration/runs/`, { headers: _tokOrch ? { Authorization: `Bearer ${_tokOrch}` } : {} });
       if (res.ok) {
         const d = await res.json();
         setStrategyRuns(d.strategy_runs || []);
@@ -2285,7 +2286,8 @@ const handleToggleActiveProfile = async (profileId: string, newState: boolean) =
     setIsPositionsLoading(true);
     setIsLoadingPositions(true);
     try {
-      const res = await fetch(`${getApiBase()}/orders/positions/?environment=${targetEnv}&market_type=${targetMkt}`);
+      const _tokPos = saasAuthToken || (typeof window !== "undefined" ? (localStorage.getItem("tauric_session_token") || localStorage.getItem("bitdex_token") || localStorage.getItem("tauric_token")) : null);
+      const res = await fetch(`${getApiBase()}/orders/positions/?environment=${targetEnv}&market_type=${targetMkt}`, { headers: _tokPos ? { Authorization: `Bearer ${_tokPos}` } : {} });
       const data = await res.json();
       if (res.ok) {
         const open = data.open_positions || [];

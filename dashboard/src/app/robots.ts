@@ -8,8 +8,11 @@ export default function robots(): MetadataRoute.Robots {
       disallow: [
         '/api/',
         '/trading/api/',
-        '/saas/admin/',
+        '/saas/',
+        '/admin/',
         '/dashboard/',
+        '/portal/',
+        '/_next/data/',
       ],
     },
     sitemap: 'https://bitdex.ltd/sitemap.xml',

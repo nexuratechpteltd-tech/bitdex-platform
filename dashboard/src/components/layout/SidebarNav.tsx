@@ -258,6 +258,7 @@ export default function SidebarNav({
                 )}
                 {onSignOut && (
                   <button
+                    id="btn-customer-sign-out"
                     onClick={onSignOut}
                     className="text-[10px] text-rose-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer ml-auto"
                   >

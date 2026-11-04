@@ -119,20 +119,37 @@ export default function TauricPortal() {
   };
 
   const handleSignOut = async () => {
-    if (authToken) {
-      try {
-        await fetch("/trading/api/backend/saas/auth/logout", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-      } catch {
-        // ignore
+    const tokenToRevoke = authToken || (typeof window !== "undefined" ? localStorage.getItem("tauric_session_token") : null);
+    if (typeof window !== "undefined") {
+      const keysToPurge = [
+        "tauric_session_token",
+        "tauric_session_user",
+        "bitdex_auth_token",
+        "tauric_token",
+        "bitdex_token",
+        "sheltr_token",
+        "bitdex_active_account",
+        "bitdex_preferred_account",
+        "bitdex_customer_trades",
+      ];
+      keysToPurge.forEach((k) => localStorage.removeItem(k));
+      if (window.location.hash) {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
       }
     }
-    localStorage.removeItem("tauric_session_token");
-    localStorage.removeItem("tauric_session_user");
     setAuthToken(null);
     setCurrentUser(null);
+    if (tokenToRevoke) {
+      try {
+        await fetch("/api/backend/saas/auth/logout", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${tokenToRevoke}` },
+          keepalive: true,
+        });
+      } catch {
+        // ignore network failure during signout
+      }
+    }
   };
 
   // 1. Unauthenticated / Initial SSR: Render Public SaaS Landing Page immediately

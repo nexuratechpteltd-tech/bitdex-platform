@@ -56,7 +56,7 @@ export default function ExchangeConnectionsView({
   const fetchStatus = async () => {
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
-      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
+      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_session_token") || localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
       if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
       const res = await fetch("/api/v1/hft/exness/status", { headers });
@@ -109,7 +109,7 @@ export default function ExchangeConnectionsView({
     setIsSubmitting(true);
     setStatusMsg(null);
 
-    const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
+    const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_session_token") || localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
@@ -192,7 +192,7 @@ export default function ExchangeConnectionsView({
       return;
     }
     try {
-      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
+      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_session_token") || localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
       const res = await fetch("/api/v1/hft/exness/disconnect", {
         method: "POST",
         headers: {
@@ -215,7 +215,7 @@ export default function ExchangeConnectionsView({
 
   const handleSetPreferred = async (connectionId: string) => {
     try {
-      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
+      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_session_token") || localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
       const res = await fetch("/api/v1/hft/exness/account/preferred", {
         method: "POST",
         headers: {

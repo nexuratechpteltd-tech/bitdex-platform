@@ -1655,6 +1655,7 @@ class AuthManager:
                 raise HTTPException(status_code=403, detail="Account is blocked by administrator.")
 
             u_dict = dict(user)
+            u_dict["session_id"] = session_id
             if not u_dict.get("username"):
                 u_dict["username"] = f"{u_dict.get('first_name') or ''} {u_dict.get('last_name') or ''}".strip() or u_dict["email"].split("@")[0]
             return u_dict

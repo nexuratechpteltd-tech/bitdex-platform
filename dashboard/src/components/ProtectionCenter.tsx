@@ -36,7 +36,8 @@ export default function ProtectionCenter({ className = "", token }: ProtectionCe
         const authToken =
           token ||
           (typeof window !== "undefined"
-            ? localStorage.getItem("bitdex_auth_token") ||
+            ? localStorage.getItem("tauric_session_token") ||
+              localStorage.getItem("bitdex_auth_token") ||
               localStorage.getItem("tauric_token") ||
               localStorage.getItem("bitdex_token") ||
               ""

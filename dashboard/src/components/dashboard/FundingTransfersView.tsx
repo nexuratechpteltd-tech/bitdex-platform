@@ -52,7 +52,7 @@ export default function FundingTransfersView({ token, user }: FundingTransfersVi
   const fetchFundingData = async () => {
     setIsLoadingBalances(true);
     try {
-      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
+      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_session_token") || localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
@@ -101,7 +101,7 @@ export default function FundingTransfersView({ token, user }: FundingTransfersVi
     const idempotencyKey = `idemp-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
     try {
-      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
+      const authToken = token || (typeof window !== "undefined" ? localStorage.getItem("tauric_session_token") || localStorage.getItem("tauric_token") || localStorage.getItem("bitdex_token") : null);
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 

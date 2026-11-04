@@ -2153,6 +2153,8 @@ async def get_hft_strategy_config_route(symbol: Optional[str] = None, current_us
 
 @customer_router.post("/customer/trading/hft/config")
 async def save_hft_strategy_config_route(req: HftStrategyConfigRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    from ..services.activation_service import assert_hft_activated
+    assert_hft_activated(current_user)
     user_id = current_user["user_id"]
     clean_symbol = req.symbol.upper().replace("/", "").replace(":", "").replace("-", "")
     conn = get_db_connection()
@@ -2262,7 +2264,18 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
             except Exception:
                 watchdog_desc = "Error reading watchdog heartbeat."
 
+        from ..services.activation_service import get_activation_status
+        act_status = get_activation_status(conn, user_id, current_user.get("role", "CUSTOMER"))
+        is_hft_activated = act_status.get("activation_status") == "ACTIVE"
+
         checklist = [
+            {
+                "id": "HFT_ACCOUNT_ACTIVATION",
+                "name": "One-Time $20.00 USD Account Activation",
+                "passed": is_hft_activated,
+                "critical": True,
+                "detail": "Account activated ($20.00 USD one-time HFT activation verified)." if is_hft_activated else "Account not activated. Pay one-time $20.00 USD activation fee to unlock HFT execution."
+            },
             {
                 "id": "EXCHANGE_CONNECTION",
                 "name": "Binance Testnet API Connection",
@@ -2344,6 +2357,8 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
 
 @customer_router.post("/customer/trading/hft/session/start")
 async def start_hft_session_route(req: HftSessionActionRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    from ..services.activation_service import assert_hft_activated
+    assert_hft_activated(current_user)
     user_id = current_user["user_id"]
     clean_symbol = req.symbol.upper().replace("/", "").replace(":", "")
     conn = get_db_connection()
@@ -2418,5 +2433,125 @@ async def stop_hft_session_route(req: HftSessionActionRequest, current_user: Dic
             "session_state": "STOPPED",
             "message": f"High-Frequency Trading session for {clean_symbol} disarmed and stopped cleanly. Symbol lease released."
         }
+    finally:
+        conn.close()
+
+
+# ─── Phase 2: One-Time $20.00 USD HFT Account Activation Routes ───────────────
+
+class HftActivationCheckoutRequest(BaseModel):
+    provider: str = "BINANCE_PAY"
+
+class HftActivationVerifyRequest(BaseModel):
+    payment_reference: str
+    amount: float = 20.0
+    currency: str = "USD"
+    signature: str
+    provider: Optional[str] = "BINANCE_PAY"
+    event_id: Optional[str] = None
+
+class HftActivationWebhookRequest(BaseModel):
+    event_id: str
+    user_id: str
+    payment_reference: str
+    amount: float
+    currency: str = "USD"
+    signature: str
+    provider: str = "BINANCE_PAY"
+
+class AdminHftActivationOverrideRequest(BaseModel):
+    status: str
+    reason: str = "Administrative HFT activation update"
+
+
+@customer_router.get("/customer/hft/activation/status")
+async def get_customer_hft_activation_status(current_user: Dict[str, Any] = Depends(get_current_user)):
+    from ..services.activation_service import get_activation_status
+    conn = get_db_connection()
+    try:
+        act = get_activation_status(conn, current_user["user_id"], current_user.get("role", "CUSTOMER"))
+        return {"status": "SUCCESS", "activation": act}
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/hft/activation/checkout")
+async def create_customer_hft_activation_checkout(
+    req: HftActivationCheckoutRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    from ..services.activation_service import create_activation_checkout
+    conn = get_db_connection()
+    try:
+        return create_activation_checkout(
+            conn=conn,
+            user_id=current_user["user_id"],
+            provider=req.provider,
+            user_role=current_user.get("role", "CUSTOMER"),
+        )
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/hft/activation/verify")
+async def verify_customer_hft_activation(
+    req: HftActivationVerifyRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    from ..services.activation_service import verify_and_complete_activation
+    conn = get_db_connection()
+    try:
+        return verify_and_complete_activation(
+            conn=conn,
+            user_id=current_user["user_id"],
+            payment_reference=req.payment_reference,
+            amount=req.amount,
+            currency=req.currency,
+            signature=req.signature,
+            provider=req.provider,
+            event_id=req.event_id,
+        )
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/hft/activation/webhook")
+async def process_hft_activation_webhook(req: HftActivationWebhookRequest):
+    from ..services.activation_service import verify_and_complete_activation
+    conn = get_db_connection()
+    try:
+        return verify_and_complete_activation(
+            conn=conn,
+            user_id=req.user_id,
+            payment_reference=req.payment_reference,
+            amount=req.amount,
+            currency=req.currency,
+            signature=req.signature,
+            provider=req.provider,
+            event_id=req.event_id,
+        )
+    finally:
+        conn.close()
+
+
+@customer_router.post("/admin/customers/{target_user_id}/hft-activation")
+async def admin_override_hft_activation(
+    target_user_id: str,
+    req: AdminHftActivationOverrideRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    if (current_user.get("role") or "").upper() not in ("ADMIN", "OWNER"):
+        raise HTTPException(status_code=403, detail="Admin privileges required.")
+    from ..services.activation_service import admin_set_activation_status
+    conn = get_db_connection()
+    try:
+        act = admin_set_activation_status(
+            conn=conn,
+            admin_user_id=current_user["user_id"],
+            target_user_id=target_user_id,
+            new_status=req.status,
+            reason=req.reason,
+        )
+        return {"status": "SUCCESS", "activation": act}
     finally:
         conn.close()
