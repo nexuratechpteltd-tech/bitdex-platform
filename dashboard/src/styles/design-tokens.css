@@ -1,0 +1,62 @@
+/* BITDEX Institutional Design Tokens (Jemini Design System) */
+:root {
+  /* Canvas & Panel Surfaces */
+  --bdx-bg-canvas: #080B10;
+  --bdx-bg-panel: #0E131B;
+  --bdx-bg-elevated: #151C28;
+  --bdx-border-subtle: #1E2736;
+  --bdx-border-focus: #38BDF8;
+
+  /* Typography */
+  --bdx-text-primary: #F1F5F9;
+  --bdx-text-secondary: #94A3B8;
+  --bdx-text-muted: #64748B;
+
+  /* Quant & Trading Accents */
+  --bdx-buy: #10B981;
+  --bdx-sell: #F43F5E;
+  --bdx-warn: #F59E0B;
+  --bdx-danger: #EF4444;
+  --bdx-accent-cyan: #00E5FF;
+}
+
+/* Tabular Monospace utility for zero numeric jitter */
+.font-mono-tabular,
+.tabular-nums {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Institutional Card and Panel Utilities */
+.bdx-card {
+  background-color: #0E131B;
+  border: 1px solid #1E2736;
+  border-radius: 8px;
+}
+
+.bdx-panel {
+  background-color: #0E131B;
+  border: 1px solid #1E2736;
+}
+
+.bdx-elevated {
+  background-color: #151C28;
+  border: 1px solid #1E2736;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #080B10;
+}
+::-webkit-scrollbar-thumb {
+  background: #1E2736;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #27354A;
+}
