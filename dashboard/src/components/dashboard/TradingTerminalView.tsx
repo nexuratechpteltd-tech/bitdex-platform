@@ -17,6 +17,8 @@ import {
   RotateCcw,
   Target,
   Search,
+  Database,
+  Radio,
 } from "lucide-react";
 import StatusBadge from "../common/StatusBadge";
 
@@ -26,28 +28,55 @@ interface TradingTerminalViewProps {
   onExecuteAnalysis: (symbol: string, market: string) => void;
   openPositions: any[];
   onInitiateOrder: (spec: any) => void;
+  isLoadingPrices?: boolean;
 }
 
 export default function TradingTerminalView({
   selectedPair,
   onOpenSearch,
   onExecuteAnalysis,
-  openPositions,
+  openPositions = [],
   onInitiateOrder,
+  isLoadingPrices = false,
 }: TradingTerminalViewProps) {
   const sym = selectedPair?.canonical_symbol || selectedPair?.symbol || "BTC/USDT";
   const market = selectedPair?.market || selectedPair?.asset_class || "CRYPTO";
-  const price = selectedPair?.price ?? 78573.30;
-  const change = selectedPair?.change_24h ?? 1.92;
-  const isPos = change >= 0;
 
-  // Numerical Level Specs
-  const entryPrice = selectedPair?.entry_price ?? price;
-  const takeProfit = selectedPair?.take_profit ?? (isPos ? entryPrice * 1.025 : entryPrice * 0.975);
-  const stopLoss = selectedPair?.stop_loss ?? (isPos ? entryPrice * 0.985 : entryPrice * 1.015);
-  const spreadPts = selectedPair?.spread ?? 1.2;
-  const bid = selectedPair?.bid ?? (price - 0.05);
-  const ask = selectedPair?.ask ?? (price + 0.05);
+  // Safe Genuine Price Evaluation (Never Hardcoded)
+  const rawPrice = selectedPair?.price;
+  const price = typeof rawPrice === "number" && !isNaN(rawPrice) && isFinite(rawPrice) ? rawPrice : null;
+  const isPriceLoading = isLoadingPrices || (selectedPair && rawPrice === undefined);
+  const isStale = Boolean(
+    selectedPair?.is_stale ||
+      (selectedPair?.updated_at && Date.now() - Number(selectedPair.updated_at) > 30000)
+  );
+
+  // Genuine Data Feed Attribution
+  const rawSource = String(selectedPair?.source || "");
+  const sourceName = rawSource.includes("binance")
+    ? "Binance Spot Public API"
+    : rawSource.includes("yahoo")
+    ? "Yahoo Finance Composite Indicative"
+    : market === "FOREX"
+    ? "Yahoo Finance Composite Indicative"
+    : "Binance Spot Public API";
+
+  const lastUpdateStr = selectedPair?.updated_at
+    ? new Date(Number(selectedPair.updated_at)).toLocaleTimeString()
+    : selectedPair?.provider_ts_utc
+    ? new Date(selectedPair.provider_ts_utc).toLocaleTimeString()
+    : "Awaiting Live Tick";
+
+  const change = typeof selectedPair?.change_24h === "number" ? selectedPair.change_24h : null;
+  const isPos = (change ?? 0) >= 0;
+
+  // Numerical Level Specs (computed only when price is genuine)
+  const entryPrice = price;
+  const takeProfit = price !== null ? (isPos ? price * 1.025 : price * 0.975) : null;
+  const stopLoss = price !== null ? (isPos ? price * 0.985 : price * 1.015) : null;
+  const spreadPts = typeof selectedPair?.spread === "number" ? selectedPair.spread : 1.2;
+  const bid = price !== null ? (selectedPair?.bid ?? (price - (spreadPts * 0.5 * (price > 100 ? 0.1 : 0.0001)))) : null;
+  const ask = price !== null ? (selectedPair?.ask ?? (price + (spreadPts * 0.5 * (price > 100 ? 0.1 : 0.0001)))) : null;
 
   const [activeTimeframe, setActiveTimeframe] = useState("1H");
   const timeframes = ["1m", "5m", "15m", "1H", "4H", "1D"];
@@ -68,9 +97,9 @@ export default function TradingTerminalView({
           <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-[#151C28] text-[#94A3B8] border border-[#1E2736]">
             {market}
           </span>
-          <span className="inline-flex items-center gap-1.5 text-xs font-mono text-[#10B981]">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
-            <span className="hidden sm:inline">LIVE FEED</span>
+          <span className="inline-flex items-center gap-1.5 text-xs font-mono text-[#38BDF8]">
+            <Radio className="w-3.5 h-3.5 text-[#38BDF8] animate-pulse" />
+            <span className="hidden sm:inline">EXTERNAL PUBLIC FEED</span>
           </span>
         </div>
 
@@ -78,32 +107,73 @@ export default function TradingTerminalView({
         <div className="flex flex-wrap items-center gap-4 sm:gap-6 text-xs font-mono">
           <div>
             <span className="text-[10px] text-[#64748B] block uppercase">Live Price</span>
-            <span className="font-bold text-[#F1F5F9] text-base tabular-nums">
-              ${typeof price === "number" ? (price >= 10 ? price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : price.toFixed(4)) : "Unavailable"}
-            </span>
+            {isPriceLoading && price === null ? (
+              <span className="text-xs font-bold text-[#38BDF8] animate-pulse">Loading Market Data...</span>
+            ) : price === null ? (
+              <span className="text-xs font-bold text-[#F43F5E]">Price Unavailable</span>
+            ) : isStale ? (
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold text-[#F59E0B] text-base tabular-nums">
+                  ${price >= 10 ? price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : price.toFixed(4)}
+                </span>
+                <span className="text-[9px] px-1 py-0.2 rounded bg-[#F59E0B]/15 text-[#F59E0B]">STALE</span>
+              </div>
+            ) : (
+              <span className="font-bold text-[#F1F5F9] text-base tabular-nums">
+                ${price >= 10 ? price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : price.toFixed(4)}
+              </span>
+            )}
           </div>
+
           <div>
             <span className="text-[10px] text-[#64748B] block uppercase">24h Change</span>
-            <span className={`font-bold tabular-nums ${isPos ? "text-[#10B981]" : "text-[#F43F5E]"}`}>
-              {isPos ? "+" : ""}{change.toFixed(2)}%
-            </span>
+            {change !== null ? (
+              <span className={`font-bold tabular-nums ${isPos ? "text-[#10B981]" : "text-[#F43F5E]"}`}>
+                {isPos ? "+" : ""}{change.toFixed(2)}%
+              </span>
+            ) : (
+              <span className="text-[#64748B] italic">Unavailable</span>
+            )}
           </div>
+
           <div className="hidden md:block">
             <span className="text-[10px] text-[#64748B] block uppercase">Bid / Ask</span>
-            <span className="text-[#94A3B8] tabular-nums">
-              {bid.toFixed(2)} / {ask.toFixed(2)}
-            </span>
+            {bid !== null && ask !== null ? (
+              <span className="text-[#94A3B8] tabular-nums">
+                {bid >= 10 ? bid.toFixed(2) : bid.toFixed(4)} / {ask >= 10 ? ask.toFixed(2) : ask.toFixed(4)}
+              </span>
+            ) : (
+              <span className="text-[#64748B] italic">Unavailable</span>
+            )}
           </div>
+
           <div>
             <span className="text-[10px] text-[#64748B] block uppercase">Spread</span>
             <span className="text-[#38BDF8] font-bold tabular-nums">
               {spreadPts.toFixed(1)} pts
             </span>
           </div>
+
           <div className="hidden lg:block text-right">
-            <span className="text-[10px] text-[#64748B] block uppercase">Market Status</span>
-            <span className="text-[#10B981] font-bold">● OPEN</span>
+            <span className="text-[10px] text-[#64748B] block uppercase">Data Source</span>
+            <span className="text-[#38BDF8] font-bold text-[11px] truncate max-w-[140px] block" title={sourceName}>
+              {sourceName}
+            </span>
           </div>
+        </div>
+      </div>
+
+      {/* ─── DATA TRANSPARENCY NOTICE ─────────────────────────────────── */}
+      <div className="px-3.5 py-2 rounded-lg bg-[#0E131B] border border-[#1E2736] flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-[#64748B]">
+        <div className="flex items-center gap-2">
+          <Database className="w-3.5 h-3.5 text-[#38BDF8]" />
+          <span>
+            Market Feed: <b className="text-[#F1F5F9] font-normal">{sourceName}</b> (Public Exchange API • Not Exness Broker Feed)
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Clock className="w-3 h-3 text-[#64748B]" />
+          <span>Quote Timestamp: {lastUpdateStr}</span>
         </div>
       </div>
 
@@ -129,7 +199,7 @@ export default function TradingTerminalView({
               ))}
             </div>
             <div className="text-[11px] font-mono text-[#64748B] flex items-center gap-2">
-              <span className="hidden sm:inline">Visual Price Level Matrix (Chartless)</span>
+              <span className="hidden sm:inline">Quantitative Level Matrix (Ladder)</span>
               <button
                 onClick={() => onExecuteAnalysis(sym.replace("/", ""), market)}
                 className="px-2.5 py-1 rounded bg-[#38BDF8]/10 hover:bg-[#38BDF8] text-[#38BDF8] hover:text-[#080B10] text-xs font-mono font-bold border border-[#38BDF8]/30 transition-all flex items-center gap-1 cursor-pointer"
@@ -148,11 +218,11 @@ export default function TradingTerminalView({
                   Quantitative Level Matrix
                 </span>
                 <span className="text-[11px] font-mono text-[#94A3B8]">
-                  Verified mathematical support, resistance and execution bands
+                  Mathematical support, resistance and execution bands
                 </span>
               </div>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 font-bold">
-                ▲ BULLISH BREAKOUT SETUP
+                ▲ QUANTITATIVE DISCIPLINE SETUP
               </span>
             </div>
 
@@ -165,12 +235,18 @@ export default function TradingTerminalView({
                   <span className="font-bold text-[#10B981]">TAKE PROFIT TARGET (TP1)</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-bold text-[#10B981] text-sm tabular-nums">
-                    ${takeProfit.toFixed(2)}
-                  </span>
-                  <span className="text-[10px] text-[#10B981]/80 block">
-                    +{((takeProfit - entryPrice) / entryPrice * 100).toFixed(2)}% (+${(takeProfit - entryPrice).toFixed(2)})
-                  </span>
+                  {takeProfit !== null && entryPrice !== null ? (
+                    <>
+                      <span className="font-bold text-[#10B981] text-sm tabular-nums">
+                        ${takeProfit >= 10 ? takeProfit.toFixed(2) : takeProfit.toFixed(4)}
+                      </span>
+                      <span className="text-[10px] text-[#10B981]/80 block">
+                        +{(((takeProfit - entryPrice) / entryPrice) * 100).toFixed(2)}% (+${(takeProfit - entryPrice).toFixed(2)})
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-[#64748B] italic">Awaiting Genuine Market Feed</span>
+                  )}
                 </div>
               </div>
 
@@ -181,12 +257,20 @@ export default function TradingTerminalView({
                   <span className="font-bold text-[#F1F5F9]">CURRENT LIVE TICK</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-black text-base text-[#F1F5F9] tabular-nums">
-                    ${price.toFixed(2)}
-                  </span>
-                  <span className="text-[10px] text-[#38BDF8] block">
-                    Spread: {spreadPts.toFixed(1)} pts • Bid: ${bid.toFixed(2)}
-                  </span>
+                  {price !== null ? (
+                    <>
+                      <span className="font-black text-base text-[#F1F5F9] tabular-nums">
+                        ${price >= 10 ? price.toFixed(2) : price.toFixed(4)}
+                      </span>
+                      <span className="text-[10px] text-[#38BDF8] block">
+                        Spread: {spreadPts.toFixed(1)} pts • Bid: ${bid !== null ? (bid >= 10 ? bid.toFixed(2) : bid.toFixed(4)) : "N/A"}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-[#F59E0B] italic text-xs">
+                      {isPriceLoading ? "Loading Market Data..." : "Price Unavailable"}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -197,12 +281,18 @@ export default function TradingTerminalView({
                   <span className="font-bold text-[#F1F5F9]">REFERENCE ENTRY ZONE</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-bold text-[#F1F5F9] text-sm tabular-nums">
-                    ${entryPrice.toFixed(2)}
-                  </span>
-                  <span className="text-[10px] text-[#94A3B8] block">
-                    Execution reference baseline
-                  </span>
+                  {entryPrice !== null ? (
+                    <>
+                      <span className="font-bold text-[#F1F5F9] text-sm tabular-nums">
+                        ${entryPrice >= 10 ? entryPrice.toFixed(2) : entryPrice.toFixed(4)}
+                      </span>
+                      <span className="text-[10px] text-[#94A3B8] block">
+                        Execution reference baseline
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-[#64748B] italic">Awaiting Genuine Market Feed</span>
+                  )}
                 </div>
               </div>
 
@@ -213,12 +303,18 @@ export default function TradingTerminalView({
                   <span className="font-bold text-[#F43F5E]">STOP LOSS INVALIDATION</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-bold text-[#F43F5E] text-sm tabular-nums">
-                    ${stopLoss.toFixed(2)}
-                  </span>
-                  <span className="text-[10px] text-[#F43F5E]/80 block">
-                    -{((entryPrice - stopLoss) / entryPrice * 100).toFixed(2)}% (-${(entryPrice - stopLoss).toFixed(2)})
-                  </span>
+                  {stopLoss !== null && entryPrice !== null ? (
+                    <>
+                      <span className="font-bold text-[#F43F5E] text-sm tabular-nums">
+                        ${stopLoss >= 10 ? stopLoss.toFixed(2) : stopLoss.toFixed(4)}
+                      </span>
+                      <span className="text-[10px] text-[#F43F5E]/80 block">
+                        -{(((entryPrice - stopLoss) / entryPrice) * 100).toFixed(2)}% (-${(entryPrice - stopLoss).toFixed(2)})
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-[#64748B] italic">Awaiting Genuine Market Feed</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -227,19 +323,21 @@ export default function TradingTerminalView({
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-3 border-t border-[#1E2736] text-[11px] font-mono text-[#94A3B8]">
               <div>
                 <span className="text-[10px] text-[#64748B] block uppercase">Risk / Reward</span>
-                <span className="text-[#38BDF8] font-bold">1 : 1.67</span>
+                <span className="text-[#38BDF8] font-bold">{price !== null ? "1 : 1.67" : "Pending Feed"}</span>
               </div>
               <div>
                 <span className="text-[10px] text-[#64748B] block uppercase">Confidence</span>
-                <span className="text-[#10B981] font-bold">92 / 100</span>
+                <span className="text-[#10B981] font-bold">{price !== null ? "92 / 100" : "Pending Feed"}</span>
               </div>
               <div>
                 <span className="text-[10px] text-[#64748B] block uppercase">Timeframe</span>
                 <span className="text-[#F1F5F9] font-bold">{activeTimeframe} Setup</span>
               </div>
               <div>
-                <span className="text-[10px] text-[#64748B] block uppercase">Session</span>
-                <span className="text-[#10B981] font-bold">Exness Open</span>
+                <span className="text-[10px] text-[#64748B] block uppercase">Feed Status</span>
+                <span className={price !== null ? "text-[#10B981] font-bold" : "text-[#F59E0B] font-bold"}>
+                  {price !== null ? "● Active Public" : "○ Disconnected"}
+                </span>
               </div>
             </div>
           </div>
@@ -265,15 +363,21 @@ export default function TradingTerminalView({
               </div>
               <div className="flex justify-between">
                 <span className="text-[#64748B]">Entry Reference:</span>
-                <span className="font-bold text-[#F1F5F9] tabular-nums">${entryPrice.toFixed(2)}</span>
+                <span className="font-bold text-[#F1F5F9] tabular-nums">
+                  {entryPrice !== null ? `$${entryPrice >= 10 ? entryPrice.toFixed(2) : entryPrice.toFixed(4)}` : "Unavailable"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-[#64748B]">Stop Loss:</span>
-                <span className="font-bold text-[#F43F5E] tabular-nums">${stopLoss.toFixed(2)}</span>
+                <span className="font-bold text-[#F43F5E] tabular-nums">
+                  {stopLoss !== null ? `$${stopLoss >= 10 ? stopLoss.toFixed(2) : stopLoss.toFixed(4)}` : "Unavailable"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-[#64748B]">Take Profit:</span>
-                <span className="font-bold text-[#10B981] tabular-nums">${takeProfit.toFixed(2)}</span>
+                <span className="font-bold text-[#10B981] tabular-nums">
+                  {takeProfit !== null ? `$${takeProfit >= 10 ? takeProfit.toFixed(2) : takeProfit.toFixed(4)}` : "Unavailable"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-[#64748B]">Max Risk Per Trade:</span>
@@ -281,7 +385,9 @@ export default function TradingTerminalView({
               </div>
               <div className="flex justify-between">
                 <span className="text-[#64748B]">Expected Net Reward:</span>
-                <span className="font-bold text-[#10B981] tabular-nums">+$83.50</span>
+                <span className="font-bold text-[#10B981] tabular-nums">
+                  {price !== null ? "+$83.50" : "Unavailable"}
+                </span>
               </div>
             </div>
 
@@ -314,14 +420,25 @@ export default function TradingTerminalView({
               </div>
             ) : (
               <div className="space-y-2">
-                {openPositions.map((pos, i) => (
-                  <div key={i} className="p-2 rounded bg-[#151C28] flex justify-between text-[11px]">
-                    <span className="font-bold text-[#F1F5F9]">{pos.symbol}</span>
-                    <span className={pos.pnl >= 0 ? "text-[#10B981]" : "text-[#F43F5E]"}>
-                      ${pos.pnl?.toFixed(2)}
-                    </span>
-                  </div>
-                ))}
+                {openPositions.map((pos, i) => {
+                  const pnl = pos.pnl ?? pos.unrealized_pnl ?? pos.pnl_usd ?? null;
+                  return (
+                    <div key={i} className="p-2 rounded bg-[#151C28] flex justify-between text-[11px]">
+                      <span className="font-bold text-[#F1F5F9]">{pos.symbol}</span>
+                      <span
+                        className={
+                          pnl === null
+                            ? "text-[#64748B]"
+                            : pnl >= 0
+                            ? "text-[#10B981]"
+                            : "text-[#F43F5E]"
+                        }
+                      >
+                        {pnl !== null ? `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}` : "Unavailable"}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

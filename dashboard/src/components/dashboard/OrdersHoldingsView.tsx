@@ -1,28 +1,20 @@
 "use client";
 
 import React, { useState } from "react";
-import { Layers, Clock, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
+import { Layers, RefreshCw, ShieldAlert, Clock, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import StatusBadge from "../common/StatusBadge";
-
-interface Position {
-  ticket: string;
-  symbol: string;
-  direction: "BUY" | "SELL";
-  entry_price: number;
-  current_price: number;
-  stop_loss?: number;
-  take_profit?: number;
-  volume_lots: number;
-  pnl_usd: number;
-  open_time: string;
-  close_time?: string;
-  status: "OPEN" | "PENDING" | "CLOSED";
-}
+import {
+  normalizePosition,
+  formatCurrencyValue,
+  formatVolumeValue,
+  formatPnlValue,
+  NormalizedPosition,
+} from "./ordersAdapter";
 
 interface OrdersHoldingsViewProps {
-  openPositions?: Position[];
-  pendingOrders?: Position[];
-  closedPositions?: Position[];
+  openPositions?: any[];
+  pendingOrders?: any[];
+  closedPositions?: any[];
   onRefresh?: () => void;
 }
 
@@ -34,12 +26,23 @@ export default function OrdersHoldingsView({
 }: OrdersHoldingsViewProps) {
   const [activeTab, setActiveTab] = useState<"OPEN" | "PENDING" | "CLOSED">("OPEN");
 
+  // Safely normalize all positions through the typed adapter
+  const normalizedOpen: NormalizedPosition[] = (Array.isArray(openPositions) ? openPositions : []).map(
+    (pos) => normalizePosition(pos, "OPEN")
+  );
+  const normalizedPending: NormalizedPosition[] = (Array.isArray(pendingOrders) ? pendingOrders : []).map(
+    (pos) => normalizePosition(pos, "PENDING")
+  );
+  const normalizedClosed: NormalizedPosition[] = (Array.isArray(closedPositions) ? closedPositions : []).map(
+    (pos) => normalizePosition(pos, "CLOSED")
+  );
+
   const currentList =
     activeTab === "OPEN"
-      ? openPositions
+      ? normalizedOpen
       : activeTab === "PENDING"
-      ? pendingOrders
-      : closedPositions;
+      ? normalizedPending
+      : normalizedClosed;
 
   return (
     <div className="space-y-6 font-sans animate-in fade-in duration-200">
@@ -64,8 +67,8 @@ export default function OrdersHoldingsView({
         )}
       </div>
 
-      {/* ─── SEGMENTED TAB BAR ───────────────────────────────────────── */}
-      <div className="flex items-center gap-2 border-b border-[#1E2736] pb-3 text-xs font-mono">
+      {/* ─── TAB NAVIGATION ─────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-2 p-1.5 rounded-2xl bg-[#0E131B] border border-[#1E2736] text-xs font-mono w-fit">
         <button
           onClick={() => setActiveTab("OPEN")}
           className={`px-4 py-2 rounded-xl font-bold transition-all cursor-pointer flex items-center gap-2 ${
@@ -75,8 +78,14 @@ export default function OrdersHoldingsView({
           }`}
         >
           <span>Open Positions</span>
-          <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${activeTab === "OPEN" ? "bg-[#080B10] text-[#38BDF8]" : "bg-[#1E2736] text-[#94A3B8]"}`}>
-            {openPositions.length}
+          <span
+            className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+              activeTab === "OPEN"
+                ? "bg-[#080B10] text-[#38BDF8]"
+                : "bg-[#1E2736] text-[#94A3B8]"
+            }`}
+          >
+            {normalizedOpen.length}
           </span>
         </button>
 
@@ -89,8 +98,14 @@ export default function OrdersHoldingsView({
           }`}
         >
           <span>Pending Orders</span>
-          <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${activeTab === "PENDING" ? "bg-[#080B10] text-[#38BDF8]" : "bg-[#1E2736] text-[#94A3B8]"}`}>
-            {pendingOrders.length}
+          <span
+            className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+              activeTab === "PENDING"
+                ? "bg-[#080B10] text-[#38BDF8]"
+                : "bg-[#1E2736] text-[#94A3B8]"
+            }`}
+          >
+            {normalizedPending.length}
           </span>
         </button>
 
@@ -103,8 +118,14 @@ export default function OrdersHoldingsView({
           }`}
         >
           <span>Closed Positions</span>
-          <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${activeTab === "CLOSED" ? "bg-[#080B10] text-[#38BDF8]" : "bg-[#1E2736] text-[#94A3B8]"}`}>
-            {closedPositions.length}
+          <span
+            className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+              activeTab === "CLOSED"
+                ? "bg-[#080B10] text-[#38BDF8]"
+                : "bg-[#1E2736] text-[#94A3B8]"
+            }`}
+          >
+            {normalizedClosed.length}
           </span>
         </button>
       </div>
@@ -113,7 +134,7 @@ export default function OrdersHoldingsView({
       {currentList.length === 0 ? (
         <div className="p-12 text-center rounded-2xl bg-[#0E131B] border border-[#1E2736] text-xs font-mono text-[#64748B] space-y-2">
           <Layers className="w-8 h-8 mx-auto text-[#64748B]" />
-          <p className="font-bold text-[#F1F5F9]">Zero {activeTab.toLowerCase()} positions in this cycle</p>
+          <p className="font-bold text-[#F1F5F9]">Zero {activeTab.toLowerCase()} records in this cycle</p>
           <p className="text-[11px] text-[#475569]">
             Broker execution locks remain active (`live_trading_locked=True`).
           </p>
@@ -121,7 +142,7 @@ export default function OrdersHoldingsView({
       ) : (
         <>
           {/* DESKTOP TABLE (>= 1024px) */}
-          <div className="hidden lg:block rounded-xl bg-[#0E131B] border border-[#1E2736] overflow-hidden">
+          <div className="hidden lg:block rounded-xl bg-[#0E131B] border border-[#1E2736] overflow-hidden shadow-xl">
             <table className="w-full text-left font-mono text-xs">
               <thead className="bg-[#151C28] text-[#94A3B8] text-[10px] uppercase border-b border-[#1E2736]">
                 <tr>
@@ -138,30 +159,68 @@ export default function OrdersHoldingsView({
               </thead>
               <tbody className="divide-y divide-[#1E2736]">
                 {currentList.map((pos) => {
-                  const isBuy = pos.direction === "BUY";
-                  const isPos = pos.pnl_usd >= 0;
+                  const pnl = formatPnlValue(pos.pnl_usd);
                   return (
                     <tr key={pos.ticket} className="hover:bg-[#151C28]/60 transition-colors">
                       <td className="py-3.5 px-4 text-[#94A3B8]">{pos.ticket}</td>
-                      <td className="py-3.5 px-4 font-bold text-[#F1F5F9]">{pos.symbol}</td>
+                      <td className="py-3.5 px-4 font-bold text-[#F1F5F9]">
+                        <div className="flex items-center gap-1.5">
+                          <span>{pos.symbol}</span>
+                          {pos.exchange && (
+                            <span className="text-[9px] px-1 py-0.2 rounded bg-[#1E2736] text-[#64748B]">
+                              {pos.exchange}
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="py-3.5 px-4">
                         <StatusBadge type="SIGNAL" state={pos.direction} />
                       </td>
-                      <td className="py-3.5 px-4 text-right tabular-nums">{pos.volume_lots.toFixed(2)}</td>
                       <td className="py-3.5 px-4 text-right tabular-nums text-[#F1F5F9]">
-                        ${pos.entry_price.toFixed(2)}
+                        {pos.volume_lots !== null ? (
+                          formatVolumeValue(pos.volume_lots)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 text-right tabular-nums text-[#F1F5F9]">
-                        ${pos.current_price.toFixed(2)}
+                        {pos.entry_price !== null ? (
+                          formatCurrencyValue(pos.entry_price)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 text-right tabular-nums text-[#F1F5F9]">
+                        {pos.current_price !== null ? (
+                          formatCurrencyValue(pos.current_price)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 text-right tabular-nums text-[#F43F5E]">
-                        {pos.stop_loss ? `$${pos.stop_loss.toFixed(2)}` : <span className="text-[#64748B]">Unavailable</span>}
+                        {pos.stop_loss !== null ? (
+                          formatCurrencyValue(pos.stop_loss)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 text-right tabular-nums text-[#10B981]">
-                        {pos.take_profit ? `$${pos.take_profit.toFixed(2)}` : <span className="text-[#64748B]">Unavailable</span>}
+                        {pos.take_profit !== null ? (
+                          formatCurrencyValue(pos.take_profit)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
                       </td>
-                      <td className={`py-3.5 px-4 text-right font-bold tabular-nums ${isPos ? "text-[#10B981]" : "text-[#F43F5E]"}`}>
-                        {isPos ? "+" : ""}${pos.pnl_usd.toFixed(2)}
+                      <td
+                        className={`py-3.5 px-4 text-right font-bold tabular-nums ${
+                          pnl.isUnavailable
+                            ? "text-[#64748B] italic"
+                            : pnl.isPositive
+                            ? "text-[#10B981]"
+                            : "text-[#F43F5E]"
+                        }`}
+                      >
+                        {pnl.text}
                       </td>
                     </tr>
                   );
@@ -173,40 +232,88 @@ export default function OrdersHoldingsView({
           {/* MOBILE RESPONSIVE CARDS (< 1024px) */}
           <div className="lg:hidden space-y-3 font-mono text-xs">
             {currentList.map((pos) => {
-              const isPos = pos.pnl_usd >= 0;
+              const pnl = formatPnlValue(pos.pnl_usd);
               return (
-                <div key={pos.ticket} className="p-4 rounded-xl bg-[#0E131B] border border-[#1E2736] space-y-2.5">
+                <div key={pos.ticket} className="p-4 rounded-xl bg-[#0E131B] border border-[#1E2736] space-y-2.5 shadow-md">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-sm text-[#F1F5F9]">{pos.symbol}</span>
                       <StatusBadge type="SIGNAL" state={pos.direction} />
+                      {pos.exchange && (
+                        <span className="text-[9px] px-1 py-0.2 rounded bg-[#1E2736] text-[#64748B]">
+                          {pos.exchange}
+                        </span>
+                      )}
                     </div>
-                    <span className={`font-bold text-sm tabular-nums ${isPos ? "text-[#10B981]" : "text-[#F43F5E]"}`}>
-                      {isPos ? "+" : ""}${pos.pnl_usd.toFixed(2)}
+                    <span
+                      className={`font-bold text-sm tabular-nums ${
+                        pnl.isUnavailable
+                          ? "text-[#64748B] italic"
+                          : pnl.isPositive
+                          ? "text-[#10B981]"
+                          : "text-[#F43F5E]"
+                      }`}
+                    >
+                      {pnl.text}
                     </span>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2 text-[11px] p-2.5 rounded-lg bg-[#151C28] border border-[#1E2736]">
                     <div>
                       <span className="text-[#64748B] block">Entry Price:</span>
-                      <span className="font-bold text-[#F1F5F9] tabular-nums">${pos.entry_price.toFixed(2)}</span>
+                      <span className="font-bold text-[#F1F5F9] tabular-nums">
+                        {pos.entry_price !== null ? (
+                          formatCurrencyValue(pos.entry_price)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
+                      </span>
                     </div>
                     <div>
                       <span className="text-[#64748B] block">Current Tick:</span>
-                      <span className="font-bold text-[#F1F5F9] tabular-nums">${pos.current_price.toFixed(2)}</span>
+                      <span className="font-bold text-[#F1F5F9] tabular-nums">
+                        {pos.current_price !== null ? (
+                          formatCurrencyValue(pos.current_price)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
+                      </span>
                     </div>
                     <div>
                       <span className="text-[#64748B] block">Stop Loss:</span>
                       <span className="font-bold text-[#F43F5E] tabular-nums">
-                        {pos.stop_loss ? `$${pos.stop_loss.toFixed(2)}` : "Unavailable"}
+                        {pos.stop_loss !== null ? (
+                          formatCurrencyValue(pos.stop_loss)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
                       </span>
                     </div>
                     <div>
                       <span className="text-[#64748B] block">Take Profit:</span>
                       <span className="font-bold text-[#10B981] tabular-nums">
-                        {pos.take_profit ? `$${pos.take_profit.toFixed(2)}` : "Unavailable"}
+                        {pos.take_profit !== null ? (
+                          formatCurrencyValue(pos.take_profit)
+                        ) : (
+                          <span className="text-[#64748B] italic">Unavailable</span>
+                        )}
                       </span>
                     </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[10px] text-[#64748B] pt-1 border-t border-[#1E2736]/60">
+                    <span>
+                      Vol:{" "}
+                      <b className="text-[#F1F5F9] font-normal">
+                        {pos.volume_lots !== null ? formatVolumeValue(pos.volume_lots) : "Unavailable"}
+                      </b>
+                    </span>
+                    <span>Ticket: {pos.ticket}</span>
+                    {pos.open_time && (
+                      <span className="truncate max-w-[120px]">
+                        {pos.open_time.replace("T", " ").replace("Z", "")}
+                      </span>
+                    )}
                   </div>
                 </div>
               );

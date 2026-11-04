@@ -260,6 +260,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
   const [ledgerEnv, setLedgerEnv] = useState<"LIVE" | "DEMO">("DEMO");
   const [ledgerPositions, setLedgerPositions] = useState<any[]>([]);
   const [ledgerOpenOrders, setLedgerOpenOrders] = useState<any[]>([]);
+  const [ledgerClosedPositions, setLedgerClosedPositions] = useState<any[]>([]);
   const [isLedgerLoading, setIsLedgerLoading] = useState(false);
 
   const fetchLedgerData = async () => {
@@ -273,6 +274,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
       if (posRes.ok) {
         const pData = await posRes.json();
         setLedgerPositions(pData.open_positions || []);
+        setLedgerClosedPositions(pData.closed_positions || []);
       }
 
       const ordRes = await fetch(`/trading/api/backend/orders/open?environment=${ledgerEnv}`, { headers });
@@ -333,6 +335,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             const combined = [...(data.crypto || []), ...(data.forex || [])];
             setTickerItems(combined);
             setForexSessionInfo(data.session || null);
+            setSelectedSearchPair((prev: any) => prev || (combined.length > 0 ? combined[0] : null));
           }
         }
       } catch (err) {
@@ -1452,10 +1455,10 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {/* Right: Broker Pill, Environment Badge & User Menu */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Exness Connection Pill */}
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 text-xs font-mono font-bold">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
-              <span>Exness MT5</span>
+            {/* Exness Connection Pill (Truthful Disconnected State) */}
+            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#EF4444]/15 text-[#EF4444] border border-[#EF4444]/30 text-xs font-mono font-bold">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#EF4444]" />
+              <span>EXNESS: NOT CONNECTED</span>
             </div>
 
             {/* Environment Badge */}
@@ -1572,7 +1575,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               equity={balancesData?.total_usd || 5000.0}
               unrealizedPnl={0.0}
               realizedPnl={0.0}
-              exnessConnected={true}
+              exnessConnected={false}
               tickerItems={tickerItems || []}
               onNavigate={navigateTo}
               onSelectPair={(p) => {
@@ -1584,7 +1587,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {currentNav === "TERMINAL" && (
             <TradingTerminalView
-              selectedPair={selectedSearchPair || { canonical_symbol: "BTC/USDT", market: "CRYPTO", price: 78573.30 }}
+              selectedPair={selectedSearchPair}
               onOpenSearch={() => setIsSearchOpen(true)}
               onExecuteAnalysis={(sym, mkt) => {
                 setSelectedSearchPair({ canonical_symbol: sym, market: mkt });
@@ -1594,6 +1597,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               onInitiateOrder={(spec) => {
                 // Execution guarded
               }}
+              isLoadingPrices={!selectedSearchPair && tickerItems.length === 0}
             />
           )}
 
@@ -1611,7 +1615,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {currentNav === "CONNECTIONS" && (
             <ExchangeConnectionsView
-              exnessConnected={true}
+              exnessConnected={false}
               onRefresh={() => fetchConnections()}
             />
           )}
@@ -1632,7 +1636,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             <OrdersHoldingsView
               openPositions={ledgerPositions || []}
               pendingOrders={ledgerOpenOrders || []}
-              closedPositions={[]}
+              closedPositions={ledgerClosedPositions || []}
               onRefresh={() => fetchLedgerData()}
             />
           )}

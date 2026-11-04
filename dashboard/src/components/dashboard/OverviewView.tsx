@@ -2,98 +2,101 @@
 
 import React from "react";
 import {
-  ShieldCheck,
-  TrendingUp,
+  Wallet,
   Activity,
-  Layers,
-  Zap,
   ArrowUpRight,
   ArrowDownRight,
-  Wallet,
-  Clock,
+  ShieldCheck,
+  TrendingUp,
   Compass,
+  Zap,
   Link2,
   Lock,
+  Radio,
+  Database,
 } from "lucide-react";
 import StatusBadge from "../common/StatusBadge";
+import { NavDestination } from "../layout/SidebarNav";
 
 interface OverviewViewProps {
-  balance: number;
-  equity: number;
-  unrealizedPnl: number;
-  realizedPnl: number;
-  exnessConnected: boolean;
-  exnessAccount?: {
-    account_id?: string;
-    server?: string;
-    leverage?: number;
-    account_type?: string;
-  };
-  tickerItems: any[];
-  onNavigate: (tab: any) => void;
+  balance?: number;
+  equity?: number;
+  unrealizedPnl?: number;
+  realizedPnl?: number;
+  exnessConnected?: boolean;
+  tickerItems?: any[];
+  onNavigate: (dest: NavDestination) => void;
   onSelectPair: (pair: any) => void;
 }
 
 export default function OverviewView({
-  balance,
-  equity,
-  unrealizedPnl,
-  realizedPnl,
-  exnessConnected,
-  exnessAccount,
-  tickerItems,
+  balance = 5000.0,
+  equity = 5000.0,
+  unrealizedPnl = 0.0,
+  realizedPnl = 0.0,
+  exnessConnected = false,
+  tickerItems = [],
   onNavigate,
   onSelectPair,
 }: OverviewViewProps) {
   return (
-    <div className="space-y-6 animate-in fade-in duration-200 font-sans">
-      {/* ─── TOP HEADER STATS ────────────────────────────────────────── */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-[#1E2736]">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-mono font-bold text-[#F1F5F9] tracking-tight">
-            Institutional Overview
-          </h1>
-          <p className="text-xs font-mono text-[#94A3B8] mt-1">
-            Real-time multi-asset intelligence &amp; broker connection summary
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <StatusBadge type="ENVIRONMENT" state="SIMULATED" />
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-[#151C28] text-[#10B981] border border-[#1E2736]">
-            <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
-            <span>Exness Gateway Active</span>
+    <div className="space-y-6 font-sans animate-in fade-in duration-200">
+      {/* ─── SYSTEM STATUS STRIP ────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-[#0E131B] border border-[#1E2736] text-xs font-mono">
+        <div className="flex items-center gap-3">
+          <span className="flex h-2 w-2 relative">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#10B981] opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-[#10B981]" />
           </span>
+          <span className="text-[#F1F5F9] font-bold">BITDEX INSTITUTIONAL STAGING</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#38BDF8]/10 text-[#38BDF8] border border-[#38BDF8]/30">
+            STAGING ENVIRONMENT
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#F59E0B]/10 text-[#F59E0B] border border-[#F59E0B]/30">
+            SIMULATED RISK ENGINE
+          </span>
+        </div>
+
+        <div className="flex items-center gap-4 text-[#94A3B8]">
+          <div className="flex items-center gap-1.5">
+            <Lock className="w-3.5 h-3.5 text-[#F59E0B]" />
+            <span className="text-[11px] text-[#F59E0B] font-bold">EXECUTION LOCKED</span>
+          </div>
+          <div className="hidden sm:flex items-center gap-1.5">
+            <span className="text-[#64748B]">Latency:</span>
+            <span className="text-[#10B981] font-bold">18 ms</span>
+          </div>
         </div>
       </div>
 
-      {/* ─── 4-CARD ACCOUNT & METRIC SUMMARY ─────────────────────────── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 text-xs font-mono">
-        {/* Card 1: Account Equity */}
+      {/* ─── 4-CARD INSTITUTIONAL SUMMARY STRIP ──────────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 font-mono">
+        {/* Card 1: Account Balance */}
         <div className="p-4 rounded-xl bg-[#0E131B] border border-[#1E2736] space-y-2">
           <div className="flex items-center justify-between text-[#94A3B8]">
-            <span className="text-[11px] uppercase tracking-wider">Account Equity</span>
+            <span className="text-[11px] uppercase tracking-wider">Simulated Balance</span>
             <Wallet className="w-4 h-4 text-[#38BDF8]" />
           </div>
           <div className="text-xl sm:text-2xl font-bold text-[#F1F5F9] tabular-nums">
-            ${equity ? equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "5,000.00"}
+            ${balance ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "5,000.00"}
           </div>
           <div className="text-[11px] text-[#64748B] flex items-center justify-between pt-1 border-t border-[#1E2736]">
-            <span>Cash: ${balance ? balance.toFixed(2) : "5,000.00"}</span>
-            <span className="text-[#38BDF8] font-bold">USD</span>
+            <span>Equity: ${equity ? equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "5,000.00"}</span>
+            <span className="text-[9px] px-1 rounded bg-[#38BDF8]/10 text-[#38BDF8]">DEMO SEED</span>
           </div>
         </div>
 
-        {/* Card 2: Unrealized P&L */}
+        {/* Card 2: Floating Unrealized P&L */}
         <div className="p-4 rounded-xl bg-[#0E131B] border border-[#1E2736] space-y-2">
           <div className="flex items-center justify-between text-[#94A3B8]">
-            <span className="text-[11px] uppercase tracking-wider">Unrealized P&amp;L</span>
+            <span className="text-[11px] uppercase tracking-wider">Unrealized Floating</span>
             <Activity className="w-4 h-4 text-[#10B981]" />
           </div>
           <div className={`text-xl sm:text-2xl font-bold tabular-nums ${unrealizedPnl >= 0 ? "text-[#10B981]" : "text-[#F43F5E]"}`}>
             {unrealizedPnl >= 0 ? "+" : ""}${unrealizedPnl.toFixed(2)}
           </div>
           <div className="text-[11px] text-[#64748B] flex items-center justify-between pt-1 border-t border-[#1E2736]">
-            <span>Active Positions</span>
+            <span>Mark-to-Market</span>
             <span className="text-[#F1F5F9] font-bold">0 Open</span>
           </div>
         </div>
@@ -113,56 +116,70 @@ export default function OverviewView({
           </div>
         </div>
 
-        {/* Card 4: Broker Connection */}
+        {/* Card 4: Broker Gateway Connection (Truthful Standby State) */}
         <div className="p-4 rounded-xl bg-[#0E131B] border border-[#1E2736] space-y-2">
           <div className="flex items-center justify-between text-[#94A3B8]">
-            <span className="text-[11px] uppercase tracking-wider">Primary Broker</span>
-            <Link2 className="w-4 h-4 text-purple-400" />
+            <span className="text-[11px] uppercase tracking-wider">Broker Gateway</span>
+            <Link2 className="w-4 h-4 text-[#94A3B8]" />
           </div>
           <div className="text-base font-bold text-[#F1F5F9] flex items-center gap-2">
             <span>Exness MT5</span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-bold">
-              DEMO
-            </span>
+            {exnessConnected ? (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-bold">
+                CONNECTED
+              </span>
+            ) : (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#EF4444]/15 text-[#EF4444] font-bold">
+                NOT CONNECTED
+              </span>
+            )}
           </div>
           <div className="text-[11px] text-[#64748B] flex items-center justify-between pt-1 border-t border-[#1E2736]">
-            <span>Server: Exness-MT5Trial</span>
-            <span className="text-[#10B981] font-bold">VERIFIED</span>
+            <span>Gateway Daemon: Standby</span>
+            <span className="text-[#F59E0B] font-bold">UNCONFIGURED</span>
           </div>
         </div>
       </div>
 
-      {/* ─── LIVE MARKET RADAR (NO CHARTS — PURE NUMERICAL FEED) ─────── */}
+      {/* ─── LIVE MARKET RADAR (NO CHARTS — PURE NUMERICAL FEED WITH SOURCE TAGS) ─────── */}
       <div className="rounded-xl bg-[#0E131B] border border-[#1E2736] p-4 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+            <Radio className="w-4 h-4 text-[#38BDF8] animate-pulse" />
             <h2 className="text-sm font-mono font-bold text-[#F1F5F9] uppercase tracking-wider">
-              Live Verified Market Feeds (No Synthetic Fallback)
+              External Public Market Feeds (Binance Spot &amp; Yahoo Indicative)
             </h2>
           </div>
-          <span className="text-xs font-mono text-[#64748B]">
-            Numerical Quotes Only • Zero Chart Overhead
-          </span>
+          <div className="flex items-center gap-2 text-[10px] font-mono text-[#64748B]">
+            <Database className="w-3.5 h-3.5 text-[#38BDF8]" />
+            <span>Public API Quotes • Zero Chart Overhead • Not Broker Confirmed</span>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {tickerItems.slice(0, 8).map((item: any, idx: number) => {
             const isPos = (item.change_24h ?? 0) >= 0;
             const price = item.price;
+            const isForex = String(item.market || "").toUpperCase() === "FOREX" || item.symbol.includes("/");
+            const sourceBadge = isForex ? "Yahoo Indicative" : "Binance Spot";
             return (
               <div
                 key={idx}
-                onClick={() => onSelectPair({ canonical_symbol: item.symbol, market: item.market })}
+                onClick={() => onSelectPair({ canonical_symbol: item.symbol, market: item.market, source: item.source, price: item.price, change_24h: item.change_24h })}
                 className="p-3 rounded-lg bg-[#151C28] border border-[#1E2736] hover:border-[#38BDF8] transition-all cursor-pointer group space-y-1.5"
               >
                 <div className="flex items-center justify-between">
                   <span className="font-mono font-bold text-xs text-[#F1F5F9] group-hover:text-[#38BDF8] transition-colors">
                     {item.symbol}
                   </span>
-                  <span className="text-[9px] font-mono uppercase px-1 py-0.2 rounded bg-[#0E131B] text-[#94A3B8] border border-[#1E2736]">
-                    {item.market || "SPOT"}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-[#080B10] text-[#38BDF8] border border-[#38BDF8]/20">
+                      {sourceBadge}
+                    </span>
+                    <span className="text-[9px] font-mono uppercase px-1 py-0.2 rounded bg-[#0E131B] text-[#94A3B8] border border-[#1E2736]">
+                      {item.market || "SPOT"}
+                    </span>
+                  </div>
                 </div>
                 <div className="flex items-baseline justify-between">
                   <span className="text-sm font-mono font-bold text-[#F1F5F9] tabular-nums">

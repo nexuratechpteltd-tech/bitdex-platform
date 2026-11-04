@@ -3,7 +3,7 @@
 import React from "react";
 import {
   LayoutGrid,
-  CandlestickChart,
+  TrendingUp,
   Compass,
   Zap,
   Link2,
@@ -56,7 +56,7 @@ export default function SidebarNav({
   hftBotState = "IDLE",
   activeSignalsCount = 19,
   openOrdersCount = 0,
-  exnessConnected = true,
+  exnessConnected = false,
   userEmail,
   userRole = "CUSTOMER",
   onSignOut,
@@ -75,7 +75,7 @@ export default function SidebarNav({
       id: "TERMINAL" as NavDestination,
       label: "Trading Dashboard",
       hash: "terminal",
-      icon: CandlestickChart,
+      icon: TrendingUp,
       group: "MAIN NAVIGATION",
       badge: <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30">LIVE</span>,
     },
@@ -85,11 +85,7 @@ export default function SidebarNav({
       hash: "long-term",
       icon: Compass,
       group: "MAIN NAVIGATION",
-      badge: (
-        <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30">
-          {activeSignalsCount}
-        </span>
-      ),
+      badge: <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981]">{activeSignalsCount}</span>,
     },
     {
       id: "HFT" as NavDestination,
@@ -98,9 +94,8 @@ export default function SidebarNav({
       icon: Zap,
       group: "MAIN NAVIGATION",
       badge: (
-        <span className="flex items-center gap-1 text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#F59E0B]/15 text-[#F59E0B] border border-[#F59E0B]/30">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#F59E0B] animate-pulse" />
-          SIM
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/30">
+          SIMULATED
         </span>
       ),
     },
@@ -110,11 +105,10 @@ export default function SidebarNav({
       hash: "connections",
       icon: Link2,
       group: "ACCOUNT & BROKER",
-      badge: (
-        <span className="flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/10 text-[#10B981]">
-          <span className={`w-1.5 h-1.5 rounded-full ${exnessConnected ? "bg-[#10B981]" : "bg-[#EF4444]"}`} />
-          Exness
-        </span>
+      badge: exnessConnected ? (
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981]">CONNECTED</span>
+      ) : (
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#EF4444]/15 text-[#EF4444]">DISCONNECTED</span>
       ),
     },
     {
@@ -132,9 +126,7 @@ export default function SidebarNav({
       icon: Layers,
       group: "ACCOUNT & BROKER",
       badge: openOrdersCount > 0 ? (
-        <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#38BDF8]/20 text-[#38BDF8]">
-          {openOrdersCount}
-        </span>
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#38BDF8]/20 text-[#38BDF8]">{openOrdersCount}</span>
       ) : null,
     },
     {
@@ -157,33 +149,38 @@ export default function SidebarNav({
 
   return (
     <>
-      {/* ─── DESKTOP SIDEBAR (>= 1024px) ─────────────────────────── */}
+      {/* ─── DESKTOP SIDEBAR (>= 1024px) ────────────────────────────── */}
       <aside
-        className={`hidden lg:flex flex-col bg-[#0E131B] border-r border-[#1E2736] transition-all duration-200 shrink-0 select-none z-30 ${
-          isCollapsed ? "w-[68px]" : "w-[256px]"
+        className={`hidden lg:flex flex-col bg-[#0E131B] border-r border-[#1E2736] transition-all duration-300 select-none z-30 shrink-0 ${
+          isCollapsed ? "w-[68px]" : "w-64"
         }`}
       >
-        {/* Brand Header */}
-        <div className="h-16 px-4 flex items-center justify-between border-b border-[#1E2736] bg-[#080B10]/40">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-[#38BDF8]/10 border border-[#38BDF8]/30 flex items-center justify-center shrink-0">
-              <span className="font-mono font-black text-sm text-[#38BDF8]">B</span>
-            </div>
-            {!isCollapsed && (
-              <div className="min-w-0">
-                <span className="font-mono font-black text-sm text-[#F1F5F9] tracking-wider block">
+        {/* Brand & Collapse Header */}
+        <div className="h-16 px-4 flex items-center justify-between border-b border-[#1E2736]">
+          {!isCollapsed ? (
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-[#38BDF8]/10 border border-[#38BDF8]/30 flex items-center justify-center shadow-sm">
+                <span className="font-mono font-black text-sm text-[#38BDF8]">B</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="font-mono font-black text-base text-[#F1F5F9] tracking-wider leading-none">
                   BIT<span className="text-[#38BDF8]">DEX</span>
                 </span>
-                <span className="text-[10px] font-mono text-[#64748B] block truncate">
-                  Institutional Terminal
+                <span className="text-[9px] font-mono text-[#64748B] tracking-widest mt-0.5">
+                  INSTITUTIONAL
                 </span>
               </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="w-8 h-8 mx-auto rounded-lg bg-[#38BDF8]/10 border border-[#38BDF8]/30 flex items-center justify-center">
+              <span className="font-mono font-black text-sm text-[#38BDF8]">B</span>
+            </div>
+          )}
+
           <button
             onClick={onToggleCollapse}
-            className="p-1.5 rounded-lg text-[#94A3B8] hover:text-[#F1F5F9] hover:bg-[#151C28] transition-colors"
-            title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className="p-1.5 rounded-lg text-[#94A3B8] hover:text-[#F1F5F9] hover:bg-[#151C28] transition-colors cursor-pointer"
           >
             {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
           </button>
@@ -262,7 +259,10 @@ export default function SidebarNav({
             </div>
           ) : (
             <div className="flex justify-center">
-              <div className="w-2 h-2 rounded-full bg-[#10B981]" title="Connected" />
+              <div
+                className={`w-2 h-2 rounded-full ${exnessConnected ? "bg-[#10B981]" : "bg-[#EF4444]"}`}
+                title={exnessConnected ? "Exness Connected" : "Exness Disconnected"}
+              />
             </div>
           )}
         </div>
