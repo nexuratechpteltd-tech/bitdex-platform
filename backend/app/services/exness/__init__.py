@@ -7,6 +7,8 @@ from .mock_adapter import ExnessDeterministicMockAdapter, EXNESS_MOCK_SPECS
 from .mt5_gateway_adapter import ExnessMT5GatewayAdapter
 from .vault import ExnessCredentialVault
 from .exness_db import apply_exness_migrations, get_user_exness_connection, save_exness_connection
+from .simulation_engine import HFTPairedSimulationEngine, QuantitativeRegimeClassifier, MarketRegime, CostModelConfig
+from .risk_guard import ExnessRiskGuard, RiskLimits
 
 __all__ = [
     "ExnessBaseAdapter",
@@ -17,4 +19,10 @@ __all__ = [
     "apply_exness_migrations",
     "get_user_exness_connection",
     "save_exness_connection",
+    "HFTPairedSimulationEngine",
+    "QuantitativeRegimeClassifier",
+    "MarketRegime",
+    "CostModelConfig",
+    "ExnessRiskGuard",
+    "RiskLimits",
 ]

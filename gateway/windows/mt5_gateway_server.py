@@ -122,9 +122,9 @@ async def security_transport_middleware(request: Request, call_next):
     """
     client_host = request.client.host if request.client else None
 
-    # Check client IP if enforcement is active
+    # Check client IP if enforcement is active (evaluates socket-level peer IP, ignoring spoofed forwarded headers)
     if os.getenv("ENFORCE_CLIENT_IP", "false").lower() == "true":
-        if client_host and client_host not in ALLOWED_CLIENT_IPS:
+        if not client_host or client_host not in ALLOWED_CLIENT_IPS:
             logger.warning(f"Unauthorized access blocked from untrusted IP: {client_host}")
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,

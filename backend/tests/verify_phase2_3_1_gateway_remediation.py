@@ -122,6 +122,22 @@ async def run_transport_and_cors_tests(client: httpx.AsyncClient):
         assert r.status_code == 403, f"Expected 403, got {r.status_code}"
         assert "Access forbidden" in r.text
         print(f"✓ PASSED: Unauthorized client IP blocked with HTTP 403 ({r.json()['detail']})")
+
+        # 3.3 Untrusted X-Forwarded-For bypass prevention
+        print("\n[TEST 3.3] Spoofed X-Forwarded-For header bypass rejection")
+        spoofed_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, client=("203.0.113.50", 12345)),
+            base_url="http://test",
+            headers={
+                "X-Gateway-Auth-Token": TEST_TOKEN,
+                "X-Forwarded-For": "127.0.0.1",
+                "X-Real-IP": "127.0.0.1",
+            },
+        )
+        r = await spoofed_client.get("/health")
+        assert r.status_code == 403, f"Expected 403, got {r.status_code}"
+        assert "Access forbidden" in r.text
+        print("✓ PASSED: Spoofed X-Forwarded-For cannot bypass socket-level IP restriction.")
     finally:
         os.environ["ENFORCE_CLIENT_IP"] = "false"
 

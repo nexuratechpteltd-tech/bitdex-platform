@@ -88,6 +88,23 @@ class MarginCalculateRequest(BaseModel):
     volume: float = Field(default=0.01, gt=0)
 
 
+class SimulationRequest(BaseModel):
+    symbol: str = Field(default="XAUUSDm", min_length=3)
+    volume_per_leg: float = Field(default=0.01, gt=0, le=1.0)
+    take_profit_points: float = Field(default=30.0, gt=0)
+    stop_loss_points: float = Field(default=60.0, gt=0)
+    max_hold_bars: int = Field(default=15, ge=3, le=100)
+    timeframe: str = Field(default="M1")
+    candle_count: int = Field(default=100, ge=25, le=500)
+
+
+class PreOrderRiskCheckRequest(BaseModel):
+    symbol: str = Field(..., min_length=3)
+    volume: float = Field(..., gt=0)
+    price: float = Field(..., gt=0)
+    order_type: str = Field(default="BUY")
+
+
 @router.get("/status")
 async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
     """
@@ -384,4 +401,99 @@ async def trigger_reconciliation(user: Dict[str, Any] = Depends(get_current_user
         "status": "SUCCESS",
         "log_id": log_id,
         "reconciliation": rec_result,
+    }
+
+
+@router.post("/simulation/run")
+async def run_hft_simulation(
+    req: SimulationRequest, user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Runs an isolated quantitative HFT simulation using historical candle data.
+    Enforces honest accounting (spread, slippage, swap, latency) and market regime classification.
+    Always explicitly marked is_simulated=True.
+    """
+    from ..services.exness.simulation_engine import HFTPairedSimulationEngine, CostModelConfig
+
+    adapter = get_user_adapter(user["user_id"])
+    candles = await adapter.get_historical_candles(req.symbol, req.timeframe, req.candle_count)
+    if not candles or len(candles) < 25:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient candles returned for {req.symbol} (got {len(candles) if candles else 0}, need at least 25)"
+        )
+
+    engine = HFTPairedSimulationEngine(config=CostModelConfig())
+    result = engine.run_simulation(
+        symbol=req.symbol,
+        candles=candles,
+        volume_per_leg=req.volume_per_leg,
+        take_profit_points=req.take_profit_points,
+        stop_loss_points=req.stop_loss_points,
+        max_hold_bars=req.max_hold_bars,
+    )
+    return {"status": "SUCCESS", "simulation": result}
+
+
+@router.get("/risk/limits")
+async def get_risk_limits(user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Returns active quantitative risk guard limits, circuit breaker thresholds, and safety status.
+    """
+    from ..services.exness.risk_guard import ExnessRiskGuard
+
+    guard = ExnessRiskGuard()
+    limits_dict = {
+        "max_open_positions": guard.limits.max_open_positions,
+        "max_aggregate_exposure_usd": guard.limits.max_aggregate_exposure_usd,
+        "max_daily_loss_usd": guard.limits.max_daily_loss_usd,
+        "max_basket_loss_usd": guard.limits.max_basket_loss_usd,
+        "max_drawdown_pct": guard.limits.max_drawdown_pct,
+        "max_margin_utilization_pct": guard.limits.max_margin_utilization_pct,
+        "max_volume_per_symbol": guard.limits.max_volume_per_symbol,
+        "max_volume_per_order": guard.limits.max_volume_per_order,
+        "max_stale_quote_ms": guard.limits.max_stale_quote_ms,
+        "emergency_lock_active": guard.limits.emergency_lock_active,
+        "live_trading_locked": True,
+    }
+    return {"status": "SUCCESS", "limits": limits_dict}
+
+
+@router.post("/risk/check")
+async def evaluate_pre_order_risk(
+    req: PreOrderRiskCheckRequest, user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Evaluates pre-trade quantitative risk compliance without executing any orders.
+    Enforces fail-closed safety and emergency lock validation.
+    """
+    from ..services.exness.risk_guard import ExnessRiskGuard
+
+    adapter = get_user_adapter(user["user_id"])
+    account_info = await adapter.get_account_info()
+    positions = await adapter.get_open_positions()
+
+    guard = ExnessRiskGuard()
+    is_safe, reason = guard.validate_pre_order(
+        symbol=req.symbol,
+        volume=req.volume,
+        price=req.price,
+        current_open_positions=positions,
+        account_info=account_info,
+    )
+
+    unprotected = guard.detect_missing_stop_loss(positions)
+    basket_safe, basket_loss, basket_msg = guard.evaluate_basket_drawdown(positions)
+
+    return {
+        "status": "SUCCESS",
+        "risk_approved": is_safe,
+        "reason": reason,
+        "basket_assessment": {
+            "basket_safe": basket_safe,
+            "floating_pnl_usd": basket_loss,
+            "status": basket_msg,
+        },
+        "unprotected_positions_count": len(unprotected),
+        "unprotected_positions": unprotected,
     }
