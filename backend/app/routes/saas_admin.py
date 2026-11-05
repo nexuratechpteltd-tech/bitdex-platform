@@ -2039,8 +2039,12 @@ async def get_protection_status():
 
     conn = get_db_connection()
     try:
+        from ..services.engine_coordinator import EngineCoordinator
+        EngineCoordinator.clean_expired_leases(conn)
+        now_str = EngineCoordinator.now_iso()
         leases = conn.execute(
-            "SELECT * FROM futures_symbol_leases WHERE status = 'ACTIVE' ORDER BY acquired_at DESC LIMIT 20"
+            "SELECT * FROM futures_symbol_leases WHERE status = 'ACTIVE' AND expires_at > ? ORDER BY acquired_at DESC LIMIT 20",
+            (now_str,)
         ).fetchall()
         open_positions = conn.execute(
             "SELECT COUNT(*) FROM futures_positions WHERE status = 'OPEN'"
@@ -2064,8 +2068,12 @@ async def get_protection_status():
 async def get_admin_trading_overview(admin_user = Depends(get_admin_user)):
     conn = get_db_connection()
     try:
+        from ..services.engine_coordinator import EngineCoordinator
+        EngineCoordinator.clean_expired_leases(conn)
+        now_str = EngineCoordinator.now_iso()
         leases = [dict(r) for r in conn.execute(
-            "SELECT * FROM futures_symbol_leases WHERE status = 'ACTIVE' ORDER BY acquired_at DESC LIMIT 20"
+            "SELECT * FROM futures_symbol_leases WHERE status = 'ACTIVE' AND expires_at > ? ORDER BY acquired_at DESC LIMIT 20",
+            (now_str,)
         ).fetchall()]
 
         trades = [dict(r) for r in conn.execute(

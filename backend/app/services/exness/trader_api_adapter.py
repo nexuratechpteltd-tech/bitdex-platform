@@ -128,7 +128,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         self.account_tier = (account_tier or "STANDARD").upper()
 
         # Gateway discovery host
-        default_discovery = "https://gateway.exness-api.com" if self.environment == "REAL" else "https://gateway-demo.exness-api.com"
+        default_discovery = "https://www.exness-api.com"
         self.discovery_base_url = (discovery_base_url or os.getenv("EXN_DISCOVERY_BASE_URL", default_discovery)).rstrip("/")
 
         # Dynamically discovered access point (resolved via DNS Gateway Discovery)
@@ -360,6 +360,20 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                         "account_id": self.account_id,
                         "http_status": 429,
                         "reason": "Exness Trader API rate limit exceeded.",
+                    }
+                elif res.status_code == 404:
+                    self.is_connected = False
+                    self.broker_authenticated = False
+                    return {
+                        "status": "RESOURCE_NOT_FOUND",
+                        "adapter_connected": True,
+                        "broker_authenticated": False,
+                        "is_mock": False,
+                        "broker_mode": "EXNESS_TRADER_API",
+                        "account_id": self.account_id,
+                        "http_status": 404,
+                        "target_endpoint": f"{target_api}{path}",
+                        "reason": f"Account or endpoint '{path}' not found on Exness Trader API ({target_api}). Verify that the API Key has access to Account ID {self.account_id} in Exness Personal Area.",
                     }
                 elif res.status_code in (502, 503, 504):
                     self.is_connected = False

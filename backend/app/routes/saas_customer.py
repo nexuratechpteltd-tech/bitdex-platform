@@ -2192,10 +2192,20 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
     try:
         # 1. Exchange Connection Check
         conn_row = conn.execute(
-            "SELECT account_id, environment FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
+            "SELECT account_id, provider, environment, label FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
             (user_id,)
         ).fetchone()
         has_conn = bool(conn_row)
+
+        conn_provider = (conn_row["provider"] if conn_row else "BINANCE").upper()
+        conn_env_raw = (conn_row["environment"] if conn_row else "DEMO").upper()
+        norm_env = "LIVE" if conn_env_raw == "LIVE" else "DEMO"
+        conn_label = "Binance Spot Market Data" if conn_provider == "BINANCE" else f"{conn_provider} Market Data"
+
+        if has_conn:
+            conn_detail = f"Active {conn_label} ({norm_env} Feed): Profile {conn_row['account_id']} linked. (Live trading execution disabled by safety lock)"
+        else:
+            conn_detail = "No active broker profile found. Connect exchange credentials in Settings."
 
         # 2. Account Availability
         acc_row = conn.execute(
@@ -2228,8 +2238,12 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
         margin_req = float(cfg.get("margin_allocation_usd", 50.0)) if cfg else 50.0
         leverage = int(cfg.get("leverage", 3)) if cfg else 3
 
-        # 5. Margin Adequacy
-        has_margin = avail_balance >= margin_req or (conn_row and (conn_row["environment"] if conn_row else "testnet") == "testnet")
+        # 5. Margin Adequacy: Reject execution when available margin is insufficient. Fail-closed on zero balance.
+        has_margin = (avail_balance >= margin_req) and (margin_req > 0)
+        if has_margin:
+            margin_detail = f"Available: ${avail_balance:.2f} | Required: ${margin_req:.2f} ({leverage}x isolated leverage) — Margin adequate."
+        else:
+            margin_detail = f"Available: ${avail_balance:.2f} | Required: ${margin_req:.2f} ({leverage}x isolated leverage) — Insufficient margin in {norm_env} account."
 
         # 6. Risk Engine Approval
         risk_approved = leverage <= 5
@@ -2238,11 +2252,15 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
         kill_switch_ok = not kill_switch
 
         # 8. Symbol Lease Collision
-        lease_row = conn.execute(
-            "SELECT * FROM futures_symbol_leases WHERE symbol = ? AND status = 'ACTIVE' LIMIT 1",
-            (clean_symbol,)
-        ).fetchone()
-        symbol_exclusive = (not lease_row) or (lease_row["account_id"] == (acc_row["account_id"] if acc_row else ""))
+        from ..services.engine_coordinator import EngineCoordinator
+        EngineCoordinator.clean_expired_leases(conn)
+        active_lease = EngineCoordinator.get_symbol_active_lease(conn, clean_symbol)
+        my_account_id = acc_row["account_id"] if acc_row else ""
+        symbol_exclusive = (not active_lease) or (active_lease["account_id"] == my_account_id)
+        if symbol_exclusive:
+            lease_detail = f"Symbol {clean_symbol} available for exclusive atomic lock."
+        else:
+            lease_detail = f"Symbol collision: Engine {active_lease.get('engine_id')} holds active lease ({active_lease.get('lease_token')}) until {active_lease.get('expires_at')}."
 
         # 9. Watchdog Daemon Status
         heartbeat_path = "/opt/tauric-platform-staging/backend/watchdog_heartbeat.json"
@@ -2278,10 +2296,10 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
             },
             {
                 "id": "EXCHANGE_CONNECTION",
-                "name": "Binance Testnet API Connection",
+                "name": conn_label,
                 "passed": has_conn,
                 "critical": True,
-                "detail": f"Active {conn_row['environment'].upper()} profile linked: {conn_row['account_id']}" if has_conn else "No active exchange profile found. Connect Binance Testnet API key in Vault."
+                "detail": conn_detail
             },
             {
                 "id": "ACCOUNT_PROVISIONED",
@@ -2302,7 +2320,7 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
                 "name": "Margin Sizing & Capital Allocation",
                 "passed": has_margin,
                 "critical": True,
-                "detail": f"${margin_req:.2f} allocated ({leverage}x isolated leverage) within margin limits."
+                "detail": margin_detail
             },
             {
                 "id": "RISK_ENGINE_APPROVAL",
@@ -2323,14 +2341,14 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
                 "name": "Execution Gate Safeguard",
                 "passed": True,
                 "critical": False,
-                "detail": "Controlled Validation Mode: Live Mainnet locked. Testnet simulated execution permitted."
+                "detail": "Controlled Validation Mode: Live Mainnet locked, read-only mode enforced."
             },
             {
                 "id": "SYMBOL_EXCLUSIVE_LOCK",
                 "name": "Engine Exclusivity Mutual Lock (CAS)",
                 "passed": symbol_exclusive,
                 "critical": True,
-                "detail": f"Symbol {clean_symbol} available for exclusive atomic lock." if symbol_exclusive else f"Symbol collision: Another engine currently holds an active lease on {clean_symbol}."
+                "detail": lease_detail
             },
             {
                 "id": "STOP_LOSS_WATCHDOG",
@@ -2553,5 +2571,142 @@ async def admin_override_hft_activation(
             reason=req.reason,
         )
         return {"status": "SUCCESS", "activation": act}
+    finally:
+        conn.close()
+
+
+# --- Phase 13: Bottom Trading Activity Panel Endpoints ---
+
+@customer_router.get("/customer/trading/hft/positions")
+async def get_hft_positions_route(current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.futures_db import list_open_futures_positions
+        fut_positions = list_open_futures_positions(conn, user_id)
+        
+        broker_positions = []
+        try:
+            from ..services.exchange_framework import exchange_framework
+            all_pos = exchange_framework.get_positions(environment="ALL")
+            is_admin = current_user.get("role") in ("ADMIN", "OWNER")
+            if not is_admin:
+                broker_positions = [p for p in all_pos if p.get("user_id") == user_id]
+            else:
+                broker_positions = all_pos
+        except Exception:
+            broker_positions = []
+            
+        combined = []
+        for p in fut_positions:
+            combined.append({
+                "position_id": p.get("position_id", ""),
+                "symbol": p.get("symbol", ""),
+                "direction": p.get("direction", "LONG"),
+                "size": float(p.get("size", 0.0)),
+                "entry_price": float(p.get("entry_price", 0.0)),
+                "mark_price": float(p.get("mark_price", p.get("entry_price", 0.0))),
+                "unrealized_pnl": float(p.get("unrealized_pnl", 0.0)),
+                "realized_pnl": float(p.get("realized_pnl", 0.0)),
+                "isolated_margin": float(p.get("isolated_margin", 0.0)),
+                "leverage": int(p.get("leverage", 3)),
+                "status": p.get("status", "OPEN"),
+                "stop_loss_price": float(p.get("stop_loss_price", 0.0)) if p.get("stop_loss_price") else None,
+                "take_profit_price": float(p.get("take_profit_price", 0.0)) if p.get("take_profit_price") else None,
+                "opened_at": p.get("created_at", ""),
+                "source": "FUTURES_ISOLATED"
+            })
+            
+        for bp in broker_positions:
+            combined.append({
+                "position_id": bp.get("position_id", ""),
+                "symbol": bp.get("symbol", ""),
+                "direction": bp.get("side", bp.get("direction", "LONG")),
+                "size": float(bp.get("amount", bp.get("size", 0.0))),
+                "entry_price": float(bp.get("entry_price", 0.0)),
+                "mark_price": float(bp.get("current_price", bp.get("mark_price", 0.0))),
+                "unrealized_pnl": float(bp.get("unrealized_pnl", 0.0)),
+                "realized_pnl": float(bp.get("realized_pnl", 0.0)),
+                "isolated_margin": float(bp.get("margin", 0.0)),
+                "leverage": int(bp.get("leverage", 1)),
+                "status": bp.get("status", "OPEN"),
+                "stop_loss_price": float(bp.get("stop_loss", 0.0)) if bp.get("stop_loss") else None,
+                "take_profit_price": float(bp.get("take_profit", 0.0)) if bp.get("take_profit") else None,
+                "opened_at": bp.get("opened_at", bp.get("created_at", "")),
+                "source": "BROKER_EXECUTION"
+            })
+            
+        open_pos = [p for p in combined if p["status"] == "OPEN"]
+        closed_pos = [p for p in combined if p["status"] == "CLOSED"]
+        
+        return {
+            "status": "SUCCESS",
+            "count": len(combined),
+            "open_count": len(open_pos),
+            "open_positions": open_pos,
+            "closed_positions": closed_pos
+        }
+    finally:
+        conn.close()
+
+
+@customer_router.get("/customer/trading/hft/orders")
+async def get_hft_orders_route(current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.exchange_framework import exchange_framework
+        orders = exchange_framework.get_orders_history()
+        is_admin = current_user.get("role") in ("ADMIN", "OWNER")
+        if not is_admin:
+            orders = [o for o in orders if o.get("user_id") == user_id]
+            
+        open_orders = [o for o in orders if o.get("status") in ("NEW", "OPEN", "PARTIALLY_FILLED")]
+        closed_orders = [o for o in orders if o.get("status") in ("FILLED", "CANCELED", "REJECTED", "EXPIRED")]
+        
+        return {
+            "status": "SUCCESS",
+            "count": len(orders),
+            "open_orders": open_orders,
+            "closed_orders": closed_orders
+        }
+    finally:
+        conn.close()
+
+
+@customer_router.get("/customer/trading/hft/account-summary")
+async def get_hft_account_summary_route(current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        acc_row = conn.execute("SELECT * FROM futures_accounts WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
+        conn_row = conn.execute(
+            "SELECT account_id, provider, environment FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        
+        wallet_balance = float(acc_row["wallet_balance"]) if acc_row else 0.0
+        avail_balance = float(acc_row["available_balance"]) if acc_row else 0.0
+        unrealized_pnl = float(acc_row["unrealized_pnl"]) if acc_row else 0.0
+        margin_balance = float(acc_row["margin_balance"]) if acc_row else 0.0
+        
+        env_raw = (conn_row["environment"] if conn_row else (dict(acc_row).get("environment") if acc_row else "DEMO")).upper()
+        norm_env = "LIVE" if env_raw == "LIVE" else "DEMO"
+        
+        return {
+            "status": "SUCCESS",
+            "account_id": acc_row["account_id"] if acc_row else "UNINITIALIZED",
+            "environment": norm_env,
+            "wallet_balance_usd": wallet_balance,
+            "available_balance_usd": avail_balance,
+            "unrealized_pnl_usd": unrealized_pnl,
+            "margin_balance_usd": margin_balance,
+            "equity_usd": round(wallet_balance + unrealized_pnl, 2),
+            "margin_type": dict(acc_row).get("default_margin_type", "ISOLATED") if acc_row else "ISOLATED",
+            "default_leverage": dict(acc_row).get("default_leverage", 3) if acc_row else 3,
+            "max_leverage_limit": 5,
+            "kill_switch_active": bool(acc_row["kill_switch_active"]) if acc_row else False,
+            "engine_b_enabled": bool(acc_row["engine_b_enabled"]) if acc_row else False
+        }
     finally:
         conn.close()

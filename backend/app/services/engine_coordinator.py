@@ -28,6 +28,69 @@ class EngineCoordinator:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @classmethod
+    def clean_expired_leases(cls, conn: sqlite3.Connection) -> int:
+        """
+        Mark all expired leases whose status is ACTIVE as EXPIRED.
+        Compares expires_at against UTC current time.
+        """
+        now_str = cls.now_iso()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE futures_symbol_leases
+            SET status = 'EXPIRED'
+            WHERE status = 'ACTIVE' AND expires_at <= ?
+            """,
+            (now_str,)
+        )
+        return cursor.rowcount
+
+    @classmethod
+    def get_symbol_active_lease(cls, conn: sqlite3.Connection, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Query any valid active unexpired lease for a symbol across all accounts.
+        Lazily transitions expired active rows to EXPIRED.
+        """
+        sym = symbol.upper()
+        now_str = cls.now_iso()
+        cursor = conn.cursor()
+
+        # Lazy expiration of stale leases on this symbol
+        cursor.execute(
+            """
+            UPDATE futures_symbol_leases
+            SET status = 'EXPIRED'
+            WHERE symbol = ? AND status = 'ACTIVE' AND expires_at <= ?
+            """,
+            (sym, now_str)
+        )
+
+        row = cursor.execute(
+            """
+            SELECT account_id, symbol, engine_id, lease_token, acquired_at, expires_at, status, metadata_json
+            FROM futures_symbol_leases
+            WHERE symbol = ? AND status = 'ACTIVE' AND expires_at > ?
+            ORDER BY acquired_at DESC
+            LIMIT 1
+            """,
+            (sym, now_str)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "account_id": row[0],
+            "symbol": row[1],
+            "engine_id": row[2],
+            "lease_token": row[3],
+            "acquired_at": row[4],
+            "expires_at": row[5],
+            "status": row[6],
+            "metadata": json.loads(row[7] or "{}")
+        }
+
+    @classmethod
     def is_engine_b_enabled(cls, conn: sqlite3.Connection, account_id: str) -> bool:
         """
         Engine B is strictly DEFAULT OFF.
@@ -69,7 +132,7 @@ class EngineCoordinator:
         sym = symbol.upper()
         eng = engine_id.upper()
         if eng not in ("ENGINE_A", "ENGINE_B"):
-            return False, None, f"Invalid engine_id '{engine_id}'. Must be ENGINE_A or ENGINE_B."
+            return False, None, f"Invalid engine_id {engine_id}. Must be ENGINE_A or ENGINE_B."
 
         now = datetime.now(timezone.utc)
         now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -80,7 +143,17 @@ class EngineCoordinator:
 
         cursor = conn.cursor()
 
-        # Check existing lease
+        # 1. Check cross-account symbol exclusivity
+        active_sym_lease = cls.get_symbol_active_lease(conn, sym)
+        if active_sym_lease and active_sym_lease["account_id"] != account_id:
+            reason = (
+                f"Symbol {sym} is currently locked by another account ({active_sym_lease['account_id']}) "
+                f"under {active_sym_lease['engine_id']} (expires {active_sym_lease['expires_at']}). Collision prevented."
+            )
+            logger.warning("[COLLISION_PREVENTED] Cross-account collision: %s", reason)
+            return False, None, reason
+
+        # 2. Check existing lease for this account and symbol
         existing = cursor.execute(
             """
             SELECT engine_id, lease_token, expires_at, status
@@ -171,23 +244,28 @@ class EngineCoordinator:
     ) -> Optional[Dict[str, Any]]:
         """Query the active lease for a symbol if unexpired."""
         cursor = conn.cursor()
+        now_str = cls.now_iso()
+
+        # Lazy expiration
+        cursor.execute(
+            """
+            UPDATE futures_symbol_leases
+            SET status = 'EXPIRED'
+            WHERE account_id = ? AND symbol = ? AND status = 'ACTIVE' AND expires_at <= ?
+            """,
+            (account_id, symbol.upper(), now_str)
+        )
+
         row = cursor.execute(
             """
             SELECT account_id, symbol, engine_id, lease_token, acquired_at, expires_at, status, metadata_json
             FROM futures_symbol_leases
-            WHERE account_id = ? AND symbol = ? AND status = 'ACTIVE'
+            WHERE account_id = ? AND symbol = ? AND status = 'ACTIVE' AND expires_at > ?
             """,
-            (account_id, symbol.upper())
+            (account_id, symbol.upper(), now_str)
         ).fetchone()
-        if not row:
-            return None
 
-        now = datetime.now(timezone.utc)
-        try:
-            expires = datetime.strptime(row[5], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            if now >= expires:
-                return None
-        except Exception:
+        if not row:
             return None
 
         return {

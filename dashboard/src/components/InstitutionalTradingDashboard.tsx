@@ -30,7 +30,9 @@ import {
   Square,
   ChevronDown,
   ChevronUp,
-  Info
+  Info,
+  ListFilter,
+  ArrowRight
 } from "lucide-react";
 import ProtectionCenter from "./ProtectionCenter";
 
@@ -151,78 +153,49 @@ interface StrategyConfig {
 }
 
 
-interface ExnessRiskLimits {
-  max_open_positions: number;
-  max_aggregate_exposure_usd: number;
-  max_daily_loss_usd: number;
-  max_basket_loss_usd: number;
-  max_drawdown_pct: number;
-  max_margin_utilization_pct: number;
-  max_volume_per_symbol: number;
-  max_volume_per_order: number;
-  max_stale_quote_ms: number;
-  emergency_lock_active: boolean;
-  live_trading_locked: boolean;
-}
-
-interface ExnessSimulationResult {
-  status: string;
-  is_simulated: boolean;
-  simulation_disclaimer: string;
+interface HftPositionItem {
+  position_id: string;
   symbol: string;
-  candle_count: number;
-  simulated_cycles: number;
-  winning_cycles: number;
-  losing_cycles: number;
-  win_rate_pct: number;
-  profit_factor: number;
-  gross_profit_usd: number;
-  gross_loss_usd: number;
-  average_win_usd: number;
-  average_loss_usd: number;
-  initial_balance_usd: number;
-  final_balance_usd?: number;
-  final_equity_usd: number;
-  peak_equity_usd?: number;
-  realized_pnl_usd?: number;
-  realized_gross_pnl_usd?: number;
-  realized_net_pnl_usd?: number;
-  unrealized_pnl_usd: number;
-  net_simulated_pnl_usd: number;
-  max_drawdown_usd: number;
-  max_drawdown_pct: number;
-  cost_breakdown: {
-    total_spread_cost_usd: number;
-    total_slippage_cost_usd: number;
-    total_swap_cost_usd: number;
-    total_commission_cost_usd: number;
-    total_friction_usd: number;
-  };
-  residual_directional_exposure: {
-    typical_unhedged_delta_lots: number;
-    exposure_state: string;
-    risk_warning: string;
-  };
-  regime_at_start: {
-    regime: string;
-    adx: number;
-    atr: number;
-    safe_for_hedging: boolean;
-    rationale: string;
-  };
-  risk_assessment: string;
+  direction: "LONG" | "SHORT";
+  size: number;
+  entry_price: number;
+  mark_price: number;
+  unrealized_pnl: number;
+  realized_pnl?: number;
+  isolated_margin?: number;
+  leverage: number;
+  status: "OPEN" | "CLOSED";
+  stop_loss_price?: number | null;
+  take_profit_price?: number | null;
+  opened_at?: string;
+  source?: string;
 }
 
-interface PreOrderRiskCheckResult {
-  risk_approved: boolean;
-  reason: string;
-  basket_assessment: {
-    basket_safe: boolean;
-    floating_pnl_usd: number;
-    status: string;
-  };
-  unprotected_positions_count: number;
-  unprotected_positions: Array<any>;
+interface HftOrderItem {
+  order_id: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  order_type: string;
+  price: number;
+  quantity: number;
+  status: "NEW" | "OPEN" | "PARTIALLY_FILLED" | "FILLED" | "CANCELLED" | "REJECTED";
+  executed_qty?: number;
+  created_at?: string;
+}
+
+interface HftAccountSummaryData {
+  account_id: string;
+  environment: string;
+  wallet_balance_usd: number;
+  available_balance_usd: number;
+  unrealized_pnl_usd: number;
+  margin_balance_usd: number;
+  equity_usd: number;
+  margin_type: string;
+  default_leverage: number;
+  max_leverage_limit: number;
+  kill_switch_active: boolean;
+  engine_b_enabled: boolean;
 }
 
 interface ChecklistItem {
@@ -301,18 +274,12 @@ export default function InstitutionalTradingDashboard({
     );
   }, [token]);
 
-  // ─── Quantitative HFT Simulation & Risk Guard State ───────────────────────
-  const [riskLimits, setRiskLimits] = useState<ExnessRiskLimits | null>(null);
-  const [simResult, setSimResult] = useState<ExnessSimulationResult | null>(null);
-  const [riskCheckResult, setRiskCheckResult] = useState<PreOrderRiskCheckResult | null>(null);
-  const [simLoading, setSimLoading] = useState<boolean>(false);
-  const [riskCheckLoading, setRiskCheckLoading] = useState<boolean>(false);
-  const [simSymbol, setSimSymbol] = useState<string>("XAUUSDm");
-  const [simVolume, setSimVolume] = useState<number>(0.01);
-  const [simTpPoints, setSimTpPoints] = useState<number>(30.0);
-  const [simSlPoints, setSimSlPoints] = useState<number>(60.0);
-  const [simHoldBars, setSimHoldBars] = useState<number>(15);
-  const [simCandleCount, setSimCandleCount] = useState<number>(100);
+  // ─── Authoritative Broker-Backed Activity & Telemetry State ───────────────
+  const [bottomTab, setBottomTab] = useState<"POSITIONS" | "OPEN_ORDERS" | "CLOSED_TRADES" | "HISTORY" | "ACCOUNT">("POSITIONS");
+  const [hftPositions, setHftPositions] = useState<HftPositionItem[]>([]);
+  const [hftOrders, setHftOrders] = useState<HftOrderItem[]>([]);
+  const [hftAccountSummary, setHftAccountSummary] = useState<HftAccountSummaryData | null>(null);
+  const [loadingBottomData, setLoadingBottomData] = useState<boolean>(false);
 
   // Fetch Customer $20 HFT Activation Status
   const fetchActivationStatus = useCallback(async () => {
@@ -422,99 +389,46 @@ export default function InstitutionalTradingDashboard({
     }
   };
 
-  // Fetch Exness Quantitative Risk Limits
-  const fetchRiskLimits = useCallback(async () => {
+  // Fetch Authoritative Bottom Panel Activity Data
+  const fetchBottomData = useCallback(async () => {
     try {
+      setLoadingBottomData(true);
       const authToken = getAuthToken();
-      const res = await fetch("/api/backend/hft/exness/risk/limits", {
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-      });
-      if (res.ok) {
-        const json = await res.json();
-        if (json.status === "SUCCESS") {
-          setRiskLimits(json.limits);
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
+      };
+
+      const [posRes, ordRes, accRes] = await Promise.all([
+        fetch("/api/backend/saas/customer/trading/hft/positions", { headers }),
+        fetch("/api/backend/saas/customer/trading/hft/orders", { headers }),
+        fetch("/api/backend/saas/customer/trading/hft/account-summary", { headers }),
+      ]);
+
+      if (posRes.ok) {
+        const posJson = await posRes.json();
+        if (posJson.open_positions && Array.isArray(posJson.open_positions)) {
+          setHftPositions(posJson.open_positions);
         }
       }
-    } catch (err: any) {
-      console.warn("Could not fetch Exness risk limits:", err);
+      if (ordRes.ok) {
+        const ordJson = await ordRes.json();
+        if (ordJson.open_orders && Array.isArray(ordJson.open_orders)) {
+          setHftOrders(ordJson.open_orders);
+        }
+      }
+      if (accRes.ok) {
+        const accJson = await accRes.json();
+        if (accJson.account_id) {
+          setHftAccountSummary(accJson);
+        }
+      }
+    } catch (err) {
+      console.warn("Could not fetch HFT bottom activity data:", err);
+    } finally {
+      setLoadingBottomData(false);
     }
   }, [getAuthToken]);
-
-  // Run Quantitative HFT Paired Simulation
-  const runQuantitativeSimulation = useCallback(async (overrideSymbol?: string) => {
-    setSimLoading(true);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/hft/exness/simulation/run", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({
-          symbol: overrideSymbol || simSymbol,
-          volume_per_leg: Number(simVolume),
-          take_profit_points: Number(simTpPoints),
-          stop_loss_points: Number(simSlPoints),
-          max_hold_bars: Number(simHoldBars),
-          candle_count: Number(simCandleCount),
-          timeframe: "M1",
-        }),
-      });
-      const json = await res.json();
-      if (res.ok && json.status === "SUCCESS") {
-        setSimResult(json.simulation);
-        setFeedback({
-          type: "success",
-          message: `[SIMULATED] Quantitative simulation for ${json.simulation.symbol} completed: ${json.simulation.simulated_cycles} cycles evaluated.`
-        });
-      } else {
-        throw new Error(json.detail || "Simulation run failed");
-      }
-    } catch (err: any) {
-      setFeedback({ type: "error", message: `Simulation Error: ${err.message}` });
-    } finally {
-      setSimLoading(false);
-    }
-  }, [getAuthToken, simSymbol, simVolume, simTpPoints, simSlPoints, simHoldBars, simCandleCount]);
-
-  // Run Pre-Trade Risk Check
-  const runRiskCheck = useCallback(async () => {
-    setRiskCheckLoading(true);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/hft/exness/risk/check", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({
-          symbol: simSymbol,
-          volume: Number(simVolume),
-          price: 2742.50,
-          order_type: "BUY",
-        }),
-      });
-      const json = await res.json();
-      if (res.ok && json.status === "SUCCESS") {
-        setRiskCheckResult(json);
-        setFeedback({
-          type: "info",
-          message: `[RISK GUARD] Pre-trade gate evaluated: ${json.reason}`
-        });
-      } else {
-        throw new Error(json.detail || "Risk check failed");
-      }
-    } catch (err: any) {
-      setFeedback({ type: "error", message: `Risk Check Error: ${err.message}` });
-    } finally {
-      setRiskCheckLoading(false);
-    }
-  }, [getAuthToken, simSymbol, simVolume]);
 
   // 1. Fetch Trading Overview
   const fetchOverview = useCallback(async () => {
@@ -631,19 +545,17 @@ export default function InstitutionalTradingDashboard({
     }
   }, [getAuthToken]);
 
-  const initialSimFired = useRef<boolean>(false);
   useEffect(() => {
     fetchOverview();
     fetchHftPairs();
-    fetchRiskLimits();
     fetchActivationStatus();
-    if (!initialSimFired.current) {
-      initialSimFired.current = true;
-      runQuantitativeSimulation();
-    }
-    const interval = setInterval(fetchOverview, 10000);
+    fetchBottomData();
+    const interval = setInterval(() => {
+      fetchOverview();
+      fetchBottomData();
+    }, 10000);
     return () => clearInterval(interval);
-  }, [fetchOverview, fetchHftPairs, fetchRiskLimits, runQuantitativeSimulation]);
+  }, [fetchOverview, fetchHftPairs, fetchActivationStatus, fetchBottomData]);
 
   useEffect(() => {
     if (selectedPair) {
@@ -662,6 +574,18 @@ export default function InstitutionalTradingDashboard({
   const activePairObj = useMemo(() => {
     return hftPairs.find((p) => p.symbol === selectedPair) || hftPairs[0] || null;
   }, [hftPairs, selectedPair]);
+
+  // Duplicate Pair Protection Check
+  const hasDuplicatePair = useMemo(() => {
+    if (!selectedPair) return false;
+    const hasOpenPos = hftPositions.some(
+      (p) => p.symbol === selectedPair && (p.status === "OPEN" || (p.size && p.size > 0))
+    );
+    const hasOpenOrd = hftOrders.some(
+      (o) => o.symbol === selectedPair && (o.status === "NEW" || o.status === "OPEN" || o.status === "PARTIALLY_FILLED")
+    );
+    return hasOpenPos || hasOpenOrd;
+  }, [selectedPair, hftPositions, hftOrders]);
 
   // Live Break-Even Calculator for Strategy Config
   const breakEvenMath = useMemo(() => {
@@ -964,6 +888,61 @@ export default function InstitutionalTradingDashboard({
           </div>
         </div>
 
+                {/* Verified Binance Spot Market Data Instruments */}
+        <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-white uppercase tracking-wider">
+                Verified Binance Instruments
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-500/30 font-bold">
+                Binance Spot Market Data (Public Feed)
+              </span>
+            </div>
+            <span className="text-[10px] text-[#64748B]">
+              Real-time tick evaluation &bull; Controlled Validation Mode
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 pt-1">
+            {["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT"].map((pairSym) => {
+              const pairData = hftPairs.find((p) => p.symbol === pairSym);
+              const isSelected = selectedPair === pairSym;
+              const price = pairData?.price;
+              const chg = pairData?.price_change_pct_24h;
+              const isPos = chg !== undefined && chg >= 0;
+              return (
+                <button
+                  key={pairSym}
+                  type="button"
+                  onClick={() => {
+                    setSelectedPair(pairSym);
+                    setStrategyConfig((prev) => ({ ...prev, symbol: pairSym }));
+                  }}
+                  className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer font-mono ${
+                    isSelected
+                      ? "bg-[#00E5FF]/15 border-[#00E5FF] shadow-sm shadow-[#00E5FF]/20"
+                      : "bg-[#121218] border-[#272735] hover:border-[#94A3B8]/40 hover:bg-[#181822]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-white">{pairSym}</span>
+                    {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-[#00E5FF]" />}
+                  </div>
+                  <div className="mt-1 flex items-baseline justify-between text-[11px]">
+                    <span className="font-bold text-[#EAECEF] tabular-nums">
+                      {price !== undefined ? `$${price >= 1 ? price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : price.toFixed(4)}` : "---"}
+                    </span>
+                    <span className={`text-[10px] font-bold tabular-nums ${isPos ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                      {chg !== undefined ? `${isPos ? "+" : ""}${chg.toFixed(2)}%` : ""}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Pair Grid (Responsive: 1 col on mobile, 2 on tablet, 3-4 on desktop) */}
         {filteredPairs.length === 0 ? (
           <div className="text-center py-8 text-xs font-mono text-[#94A3B8]">
@@ -1076,6 +1055,23 @@ export default function InstitutionalTradingDashboard({
 
       {/* ─── STEP 2 & 3: STRATEGY CONFIGURATION & PRE-TRADE CHECKLIST ────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Duplicate Pair Protection Warning */}
+        {hasDuplicatePair && (
+          <div className="col-span-full p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-200 text-xs font-mono flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+            <div className="space-y-0.5">
+              <span className="font-bold text-amber-300">
+                Duplicate Position / Working Order Warning ({selectedPair}):
+              </span>
+              <p className="text-[11px] text-amber-200/80">
+                An active position or working order already exists on {selectedPair} on your broker account.
+                Duplicate execution is blocked by netting protection rules to prevent unhedged directional exposure.
+              </p>
+            </div>
+          </div>
+        )}
+
+
         {/* Step 2 Card: Strategy Parameters & Active Settings */}
         <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-4 shadow-lg flex flex-col justify-between">
           <div className="space-y-3">
@@ -1311,7 +1307,7 @@ export default function InstitutionalTradingDashboard({
                     handleStartSession();
                   }
                 }}
-                disabled={(activationStatus === "ACTIVE" && !isReady) || sessionActionLoading}
+                disabled={(activationStatus === "ACTIVE" && !isReady) || sessionActionLoading || hasDuplicatePair}
                 className={`px-5 py-2.5 rounded-xl font-bold transition-all flex items-center gap-2 ${
                   activationStatus !== "ACTIVE"
                     ? "bg-amber-500 hover:bg-amber-400 text-[#0B0E11] cursor-pointer shadow-lg shadow-amber-500/20"
@@ -1334,565 +1330,370 @@ export default function InstitutionalTradingDashboard({
         </div>
       </div>
 
-      {/* ─── STEP 5: LIVE EXECUTION MONITOR & TRADE JOURNAL ─────────────────── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-4 shadow-lg font-mono">
+      {/* ─── AUTHORITATIVE BOTTOM TRADING ACTIVITY PANEL (5 TABS) ────────── */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-4 shadow-xl font-mono">
+        {/* Panel Header */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#272735] pb-3">
           <div className="flex items-center gap-2">
-            <span className="w-5 h-5 rounded-full bg-[#00E5FF]/20 text-[#00E5FF] text-xs font-bold flex items-center justify-center">
-              5
-            </span>
+            <Layers className="w-5 h-5 text-[#00E5FF]" />
             <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              Live Execution &amp; Position Monitor ({selectedPair})
+              Authoritative Trading Activity &amp; Portfolio Journal
             </h3>
-          </div>
-
-          <span className="text-[10px] text-[#64748B] flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
-            Distinguishing live estimates from exchange-confirmed fills
-          </span>
-        </div>
-
-        {/* Telemetry Metrics Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
-          <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735]">
-            <span className="text-[10px] text-[#64748B] block">Market Price:</span>
-            <span className="font-bold text-white tabular-nums">
-              ${activePairObj?.price ? activePairObj.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "---"}
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-500/30">
+              BROKER-CONFIRMED DATA
             </span>
           </div>
 
-          <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735]">
-            <span className="text-[10px] text-[#64748B] block">Position Size:</span>
-            <span className="font-bold text-white tabular-nums">
-              {positions.length > 0 ? `${positions[0].quantity} (${positions[0].symbol})` : "0.00 (Flat)"}
-            </span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735]">
-            <span className="text-[10px] text-[#64748B] block">Unrealized P&amp;L:</span>
-            <span className="font-bold text-[#94A3B8] tabular-nums">
-              ${positions.length > 0 ? positions[0].unrealized_pnl.toFixed(2) : "0.00"} (Est)
-            </span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735]">
-            <span className="text-[10px] text-[#64748B] block">Confirmed Fills Realized:</span>
-            <span className="font-bold text-[#10B981] tabular-nums">
-              ${recentTrades && recentTrades.length > 0
-                ? recentTrades.reduce((acc, t) => acc + (t.realized_pnl || 0), 0).toFixed(2)
-                : "0.00"}
-            </span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735]">
-            <span className="text-[10px] text-[#64748B] block">Stop-Loss Order:</span>
-            <span className="font-bold text-white">
-              {positions.length > 0 && positions[0].stop_exchange_order_id
-                ? `#${positions[0].stop_exchange_order_id}`
-                : "STANDBY (FLAT)"}
-            </span>
-          </div>
-
-          <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735]">
-            <span className="text-[10px] text-[#64748B] block">Take-Profit Target:</span>
-            <span className="font-bold text-[#10B981]">
-              +{strategyConfig.net_profit_target_pct.toFixed(2)}%
-            </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={fetchBottomData}
+              disabled={loadingBottomData}
+              className="px-2.5 py-1 rounded-lg bg-[#0A0A0E] border border-[#272735] hover:border-[#00E5FF] text-xs text-[#94A3B8] hover:text-white flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingBottomData ? "animate-spin text-[#00E5FF]" : ""}`} />
+              <span>Refresh</span>
+            </button>
           </div>
         </div>
 
-        {/* Recent Audited Scalp Executions Table */}
-        <div className="space-y-2 pt-2">
-          <div className="flex items-center justify-between text-xs text-[#94A3B8]">
-            <span>Recent Audited Trades ({recentTrades.length} Confirmed)</span>
-            <span>Fee Deductions Net-of-Maker Rebate</span>
-          </div>
+        {/* 5 Navigation Tabs */}
+        <div className="flex items-center gap-2 border-b border-[#1E2736] pb-2 overflow-x-auto text-xs">
+          <button
+            type="button"
+            onClick={() => setBottomTab("POSITIONS")}
+            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+              bottomTab === "POSITIONS"
+                ? "bg-[#00E5FF] text-[#0B0E11]"
+                : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+            }`}
+          >
+            <span>Open Positions</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${bottomTab === "POSITIONS" ? "bg-black/30 text-[#0B0E11]" : "bg-[#1E2736] text-[#94A3B8]"}`}>
+              {hftPositions.filter((p) => p.status === "OPEN").length}
+            </span>
+          </button>
 
-          {recentTrades.length === 0 ? (
-            <div className="text-center py-6 text-xs text-[#64748B] bg-[#0A0A0E] rounded-xl border border-[#272735]">
-              No confirmed executions recorded for this account. Controlled validation mode prevents live order dispatch.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-[#272735] text-[#64748B] text-[10px] uppercase">
-                    <th className="py-2 px-3">Trade ID</th>
-                    <th className="py-2 px-3">Symbol</th>
-                    <th className="py-2 px-3">Side</th>
-                    <th className="py-2 px-3">Qty</th>
-                    <th className="py-2 px-3">Entry</th>
-                    <th className="py-2 px-3">Exit</th>
-                    <th className="py-2 px-3">Fee ($)</th>
-                    <th className="py-2 px-3">Net P&amp;L</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#181822]">
-                  {recentTrades.slice(0, 5).map((t) => (
-                    <tr key={t.trade_id} className="hover:bg-[#151921]">
-                      <td className="py-2 px-3 text-[#94A3B8]">{t.trade_id}</td>
-                      <td className="py-2 px-3 font-bold text-white">{t.symbol}</td>
-                      <td className={`py-2 px-3 font-bold ${t.side === "BUY" ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                        {t.side}
-                      </td>
-                      <td className="py-2 px-3 tabular-nums">{t.quantity}</td>
-                      <td className="py-2 px-3 tabular-nums">${t.entry_price.toFixed(2)}</td>
-                      <td className="py-2 px-3 tabular-nums">${t.exit_price.toFixed(2)}</td>
-                      <td className="py-2 px-3 tabular-nums text-[#94A3B8]">${t.fee_usd.toFixed(4)}</td>
-                      <td className={`py-2 px-3 tabular-nums font-bold ${t.realized_pnl >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                        ${t.realized_pnl.toFixed(2)}
-                      </td>
+          <button
+            type="button"
+            onClick={() => setBottomTab("OPEN_ORDERS")}
+            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+              bottomTab === "OPEN_ORDERS"
+                ? "bg-[#00E5FF] text-[#0B0E11]"
+                : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+            }`}
+          >
+            <span>Open Orders</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${bottomTab === "OPEN_ORDERS" ? "bg-black/30 text-[#0B0E11]" : "bg-[#1E2736] text-[#94A3B8]"}`}>
+              {hftOrders.filter((o) => o.status === "NEW" || o.status === "OPEN" || o.status === "PARTIALLY_FILLED").length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setBottomTab("CLOSED_TRADES")}
+            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+              bottomTab === "CLOSED_TRADES"
+                ? "bg-[#00E5FF] text-[#0B0E11]"
+                : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+            }`}
+          >
+            <span>Closed Trades</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${bottomTab === "CLOSED_TRADES" ? "bg-black/30 text-[#0B0E11]" : "bg-[#1E2736] text-[#94A3B8]"}`}>
+              {data?.recent_trades?.length || 0}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setBottomTab("HISTORY")}
+            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+              bottomTab === "HISTORY"
+                ? "bg-[#00E5FF] text-[#0B0E11]"
+                : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+            }`}
+          >
+            <span>Trade History</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setBottomTab("ACCOUNT")}
+            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+              bottomTab === "ACCOUNT"
+                ? "bg-[#00E5FF] text-[#0B0E11]"
+                : "text-[#94A3B8] hover:text-white hover:bg-[#181822]"
+            }`}
+          >
+            <span>Account Overview</span>
+          </button>
+        </div>
+
+        {/* TAB 1: OPEN POSITIONS */}
+        {bottomTab === "POSITIONS" && (
+          <div className="space-y-3">
+            {hftPositions.filter((p) => p.status === "OPEN").length === 0 ? (
+              <div className="p-8 text-center text-xs text-[#94A3B8] bg-[#0A0A0E] rounded-xl border border-[#272735] space-y-1">
+                <p className="font-bold text-white">No active open positions on broker account.</p>
+                <p className="text-[#64748B]">Controlled validation mode prevents live order dispatch. Positions will appear here when filled.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#272735] text-[#64748B] text-[10px] uppercase">
+                      <th className="py-2.5 px-3">Position ID</th>
+                      <th className="py-2.5 px-3">Symbol</th>
+                      <th className="py-2.5 px-3">Direction</th>
+                      <th className="py-2.5 px-3">Size</th>
+                      <th className="py-2.5 px-3">Entry Price</th>
+                      <th className="py-2.5 px-3">Mark Price</th>
+                      <th className="py-2.5 px-3">Unrealized P&amp;L</th>
+                      <th className="py-2.5 px-3">Leverage</th>
+                      <th className="py-2.5 px-3">Stop Loss</th>
+                      <th className="py-2.5 px-3">Take Profit</th>
+                      <th className="py-2.5 px-3">Status</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-[#181822]">
+                    {hftPositions
+                      .filter((p) => p.status === "OPEN")
+                      .map((pos) => {
+                        const isLong = pos.direction === "LONG";
+                        const isProfitable = pos.unrealized_pnl >= 0;
+                        return (
+                          <tr key={pos.position_id} className="hover:bg-[#151921] transition-colors">
+                            <td className="py-2.5 px-3 text-[#94A3B8] font-mono">{pos.position_id}</td>
+                            <td className="py-2.5 px-3 font-bold text-white">{pos.symbol}</td>
+                            <td className="py-2.5 px-3">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                isLong ? "bg-emerald-950/60 text-emerald-400 border border-emerald-500/30" : "bg-red-950/60 text-red-400 border border-red-500/30"
+                              }`}>
+                                {pos.direction}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 tabular-nums text-white font-medium">{pos.size}</td>
+                            <td className="py-2.5 px-3 tabular-nums text-white">${pos.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className="py-2.5 px-3 tabular-nums text-white font-medium">${pos.mark_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className={`py-2.5 px-3 tabular-nums font-bold ${isProfitable ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                              {isProfitable ? "+" : ""}${pos.unrealized_pnl.toFixed(2)}
+                            </td>
+                            <td className="py-2.5 px-3 tabular-nums text-[#00E5FF] font-bold">{pos.leverage}x</td>
+                            <td className="py-2.5 px-3 tabular-nums text-[#F6465D]">
+                              {pos.stop_loss_price ? `$${pos.stop_loss_price.toFixed(2)}` : "STANDBY"}
+                            </td>
+                            <td className="py-2.5 px-3 tabular-nums text-[#10B981]">
+                              {pos.take_profit_price ? `$${pos.take_profit_price.toFixed(2)}` : "STANDBY"}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30">
+                                {pos.status}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 2: OPEN ORDERS */}
+        {bottomTab === "OPEN_ORDERS" && (
+          <div className="space-y-3">
+            {hftOrders.filter((o) => o.status === "NEW" || o.status === "OPEN" || o.status === "PARTIALLY_FILLED").length === 0 ? (
+              <div className="p-8 text-center text-xs text-[#94A3B8] bg-[#0A0A0E] rounded-xl border border-[#272735] space-y-1">
+                <p className="font-bold text-white">No working open orders on broker account.</p>
+                <p className="text-[#64748B]">All limit GTX orders will be listed here with live execution state.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#272735] text-[#64748B] text-[10px] uppercase">
+                      <th className="py-2.5 px-3">Order ID</th>
+                      <th className="py-2.5 px-3">Symbol</th>
+                      <th className="py-2.5 px-3">Side</th>
+                      <th className="py-2.5 px-3">Type</th>
+                      <th className="py-2.5 px-3">Price</th>
+                      <th className="py-2.5 px-3">Quantity</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3">Created</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#181822]">
+                    {hftOrders
+                      .filter((o) => o.status === "NEW" || o.status === "OPEN" || o.status === "PARTIALLY_FILLED")
+                      .map((ord) => (
+                        <tr key={ord.order_id} className="hover:bg-[#151921] transition-colors">
+                          <td className="py-2.5 px-3 text-[#94A3B8] font-mono">{ord.order_id}</td>
+                          <td className="py-2.5 px-3 font-bold text-white">{ord.symbol}</td>
+                          <td className={`py-2.5 px-3 font-bold ${ord.side === "BUY" ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                            {ord.side}
+                          </td>
+                          <td className="py-2.5 px-3 text-[#94A3B8]">{ord.order_type}</td>
+                          <td className="py-2.5 px-3 tabular-nums text-white">${ord.price.toFixed(2)}</td>
+                          <td className="py-2.5 px-3 tabular-nums text-white">{ord.quantity}</td>
+                          <td className="py-2.5 px-3">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/30">
+                              {ord.status}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-[#64748B] text-[11px]">{ord.created_at || "---"}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: CLOSED TRADES */}
+        {bottomTab === "CLOSED_TRADES" && (
+          <div className="space-y-3">
+            {(!data?.recent_trades || data.recent_trades.length === 0) ? (
+              <div className="p-8 text-center text-xs text-[#94A3B8] bg-[#0A0A0E] rounded-xl border border-[#272735] space-y-1">
+                <p className="font-bold text-white">No closed trades recorded for this account.</p>
+                <p className="text-[#64748B]">Controlled validation mode prevents live order dispatch. Completed trades will populate here.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#272735] text-[#64748B] text-[10px] uppercase">
+                      <th className="py-2.5 px-3">Trade ID</th>
+                      <th className="py-2.5 px-3">Symbol</th>
+                      <th className="py-2.5 px-3">Side</th>
+                      <th className="py-2.5 px-3">Quantity</th>
+                      <th className="py-2.5 px-3">Entry Price</th>
+                      <th className="py-2.5 px-3">Exit Price</th>
+                      <th className="py-2.5 px-3">Fee ($)</th>
+                      <th className="py-2.5 px-3">Realized Net P&amp;L</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#181822]">
+                    {data.recent_trades.map((t) => (
+                      <tr key={t.trade_id} className="hover:bg-[#151921] transition-colors">
+                        <td className="py-2.5 px-3 text-[#94A3B8] font-mono">{t.trade_id}</td>
+                        <td className="py-2.5 px-3 font-bold text-white">{t.symbol}</td>
+                        <td className={`py-2.5 px-3 font-bold ${t.side === "BUY" ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                          {t.side}
+                        </td>
+                        <td className="py-2.5 px-3 tabular-nums">{t.quantity}</td>
+                        <td className="py-2.5 px-3 tabular-nums">${t.entry_price.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 tabular-nums">${t.exit_price.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 tabular-nums text-[#94A3B8]">${t.fee_usd.toFixed(4)}</td>
+                        <td className={`py-2.5 px-3 tabular-nums font-bold ${t.realized_pnl >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
+                          ${t.realized_pnl.toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 4: TRADE HISTORY */}
+        {bottomTab === "HISTORY" && (
+          <div className="space-y-3">
+            <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735] flex items-center justify-between text-xs text-[#94A3B8]">
+              <span>Audited Trade History Journal &bull; Net-of-Maker Rebate</span>
+              <span>All records cryptographically signed in database</span>
             </div>
-          )}
-        </div>
+            {(!data?.recent_trades || data.recent_trades.length === 0) ? (
+              <div className="p-8 text-center text-xs text-[#94A3B8] bg-[#0A0A0E] rounded-xl border border-[#272735]">
+                No historical trades on record.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#272735] text-[#64748B] text-[10px] uppercase">
+                      <th className="py-2.5 px-3">Timestamp</th>
+                      <th className="py-2.5 px-3">Trade ID</th>
+                      <th className="py-2.5 px-3">Symbol</th>
+                      <th className="py-2.5 px-3">Side</th>
+                      <th className="py-2.5 px-3">Qty</th>
+                      <th className="py-2.5 px-3">Executed Price</th>
+                      <th className="py-2.5 px-3">Fee</th>
+                      <th className="py-2.5 px-3">Net P&amp;L</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#181822]">
+                    {data.recent_trades.map((t) => (
+                      <tr key={t.trade_id} className="hover:bg-[#151921] transition-colors">
+                        <td className="py-2.5 px-3 text-[#64748B] text-[11px]">{t.created_at || "---"}</td>
+                        <td className="py-2.5 px-3 text-[#94A3B8] font-mono">{t.trade_id}</td>
+                        <td className="py-2.5 px-3 font-bold text-white">{t.symbol}</td>
+                        <td className={`py-2.5 px-3 font-bold ${t.side === "BUY" ? "text-[#10B981]" : "text-[#F6465D]"}`}>{t.side}</td>
+                        <td className="py-2.5 px-3 tabular-nums">{t.quantity}</td>
+                        <td className="py-2.5 px-3 tabular-nums">${t.exit_price.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 tabular-nums text-[#94A3B8]">${t.fee_usd.toFixed(4)}</td>
+                        <td className={`py-2.5 px-3 tabular-nums font-bold ${t.realized_pnl >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>${t.realized_pnl.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 5: ACCOUNT OVERVIEW */}
+        {bottomTab === "ACCOUNT" && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 text-xs">
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Account Identifier:</span>
+                <span className="font-bold text-white font-mono">{hftAccountSummary?.account_id || data?.account?.account_id || "---"}</span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Environment:</span>
+                <span className="font-bold text-[#00E5FF] font-mono">{hftAccountSummary?.environment || data?.account?.environment || "DEMO"}</span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Authoritative Wallet Balance:</span>
+                <span className="font-bold text-white font-mono text-sm">
+                  ${(hftAccountSummary?.wallet_balance_usd ?? data?.account?.wallet_balance ?? 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Available Margin:</span>
+                <span className="font-bold text-[#10B981] font-mono text-sm">
+                  ${(hftAccountSummary?.available_balance_usd ?? data?.account?.available_balance ?? 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Margin In Use:</span>
+                <span className="font-bold text-white font-mono">
+                  ${(hftAccountSummary?.margin_balance_usd ?? data?.account?.margin_balance ?? 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Total Equity:</span>
+                <span className="font-bold text-white font-mono text-sm">
+                  ${(hftAccountSummary?.equity_usd ?? (data?.account?.wallet_balance || 0)).toFixed(2)}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Margin Mode:</span>
+                <span className="font-bold text-[#00E5FF] font-mono">ISOLATED (LEVERAGE CLAMP: 5x)</span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+                <span className="text-[10px] text-[#64748B] block uppercase">Safety Locks:</span>
+                <span className="font-bold text-red-400 font-mono">LIVE LOCKED &bull; READ-ONLY</span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      
-      {/* ─── STEP 6: QUANTITATIVE HFT SIMULATION & RISK ENGINE (EXNESS MT5) ───── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-5 shadow-xl font-mono">
-        {/* Section Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#272735] pb-4">
-          <div className="flex items-center gap-3">
-            <span className="w-6 h-6 rounded-full bg-[#00E5FF]/20 text-[#00E5FF] text-xs font-bold flex items-center justify-center">
-              6
-            </span>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                  Quantitative HFT Simulation &amp; Risk Engine (Exness MT5)
-                </h3>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-950/60 text-amber-400 border border-amber-500/40">
-                  SIMULATED RESEARCH ONLY
-                </span>
-              </div>
-              <p className="text-xs text-[#94A3B8]">
-                Isolated mathematical paired scalping engine · Multi-regime classification · Zero broker execution
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-red-950/50 text-red-400 border border-red-500/40 flex items-center gap-1.5">
-              <Lock className="w-3.5 h-3.5" />
-              <span>EMERGENCY LOCK ACTIVE (live_trading_locked=True)</span>
-            </span>
-          </div>
-        </div>
-
-        {/* Prominent Simulated Environment Disclaimer Banner */}
-        <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-500/30 flex items-center justify-between text-xs text-amber-300">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-            <span>
-              <strong>STRICT SIMULATION ISOLATION:</strong> Every metric below is an in-memory quantitative simulation. Zero live or demo broker orders are placed. Real Exness execution is strictly disabled.
-            </span>
-          </div>
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-black/40 text-amber-300 border border-amber-500/30 shrink-0">
-            IS_SIMULATED = TRUE
-          </span>
-        </div>
-
-        {/* Interactive Simulation Controls Bar */}
-        <div className="p-4 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-3">
-          <div className="flex items-center justify-between border-b border-[#181822] pb-2 text-xs">
-            <span className="text-[#00E5FF] font-bold flex items-center gap-1.5">
-              <Sliders className="w-3.5 h-3.5" /> Simulation Parameters (Simulated Research)
-            </span>
-            <span className="text-[10px] text-[#00E5FF] font-mono">
-              Source: Genuine Historical Feed • Window: {simResult?.candle_count || simCandleCount} Candles
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
-            {/* Symbol Selector */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-[#94A3B8] block">Simulated Symbol:</label>
-              <select
-                value={simSymbol}
-                onChange={(e) => setSimSymbol(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
-              >
-                <option value="XAUUSDm">XAUUSDm (Gold Mini)</option>
-                <option value="BTCUSDm">BTCUSDm (Bitcoin Mini)</option>
-                <option value="EURUSDm">EURUSDm (EUR/USD)</option>
-                <option value="GBPUSDm">GBPUSDm (GBP/USD)</option>
-              </select>
-            </div>
-
-            {/* Volume per Leg */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-[#94A3B8] block">Volume / Leg (Lots):</label>
-              <input
-                type="number"
-                min="0.01"
-                max="0.50"
-                step="0.01"
-                value={simVolume}
-                onChange={(e) => setSimVolume(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
-              />
-            </div>
-
-            {/* TP Points */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-[#94A3B8] block">Take Profit (Pts):</label>
-              <input
-                type="number"
-                min="5"
-                max="200"
-                step="5"
-                value={simTpPoints}
-                onChange={(e) => setSimTpPoints(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-[#10B981] font-bold focus:outline-none focus:border-[#10B981]"
-              />
-            </div>
-
-            {/* SL Points */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-[#94A3B8] block">Stop Loss (Pts):</label>
-              <input
-                type="number"
-                min="10"
-                max="400"
-                step="5"
-                value={simSlPoints}
-                onChange={(e) => setSimSlPoints(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-[#F6465D] font-bold focus:outline-none focus:border-[#F6465D]"
-              />
-            </div>
-
-            {/* Max Hold Bars */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-[#94A3B8] block">Holding Window (Bars):</label>
-              <input
-                type="number"
-                min="3"
-                max="50"
-                value={simHoldBars}
-                onChange={(e) => setSimHoldBars(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
-              />
-            </div>
-
-            {/* Candle Count */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-[#94A3B8] block">Candles Analyzed:</label>
-              <input
-                type="number"
-                min="25"
-                max="500"
-                step="25"
-                value={simCandleCount}
-                onChange={(e) => setSimCandleCount(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 bg-[#121218] border border-[#272735] rounded-lg text-white font-bold focus:outline-none focus:border-[#00E5FF]"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={runRiskCheck}
-              disabled={riskCheckLoading}
-              className="px-4 py-2 rounded-xl bg-[#181822] hover:bg-[#272735] border border-[#272735] text-white text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-            >
-              {riskCheckLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#00E5FF]" /> : <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />}
-              <span>Pre-Trade Risk Gate Check</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => runQuantitativeSimulation()}
-              disabled={simLoading}
-              className="px-5 py-2 rounded-xl bg-[#00E5FF] hover:bg-[#00E5FF]/90 text-[#0B0E11] text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-[#00E5FF]/20 disabled:opacity-50"
-            >
-              {simLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
-              <span>Run Quantitative Simulation</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Telemetry Monitors Grid (12 Cards with Visibly Displayed [SIMULATED] Markers) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 text-xs">
-          {/* Card 1: Market Regime Monitor */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Market Regime</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-white">
-                {simResult?.regime_at_start?.regime || "EVALUATING..."}
-              </span>
-              <span
-                className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
-                  simResult?.regime_at_start?.safe_for_hedging
-                    ? "bg-[#10B981]/15 text-[#10B981] border-[#10B981]/40"
-                    : "bg-red-950/40 text-[#F6465D] border-red-500/40"
-                }`}
-              >
-                {simResult?.regime_at_start?.safe_for_hedging ? "RANGE: SCALP VIABLE" : "TRENDING: DRIFT RISK"}
-              </span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>ADX: {simResult?.regime_at_start?.adx?.toFixed(2) || "---"}</span>
-              <span>ATR(14): {simResult?.regime_at_start?.atr?.toFixed(4) || "---"}</span>
-            </div>
-          </div>
-
-          {/* Card 2: Simulated Balance & Equity */}
-          {/* Card 2: Simulated Balance & Equity */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Balance &amp; Equity</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-[10px] text-[#64748B] block">Mark-to-Market Equity</span>
-                <span className="text-base font-bold text-white tabular-nums">
-                  ${simResult?.final_equity_usd ? simResult.final_equity_usd.toFixed(2) : "5,000.00"}
-                </span>
-              </div>
-              <div className="text-right">
-                <span className="text-[10px] text-[#64748B] block">Cash Balance</span>
-                <span className="text-xs font-bold text-[#D4D4D8] tabular-nums">
-                  ${simResult?.final_balance_usd ? simResult.final_balance_usd.toFixed(2) : "5,000.00"}
-                </span>
-              </div>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Peak: ${simResult?.peak_equity_usd ? simResult.peak_equity_usd.toFixed(2) : "5,000.00"}</span>
-              <span className={simResult && simResult.net_simulated_pnl_usd >= 0 ? "text-[#10B981] font-bold" : "text-[#F6465D] font-bold"}>
-                Net: {simResult ? `${simResult.net_simulated_pnl_usd >= 0 ? "+" : ""}$${simResult.net_simulated_pnl_usd.toFixed(2)}` : "$0.00"}
-              </span>
-            </div>
-          </div>
-
-          {/* Card 3: Simulated Realized P&L */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Realized P&amp;L (Gross vs Net)</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className={`text-base font-bold tabular-nums ${simResult && (simResult.realized_net_pnl_usd !== undefined ? simResult.realized_net_pnl_usd : simResult.net_simulated_pnl_usd) >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                {simResult ? `${(simResult.realized_net_pnl_usd !== undefined ? simResult.realized_net_pnl_usd : simResult.net_simulated_pnl_usd) >= 0 ? "+" : ""}$${(simResult.realized_net_pnl_usd !== undefined ? simResult.realized_net_pnl_usd : simResult.net_simulated_pnl_usd).toFixed(2)}` : "$0.00"}
-              </span>
-              <span className="text-[10px] text-[#64748B]">
-                {simResult ? `${simResult.simulated_cycles} cycles` : "---"}
-              </span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Gross Wins: +${simResult?.gross_profit_usd ? simResult.gross_profit_usd.toFixed(2) : "0.00"}</span>
-              <span>Gross Losses: -${simResult?.gross_loss_usd ? simResult.gross_loss_usd.toFixed(2) : "0.00"}</span>
-            </div>
-          </div>
-
-          {/* Card 4: Simulated Unrealized / Floating Drawdown */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Unrealized / Floating P&amp;L</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-[10px] text-[#64748B] block">Final Unrealized P&amp;L</span>
-                <span className="text-base font-bold text-white tabular-nums">
-                  ${simResult?.unrealized_pnl_usd !== undefined ? simResult.unrealized_pnl_usd.toFixed(2) : "0.00"}
-                </span>
-              </div>
-              <div className="text-right">
-                <span className="text-[10px] text-[#64748B] block">Worst In-Flight</span>
-                <span className="text-xs font-bold text-[#F6465D] tabular-nums">
-                  -${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}
-                </span>
-              </div>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Status: All Legs Concluded</span>
-              <span className="text-white font-bold">Flat Delta</span>
-            </div>
-          </div>
-
-          {/* Card 5: Net P&L After Costs */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Net P&amp;L (After Costs)</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className={`text-base font-bold tabular-nums ${simResult && simResult.net_simulated_pnl_usd >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                {simResult ? `${simResult.net_simulated_pnl_usd >= 0 ? "+" : ""}$${simResult.net_simulated_pnl_usd.toFixed(2)}` : "$0.00"}
-              </span>
-              <span className="text-[10px] text-[#64748B]">Net Bottom-Line</span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Total Friction Deducted</span>
-              <span className="text-white font-bold">${simResult?.cost_breakdown?.total_friction_usd?.toFixed(2) || "0.00"}</span>
-            </div>
-          </div>
-
-          {/* Card 6: Maximum Drawdown */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Maximum Drawdown</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-[#F6465D] tabular-nums">
-                ${simResult?.max_drawdown_usd ? simResult.max_drawdown_usd.toFixed(2) : "0.00"}
-              </span>
-              <span className="text-[10px] text-[#F6465D] font-bold">
-                ({simResult?.max_drawdown_pct ? simResult.max_drawdown_pct.toFixed(2) : "0.00"}%)
-              </span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Risk Budget: $250.00</span>
-              <span className="text-[#10B981]">Within 5% Limit</span>
-            </div>
-          </div>
-
-          {/* Card 7: Win Rate */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Cycle Win Rate</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-white tabular-nums">
-                {simResult?.win_rate_pct !== undefined ? `${simResult.win_rate_pct.toFixed(2)}%` : "---"}
-              </span>
-              <span className="text-[10px] text-[#64748B]">
-                {simResult?.winning_cycles || 0}W / {simResult?.losing_cycles || 0}L
-              </span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Total Cycles</span>
-              <span className="text-white font-bold">{simResult?.simulated_cycles || 0}</span>
-            </div>
-          </div>
-
-          {/* Card 8: Profit Factor & Average Win/Loss */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Profit Factor &amp; Avg Win/Loss</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-[#00E5FF] tabular-nums">
-                PF: {simResult?.profit_factor !== undefined ? simResult.profit_factor.toFixed(2) : "---"}
-              </span>
-              <span className="text-[10px] text-[#94A3B8]">
-                Avg W: +${simResult?.average_win_usd ? simResult.average_win_usd.toFixed(2) : "0.00"}
-              </span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Avg Loss: -${simResult?.average_loss_usd ? simResult.average_loss_usd.toFixed(2) : "0.00"}</span>
-              <span>Ratio: {(simResult && simResult.average_loss_usd > 0 ? (simResult.average_win_usd / simResult.average_loss_usd).toFixed(2) : "---")}</span>
-            </div>
-          </div>
-
-          {/* Card 9: Transaction Cost Breakdown */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Transaction Friction</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-1 text-[11px] text-[#94A3B8]">
-              <div>Spread: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_spread_cost_usd?.toFixed(2) || "0.00"}</span></div>
-              <div>Slippage: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_slippage_cost_usd?.toFixed(2) || "0.00"}</span></div>
-              <div>Swap: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_swap_cost_usd?.toFixed(2) || "0.00"}</span></div>
-              <div>Commission: <span className="text-white font-bold">${simResult?.cost_breakdown?.total_commission_cost_usd?.toFixed(2) || "0.00"}</span></div>
-            </div>
-            <div className="text-[11px] text-[#94A3B8] flex items-center justify-between border-t border-[#181822] pt-1.5">
-              <span>Total Cost Deduction:</span>
-              <span className="text-[#F6465D] font-bold">-${simResult?.cost_breakdown?.total_friction_usd?.toFixed(2) || "0.00"}</span>
-            </div>
-          </div>
-
-          {/* Card 10: Residual Directional Exposure */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Residual Delta Risk</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/40 text-amber-300 font-bold border border-amber-500/30">
-                [SIMULATED]
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-base font-bold text-amber-400">
-                {simResult?.residual_directional_exposure?.typical_unhedged_delta_lots ? `${simResult.residual_directional_exposure.typical_unhedged_delta_lots} Lots` : "0.01 Lots"}
-              </span>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-300 border border-amber-500/40 font-bold">
-                ASYMMETRIC LEG
-              </span>
-            </div>
-            <p className="text-[10px] text-[#94A3B8] border-t border-[#181822] pt-1.5 leading-snug">
-              When BUY leg hits TP, SELL leg remains open with 100% negative delta risk.
-            </p>
-          </div>
-
-          {/* Card 11: Current Risk Limits Status (11 Controls) */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Risk Guard Limits</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#00E5FF]/20 text-[#00E5FF] font-bold border border-[#00E5FF]/40">
-                11 CONTROLS
-              </span>
-            </div>
-            <div className="text-[10px] text-[#94A3B8] space-y-0.5">
-              <div className="flex justify-between"><span>Max Open Positions:</span> <strong className="text-white">{riskLimits?.max_open_positions || 5}</strong></div>
-              <div className="flex justify-between"><span>Max Exposure Notional:</span> <strong className="text-white">${riskLimits?.max_aggregate_exposure_usd?.toLocaleString() || "50,000"}</strong></div>
-              <div className="flex justify-between"><span>Daily Loss Limit:</span> <strong className="text-[#F6465D]">${riskLimits?.max_daily_loss_usd || 250}</strong></div>
-              <div className="flex justify-between"><span>Margin Utilization Clamp:</span> <strong className="text-white">{riskLimits?.max_margin_utilization_pct || 30}%</strong></div>
-              <div className="flex justify-between"><span>Stale Quote Limit:</span> <strong className="text-white">{riskLimits?.max_stale_quote_ms || 3000}ms</strong></div>
-            </div>
-          </div>
-
-          {/* Card 12: Pre-Trade Gate Evaluation */}
-          <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] text-[#64748B] uppercase">Pre-Trade Gate Status</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-950/40 text-red-300 font-bold border border-red-500/30">
-                FAIL-CLOSED
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 text-xs text-red-400 font-bold">
-              <Lock className="w-3.5 h-3.5 shrink-0" />
-              <span>{riskCheckResult?.reason || "PRE_TRADE_BLOCKED (Emergency Lock Active)"}</span>
-            </div>
-            <div className="text-[10px] text-[#94A3B8] border-t border-[#181822] pt-1.5 space-y-0.5">
-              <div>Missing Broker Stops: <strong className="text-[#10B981]">{riskCheckResult?.unprotected_positions_count || 0} Unprotected</strong></div>
-              <div>Basket Status: <strong className="text-white">{riskCheckResult?.basket_assessment?.status || "BASKET_RISK_NOMINAL"}</strong></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-
-      {/* ─── MODAL: STEP 2 STRATEGY CONFIGURATION MODAL ─────────────────────── */}
+{/* ─── MODAL: STEP 2 STRATEGY CONFIGURATION MODAL ─────────────────────── */}
       {isConfigModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div className="w-full max-w-xl rounded-2xl bg-[#121218] border border-[#272735] shadow-2xl overflow-hidden font-mono text-xs flex flex-col max-h-[90vh]">
