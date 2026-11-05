@@ -2185,7 +2185,7 @@ async def save_hft_strategy_config_route(req: HftStrategyConfigRequest, current_
 
 
 @customer_router.get("/customer/trading/hft/validation")
-async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
     clean_symbol = symbol.upper().replace("/", "").replace(":", "")
     conn = get_db_connection()
@@ -2216,6 +2216,19 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
         avail_balance = float(acc_row["available_balance"]) if acc_row else 0.0
         kill_switch = bool(acc_row["kill_switch_active"]) if acc_row else False
         engine_b_enabled = bool(acc_row["engine_b_enabled"]) if acc_row else False
+
+        # 2b. Section J: selected account scopes connection + margin
+        sel_acct = None
+        if account_id:
+            sel_acct = _resolve_hft_account(conn, user_id, account_id)
+            if not sel_acct:
+                raise HTTPException(status_code=404, detail="Selected account not found for this user.")
+            has_conn = sel_acct["connected"]
+            norm_env = sel_acct["environment"]
+            conn_label = f"{sel_acct['exchange']} {sel_acct['environment_label']} Account"
+            conn_detail = (f"{conn_label} {sel_acct['masked_id']} — status {sel_acct['connection_status']}."
+                           if has_conn else f"{conn_label} {sel_acct['masked_id']} unavailable: {sel_acct['connection_status']}. Execution disabled.")
+            avail_balance = float(sel_acct["available_balance"] or 0.0) if sel_acct["available_balance"] is not None else 0.0
 
         # 3. Pair Eligibility Check via Discovery
         pair_eligible = True
@@ -2359,11 +2372,39 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", current_use
             }
         ]
 
+        if sel_acct:
+            dup = _hft_account_has_symbol_exposure(conn, user_id, sel_acct, clean_symbol)
+            checklist.append({
+                "id": "DUPLICATE_EXPOSURE",
+                "name": "Existing Position / Working Order on Selected Account",
+                "passed": not dup,
+                "critical": True,
+                "detail": (f"WARNING: {clean_symbol} already has an open position or working order on {sel_acct['masked_id']}." if dup
+                           else f"No open position or working order for {clean_symbol} on {sel_acct['masked_id']}.")
+            })
+            if sel_acct["environment"] == "REAL":
+                consented = _has_real_consent(conn, user_id, sel_acct["account_id"])
+                checklist.append({
+                    "id": "REAL_ACCOUNT_CONSENT",
+                    "name": "Real Account Risk Consent",
+                    "passed": consented,
+                    "critical": True,
+                    "detail": "Explicit real-money consent recorded for this account." if consented else "Real-account consent not yet recorded for this account."
+                })
+            checklist.append({
+                "id": "LIVE_EXECUTION_LOCK",
+                "name": "Platform Live Execution Lock",
+                "passed": False,
+                "critical": True,
+                "detail": "live_trading_locked / emergency_lock_active / read_only_mode are enforced. No orders will be dispatched."
+            })
+
         all_critical_passed = all(c["passed"] for c in checklist if c["critical"])
 
         return {
             "status": "SUCCESS",
             "symbol": clean_symbol,
+            "account_id": account_id,
             "is_ready": all_critical_passed,
             "checklist": checklist,
             "strategy_configured": bool(cfg and cfg.get("status") != "NOT_CONFIGURED"),
@@ -2578,8 +2619,10 @@ async def admin_override_hft_activation(
 # --- Phase 13: Bottom Trading Activity Panel Endpoints ---
 
 @customer_router.get("/customer/trading/hft/positions")
-async def get_hft_positions_route(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_hft_positions_route(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
+    if account_id:
+        return _hft_scoped_positions(user_id, account_id)
     conn = get_db_connection()
     try:
         from ..services.futures_db import list_open_futures_positions
@@ -2651,8 +2694,10 @@ async def get_hft_positions_route(current_user: Dict[str, Any] = Depends(get_cur
 
 
 @customer_router.get("/customer/trading/hft/orders")
-async def get_hft_orders_route(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_hft_orders_route(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
+    if account_id:
+        return _hft_scoped_orders(user_id, account_id)
     conn = get_db_connection()
     try:
         from ..services.exchange_framework import exchange_framework
@@ -2675,8 +2720,10 @@ async def get_hft_orders_route(current_user: Dict[str, Any] = Depends(get_curren
 
 
 @customer_router.get("/customer/trading/hft/account-summary")
-async def get_hft_account_summary_route(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_hft_account_summary_route(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
+    if account_id:
+        return _hft_scoped_summary(user_id, account_id)
     conn = get_db_connection()
     try:
         acc_row = conn.execute("SELECT * FROM futures_accounts WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
@@ -2708,5 +2755,228 @@ async def get_hft_account_summary_route(current_user: Dict[str, Any] = Depends(g
             "kill_switch_active": bool(acc_row["kill_switch_active"]) if acc_row else False,
             "engine_b_enabled": bool(acc_row["engine_b_enabled"]) if acc_row else False
         }
+    finally:
+        conn.close()
+
+
+# ─── Section J: Connected Exchange & Account Selector ────────────────────────
+REAL_CONSENT_VERSION = "REAL-CONSENT-v1"
+REAL_CONSENT_TEXT = ("I understand that I am about to use a REAL trading account and that real financial "
+                     "losses are possible. I explicitly consent to proceeding.")
+
+
+class RealTradingConsentRequest(BaseModel):
+    account_id: str
+    confirmed: bool
+    consent_version: str = REAL_CONSENT_VERSION
+
+
+def _mask_id(raw: str) -> str:
+    raw = str(raw or "")
+    return ("#" + raw[:4] + "•••" + raw[-3:]) if len(raw) > 7 else ("#" + raw[:2] + "•••")
+
+
+def _resolve_hft_account(conn, user_id: str, account_id: str):
+    """Return a normalized account dict owned by user_id, or None. Never crosses tenants."""
+    r = conn.execute("SELECT * FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1",
+                     (user_id, account_id)).fetchone()
+    if r:
+        r = dict(r)
+        env = "REAL" if (r.get("account_type") or "").upper() == "REAL" else "DEMO"
+        verified = bool(r.get("last_reconciled_at"))
+        return {
+            "account_id": r["connection_id"], "source": "EXNESS", "exchange": "Exness",
+            "environment": env, "environment_label": "Real" if env == "REAL" else "Demo",
+            "masked_id": _mask_id(r.get("account_login")),
+            "connection_status": "CONNECTED" if verified else "NOT_VERIFIED",
+            "connected": verified,
+            "currency": r.get("currency") or "USD",
+            # Balances are only reported when genuinely retrieved from the broker.
+            "available_balance": float(r["balance_usd"]) if verified and r.get("balance_usd") is not None else None,
+            "equity": float(r["equity_usd"]) if verified and r.get("equity_usd") is not None else None,
+            "last_connected_at": r.get("last_reconciled_at"),
+            "adapter_mode": r.get("adapter_mode"),
+        }
+    r = conn.execute("SELECT * FROM user_exchange_connections WHERE user_id = ? AND account_id = ? AND is_active = 1",
+                     (user_id, account_id)).fetchone()
+    if not r:
+        return None
+    r = dict(r)
+    env = "REAL" if (r.get("environment") or "").upper() in ("LIVE", "REAL", "MAINNET") else "DEMO"
+    status = (r.get("connection_status") or "UNKNOWN").upper()
+    connected = status in ("CONNECTED", "VERIFIED_READ_ONLY", "VERIFIED")
+    fa = conn.execute("SELECT * FROM futures_accounts WHERE user_id = ? AND exchange_connection_id = ? LIMIT 1",
+                      (user_id, account_id)).fetchone()
+    fa = dict(fa) if fa else None
+    return {
+        "account_id": r["account_id"], "source": "EXCHANGE",
+        "exchange": (r.get("exchange_name") or r.get("provider") or "Exchange").title(),
+        "environment": env, "environment_label": "Real" if env == "REAL" else "Testnet",
+        "product_type": r.get("product_type"),
+        "masked_id": _mask_id(r["account_id"]),
+        "connection_status": status, "connected": connected,
+        "currency": (fa or {}).get("margin_asset") or "USDT",
+        "available_balance": float(fa["available_balance"]) if fa and fa.get("updated_at") else None,
+        "equity": round(float(fa["wallet_balance"]) + float(fa["unrealized_pnl"]), 2) if fa and fa.get("updated_at") else None,
+        "last_connected_at": r.get("last_verified_at"),
+        "futures_account_id": (fa or {}).get("account_id"),
+    }
+
+
+def _has_real_consent(conn, user_id: str, account_id: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM real_trading_consents WHERE user_id = ? AND account_id = ? AND consent_version = ? AND confirmed = 1 LIMIT 1",
+        (user_id, account_id, REAL_CONSENT_VERSION)).fetchone())
+
+
+def _scoped_rows(conn, user_id: str, acct: dict):
+    """Positions and orders strictly for one account."""
+    positions, orders = [], []
+    if acct["source"] == "EXNESS":
+        for b in conn.execute("SELECT * FROM exness_hft_baskets WHERE user_id = ? AND connection_id = ? ORDER BY opened_at DESC LIMIT 200",
+                              (user_id, acct["account_id"])).fetchall():
+            b = dict(b)
+            positions.append({"position_id": b["basket_id"], "symbol": b["symbol"], "direction": "BASKET",
+                              "size": b["lot_size"], "entry_price": 0.0, "mark_price": 0.0,
+                              "unrealized_pnl": b.get("unrealized_pnl_usd") or 0.0, "realized_pnl": b.get("realized_pnl_usd") or 0.0,
+                              "isolated_margin": 0.0, "leverage": 1,
+                              "status": "OPEN" if (b["status"] or "").upper() in ("OPEN", "ACTIVE") else "CLOSED",
+                              "stop_loss_price": None, "take_profit_price": None, "opened_at": b["opened_at"], "source": "EXNESS"})
+        for o in conn.execute("""SELECT l.* , b.symbol FROM exness_hft_orders_and_legs l JOIN exness_hft_baskets b ON b.basket_id = l.basket_id
+                                 WHERE l.user_id = ? AND b.connection_id = ? ORDER BY l.created_at DESC LIMIT 200""",
+                              (user_id, acct["account_id"])).fetchall():
+            o = dict(o)
+            orders.append({"order_id": o["leg_id"], "symbol": o["symbol"], "side": o["order_side"], "type": o["order_type"],
+                           "quantity": o["volume"], "price": o.get("fill_price") or o.get("requested_price"),
+                           "status": (o["status"] or "").upper(), "created_at": o["created_at"]})
+    elif acct.get("futures_account_id"):
+        fid = acct["futures_account_id"]
+        for p in conn.execute("SELECT * FROM futures_positions WHERE user_id = ? AND account_id = ? ORDER BY opened_at DESC LIMIT 200",
+                              (user_id, fid)).fetchall():
+            p = dict(p)
+            positions.append({"position_id": p["position_id"], "symbol": p["symbol"], "direction": p["position_side"],
+                              "size": p["quantity"], "entry_price": p["entry_price"], "mark_price": p.get("mark_price") or p["entry_price"],
+                              "unrealized_pnl": p.get("unrealized_pnl") or 0.0, "realized_pnl": p.get("realized_pnl") or 0.0,
+                              "isolated_margin": p.get("isolated_margin") or 0.0, "leverage": p.get("leverage") or 1,
+                              "status": (p["status"] or "").upper(), "stop_loss_price": None, "take_profit_price": None,
+                              "opened_at": p["opened_at"], "source": "FUTURES_ISOLATED"})
+        for o in conn.execute("SELECT * FROM futures_orders WHERE user_id = ? AND account_id = ? ORDER BY created_at DESC LIMIT 200",
+                              (user_id, fid)).fetchall():
+            o = dict(o)
+            orders.append({"order_id": o["order_id"], "symbol": o["symbol"], "side": o["side"], "type": o["order_type"],
+                           "quantity": o["quantity"], "price": o.get("avg_fill_price") or o.get("price"),
+                           "status": (o["status"] or "").upper(), "created_at": o["created_at"]})
+    return positions, orders
+
+
+def _hft_account_has_symbol_exposure(conn, user_id, acct, symbol) -> bool:
+    positions, orders = _scoped_rows(conn, user_id, acct)
+    sym = symbol.upper()
+    return any(p["symbol"].upper().replace("/", "") == sym and p["status"] == "OPEN" for p in positions) or \
+        any(o["symbol"].upper().replace("/", "") == sym and o["status"] in ("NEW", "OPEN", "PARTIALLY_FILLED", "PENDING") for o in orders)
+
+
+def _require_acct(conn, user_id, account_id):
+    acct = _resolve_hft_account(conn, user_id, account_id)
+    if not acct:
+        raise HTTPException(status_code=404, detail="Selected account not found for this user.")
+    return acct
+
+
+def _hft_scoped_positions(user_id, account_id):
+    conn = get_db_connection()
+    try:
+        acct = _require_acct(conn, user_id, account_id)
+        positions, _ = _scoped_rows(conn, user_id, acct)
+        op = [p for p in positions if p["status"] == "OPEN"]
+        return {"status": "SUCCESS", "account_id": account_id, "count": len(positions), "open_count": len(op),
+                "open_positions": op, "closed_positions": [p for p in positions if p["status"] != "OPEN"]}
+    finally:
+        conn.close()
+
+
+def _hft_scoped_orders(user_id, account_id):
+    conn = get_db_connection()
+    try:
+        acct = _require_acct(conn, user_id, account_id)
+        _, orders = _scoped_rows(conn, user_id, acct)
+        oo = [o for o in orders if o["status"] in ("NEW", "OPEN", "PARTIALLY_FILLED", "PENDING")]
+        return {"status": "SUCCESS", "account_id": account_id, "count": len(orders),
+                "open_orders": oo, "closed_orders": [o for o in orders if o not in oo]}
+    finally:
+        conn.close()
+
+
+def _hft_scoped_summary(user_id, account_id):
+    conn = get_db_connection()
+    try:
+        a = _require_acct(conn, user_id, account_id)
+        return {
+            "status": "SUCCESS", "account_id": a["account_id"], "exchange": a["exchange"],
+            "environment": "LIVE" if a["environment"] == "REAL" else "DEMO",
+            "account_environment": a["environment"], "masked_id": a["masked_id"],
+            "connection_status": a["connection_status"], "connected": a["connected"],
+            "currency": a["currency"], "balance_retrieved": a["available_balance"] is not None,
+            "wallet_balance_usd": a["equity"] or 0.0, "available_balance_usd": a["available_balance"] or 0.0,
+            "unrealized_pnl_usd": 0.0, "margin_balance_usd": a["available_balance"] or 0.0,
+            "equity_usd": a["equity"] or 0.0, "margin_type": "ISOLATED", "default_leverage": 3,
+            "max_leverage_limit": 5, "kill_switch_active": False, "engine_b_enabled": False,
+            "real_consent_recorded": _has_real_consent(conn, user_id, a["account_id"]) if a["environment"] == "REAL" else None,
+            "last_connected_at": a["last_connected_at"],
+        }
+    finally:
+        conn.close()
+
+
+@customer_router.get("/customer/trading/hft/connected-accounts")
+async def get_hft_connected_accounts(current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        ids = [r[0] for r in conn.execute(
+            "SELECT connection_id FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY account_type, is_preferred DESC", (user_id,))]
+        ids += [r[0] for r in conn.execute(
+            "SELECT account_id FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 ORDER BY provider, environment", (user_id,))]
+        accounts = []
+        for i in ids:
+            a = _resolve_hft_account(conn, user_id, i)
+            if not a:
+                continue
+            a.pop("futures_account_id", None)
+            a["display_label"] = f"{a['exchange']} — {a['environment_label']} Account — {a['masked_id']}"
+            a["real_consent_recorded"] = _has_real_consent(conn, user_id, i) if a["environment"] == "REAL" else None
+            accounts.append(a)
+        return {"status": "SUCCESS", "count": len(accounts), "accounts": accounts,
+                "live_trading_locked": True, "read_only_mode": True}
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/trading/hft/consent/real-trading")
+async def record_real_trading_consent(req: RealTradingConsentRequest, request: Request,
+                                      current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    if not req.confirmed:
+        raise HTTPException(status_code=400, detail="Explicit confirmation is required.")
+    if req.consent_version != REAL_CONSENT_VERSION:
+        raise HTTPException(status_code=409, detail="Consent version outdated. Reload and review the current terms.")
+    conn = get_db_connection()
+    try:
+        acct = _require_acct(conn, user_id, req.account_id)
+        if acct["environment"] != "REAL":
+            raise HTTPException(status_code=400, detail="Consent applies to REAL accounts only.")
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cid = "CNS-" + secrets.token_hex(6).upper()
+        ip = request.client.host if request.client else None
+        with conn:
+            conn.execute("INSERT INTO real_trading_consents (consent_id,user_id,account_id,environment,consent_version,consent_text,confirmed,created_at,ip_address) VALUES (?,?,?,?,?,?,1,?,?)",
+                         (cid, user_id, acct["account_id"], "REAL", REAL_CONSENT_VERSION, REAL_CONSENT_TEXT, now, ip))
+            conn.execute("INSERT INTO audit_logs (log_id,actor_id,action,target_user_id,details_json,created_at) VALUES (?,?,?,?,?,?)",
+                         ("AUD-" + secrets.token_hex(6).upper(), user_id, "REAL_TRADING_CONSENT_CONFIRMED", user_id,
+                          json.dumps({"consent_id": cid, "account_id": acct["account_id"], "environment": "REAL",
+                                      "consent_version": REAL_CONSENT_VERSION}), now))
+        return {"status": "SUCCESS", "consent_id": cid, "account_id": acct["account_id"], "recorded_at": now,
+                "consent_version": REAL_CONSENT_VERSION,
+                "note": "Consent recorded. Live execution remains locked by platform safety controls."}
     finally:
         conn.close()

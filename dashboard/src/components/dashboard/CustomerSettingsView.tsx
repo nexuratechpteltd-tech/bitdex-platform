@@ -1,25 +1,45 @@
 "use client";
 
-import React, { useState } from "react";
-import { Sliders, ShieldCheck, User, Bell, Lock, Link2, CheckCircle2 } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Sliders, ShieldCheck, User, Bell, Lock, Link2, CheckCircle2, Shield } from "lucide-react";
 
 interface CustomerSettingsViewProps {
   user?: any;
+  token?: string;
+  onSwitchPortal?: () => void;
 }
 
-export default function CustomerSettingsView({ user }: CustomerSettingsViewProps) {
+export default function CustomerSettingsView({ user, token, onSwitchPortal }: CustomerSettingsViewProps) {
+  const isAdmin = ["ADMIN", "OWNER"].includes(String(user?.role || "").toUpperCase());
   const [activeSection, setActiveSection] = useState<
-    "PROFILE" | "ACCOUNT" | "TRADING" | "NOTIFICATIONS" | "SECURITY" | "BROKERS"
+    "PROFILE" | "ACCOUNT" | "TRADING" | "NOTIFICATIONS" | "SECURITY" | "BROKERS" | "ADMIN_SETTINGS"
   >("PROFILE");
 
-  const sections = [
+  const sections: { id: string; label: string; icon: any }[] = [
     { id: "PROFILE", label: "Profile Information", icon: User },
     { id: "ACCOUNT", label: "Account Preferences", icon: Sliders },
     { id: "TRADING", label: "Trading Preferences", icon: ShieldCheck },
     { id: "NOTIFICATIONS", label: "Notifications", icon: Bell },
     { id: "SECURITY", label: "Security & 2FA", icon: Lock },
     { id: "BROKERS", label: "Connected Accounts", icon: Link2 },
+    ...(isAdmin ? [{ id: "ADMIN_SETTINGS", label: "Administrator Settings", icon: Shield }] : []),
   ];
+
+  // Admin settings data (read-only views backed by existing admin endpoints)
+  const [adminData, setAdminData] = useState<{ protection?: any; pricing?: any; providers?: any; error?: string }>({});
+  useEffect(() => {
+    if (!isAdmin || activeSection !== "ADMIN_SETTINGS") return;
+    const t = token || (typeof window !== "undefined" ? window.localStorage.getItem("token") || "" : "");
+    const h = { headers: t ? { Authorization: "Bearer " + t } : {} };
+    const get = (u: string) => fetch(u, h).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    Promise.all([
+      get("/api/backend/saas/admin/protection/status"),
+      get("/api/backend/saas/admin/pricing/global"),
+      get("/api/backend/saas/admin/provider-operations"),
+    ]).then(([protection, pricing, providers]) =>
+      setAdminData({ protection, pricing, providers, error: !protection && !pricing && !providers ? "Admin endpoints unavailable." : undefined })
+    );
+  }, [isAdmin, activeSection, token]);
 
   return (
     <div className="space-y-6 font-sans animate-in fade-in duration-200">
@@ -122,6 +142,59 @@ export default function CustomerSettingsView({ user }: CustomerSettingsViewProps
             </div>
           )}
 
+          {activeSection === "ADMIN_SETTINGS" && isAdmin && (
+            <div className="space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E2736] pb-2">
+                <h2 className="text-base font-bold text-[#F1F5F9]">Administrator Settings</h2>
+                {onSwitchPortal && (
+                  <button type="button" onClick={onSwitchPortal}
+                    className="px-3 py-1.5 rounded-lg bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 text-[11px] font-bold cursor-pointer">
+                    Open Full Administrator Portal →
+                  </button>
+                )}
+              </div>
+              {adminData.error && <div className="text-[#F6465D]">{adminData.error}</div>}
+
+              <section className="space-y-2">
+                <h3 className="text-[11px] uppercase text-[#64748B]">Platform Safety Locks (read-only)</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {[
+                    ["live_trading_locked", adminData.protection?.live_trading_locked ?? true],
+                    ["emergency_lock_active", adminData.protection?.emergency_lock_active ?? true],
+                    ["read_only_mode", adminData.protection?.read_only_mode ?? true],
+                  ].map(([k, v]) => (
+                    <div key={String(k)} className="p-3 rounded-lg bg-[#151C28] border border-[#1E2736]">
+                      <div className="text-[#64748B] text-[10px]">{String(k)}</div>
+                      <div className={`font-bold ${v ? "text-amber-400" : "text-[#10B981]"}`}>{v ? "ENGAGED" : "RELEASED"}</div>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] text-[#64748B]">Locks can only be changed through the controlled release procedure, not from this screen.</p>
+              </section>
+
+              <section className="space-y-2">
+                <h3 className="text-[11px] uppercase text-[#64748B]">Global Service Pricing</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {Object.entries((adminData.pricing?.global as Record<string, any>) || {}).map(([k, v]) => (
+                    <div key={k} className="flex justify-between p-2.5 rounded-lg bg-[#151C28] border border-[#1E2736]">
+                      <span className="text-[#94A3B8]">{k}</span>
+                      <span className="text-[#F1F5F9] font-bold">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+                    </div>
+                  ))}
+                  {!adminData.pricing && <div className="text-[#64748B]">Pricing not loaded.</div>}
+                </div>
+              </section>
+
+              <section className="space-y-2">
+                <h3 className="text-[11px] uppercase text-[#64748B]">Provider Operations</h3>
+                <pre className="p-3 rounded-lg bg-[#151C28] border border-[#1E2736] text-[10px] text-[#94A3B8] max-h-64 overflow-auto whitespace-pre-wrap">
+                  {adminData.providers ? JSON.stringify(adminData.providers.summary ?? adminData.providers.providers ?? adminData.providers, null, 2).slice(0, 4000) : "Provider data not loaded."}
+                </pre>
+              </section>
+
+              <p className="text-[10px] text-[#64748B]">Customer management, support inbox, AI pricing overrides, provider operations and audit logs are available in the restored Administrator Portal.</p>
+            </div>
+          )}
           {(activeSection === "NOTIFICATIONS" || activeSection === "BROKERS") && (
             <div className="space-y-4">
               <h2 className="text-base font-bold text-[#F1F5F9] border-b border-[#1E2736] pb-2">

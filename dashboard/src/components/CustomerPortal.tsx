@@ -1671,7 +1671,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
           )}
 
           {currentNav === "SETTINGS" && (
-            <CustomerSettingsView user={user} />
+            <CustomerSettingsView user={user} token={token} onSwitchPortal={onSwitchPortal} />
           )}
 
           {currentNav === "SUPPORT" && (

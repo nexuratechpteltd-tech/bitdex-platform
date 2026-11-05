@@ -117,6 +117,23 @@ interface TradingOverviewData {
   }>;
 }
 
+interface ConnectedAccount {
+  account_id: string;
+  source: string;
+  exchange: string;
+  environment: "REAL" | "DEMO";
+  environment_label: string;
+  masked_id: string;
+  connection_status: string;
+  connected: boolean;
+  currency: string;
+  available_balance: number | null;
+  equity: number | null;
+  last_connected_at: string | null;
+  display_label: string;
+  real_consent_recorded: boolean | null;
+}
+
 interface HftPair {
   symbol: string;
   price: number;
@@ -225,6 +242,17 @@ export default function InstitutionalTradingDashboard({
   const [pairSearch, setPairSearch] = useState<string>("");
   const [selectedPair, setSelectedPair] = useState<string>("BTCUSDT");
   const [showRejected, setShowRejected] = useState<boolean>(false);
+
+  // Section J: Connected exchange & account selector
+  const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<string>(() =>
+    typeof window !== "undefined" ? window.localStorage.getItem("bitdex_hft_account") || "" : ""
+  );
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const [consentModalOpen, setConsentModalOpen] = useState<boolean>(false);
+  const [consentChecked, setConsentChecked] = useState<boolean>(false);
+  const [consentBusy, setConsentBusy] = useState<boolean>(false);
+  const [pendingAction, setPendingAction] = useState<null | "CONFIG" | "START">(null);
 
   // Strategy Configuration State
   const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
@@ -399,11 +427,20 @@ export default function InstitutionalTradingDashboard({
         ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
       };
 
+      if (!selectedAccountId) {
+        setHftPositions([]);
+        setHftOrders([]);
+        return;
+      }
+      const q = `?account_id=${encodeURIComponent(selectedAccountId)}`;
       const [posRes, ordRes, accRes] = await Promise.all([
-        fetch("/api/backend/saas/customer/trading/hft/positions", { headers }),
-        fetch("/api/backend/saas/customer/trading/hft/orders", { headers }),
-        fetch("/api/backend/saas/customer/trading/hft/account-summary", { headers }),
+        fetch(`/api/backend/saas/customer/trading/hft/positions${q}`, { headers }),
+        fetch(`/api/backend/saas/customer/trading/hft/orders${q}`, { headers }),
+        fetch(`/api/backend/saas/customer/trading/hft/account-summary${q}`, { headers }),
       ]);
+      // Never keep data from a previously selected account
+      setHftPositions([]);
+      setHftOrders([]);
 
       if (posRes.ok) {
         const posJson = await posRes.json();
@@ -428,7 +465,7 @@ export default function InstitutionalTradingDashboard({
     } finally {
       setLoadingBottomData(false);
     }
-  }, [getAuthToken]);
+  }, [getAuthToken, selectedAccountId]);
 
   // 1. Fetch Trading Overview
   const fetchOverview = useCallback(async () => {
@@ -518,7 +555,8 @@ export default function InstitutionalTradingDashboard({
     try {
       setValidating(true);
       const authToken = getAuthToken();
-      const res = await fetch(`/api/backend/saas/customer/trading/hft/validation?symbol=${sym}`, {
+      const acctQ = selectedAccountId ? `&account_id=${encodeURIComponent(selectedAccountId)}` : "";
+      const res = await fetch(`/api/backend/saas/customer/trading/hft/validation?symbol=${sym}${acctQ}`, {
         headers: {
           "Content-Type": "application/json",
           ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
@@ -543,7 +581,83 @@ export default function InstitutionalTradingDashboard({
     } finally {
       setValidating(false);
     }
+  }, [getAuthToken, selectedAccountId]);
+
+  const fetchConnectedAccounts = useCallback(async () => {
+    try {
+      const authToken = getAuthToken();
+      const res = await fetch("/api/backend/saas/customer/trading/hft/connected-accounts", {
+        headers: { ...(authToken ? { Authorization: "Bearer " + authToken } : {}) },
+      });
+      if (!res.ok) throw new Error(`Could not load connected accounts (${res.status})`);
+      const json = await res.json();
+      const list: ConnectedAccount[] = json.accounts || [];
+      setConnectedAccounts(list);
+      setAccountsError(null);
+      setSelectedAccountId((cur) => (cur && list.some((a) => a.account_id === cur) ? cur : ""));
+    } catch (err: any) {
+      setAccountsError(err.message || "Could not load connected accounts");
+    }
   }, [getAuthToken]);
+
+  const selectedAccount = useMemo(
+    () => connectedAccounts.find((a) => a.account_id === selectedAccountId) || null,
+    [connectedAccounts, selectedAccountId]
+  );
+
+  useEffect(() => {
+    fetchConnectedAccounts();
+  }, [fetchConnectedAccounts]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") window.localStorage.setItem("bitdex_hft_account", selectedAccountId);
+    setHftAccountSummary(null);
+    setConsentChecked(false);
+  }, [selectedAccountId]);
+
+  // Gate any configure/arm action on account selection, connectivity and REAL consent
+  const guardAccountAction = (action: "CONFIG" | "START"): boolean => {
+    if (!selectedAccount) {
+      setFeedback({ type: "error", message: "Select a connected exchange account before configuring or arming a session." });
+      return false;
+    }
+    if (!selectedAccount.connected) {
+      setFeedback({ type: "error", message: `${selectedAccount.display_label} is not connected (${selectedAccount.connection_status}). Execution disabled.` });
+      return false;
+    }
+    if (selectedAccount.environment === "REAL" && !selectedAccount.real_consent_recorded) {
+      setPendingAction(action);
+      setConsentChecked(false);
+      setConsentModalOpen(true);
+      return false;
+    }
+    return true;
+  };
+
+  const submitRealConsent = async () => {
+    if (!selectedAccount || !consentChecked) return;
+    setConsentBusy(true);
+    try {
+      const authToken = getAuthToken();
+      const res = await fetch("/api/backend/saas/customer/trading/hft/consent/real-trading", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(authToken ? { Authorization: "Bearer " + authToken } : {}) },
+        body: JSON.stringify({ account_id: selectedAccount.account_id, confirmed: true, consent_version: "REAL-CONSENT-v1" }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(typeof json.detail === "string" ? json.detail : "Consent could not be recorded.");
+      setConnectedAccounts((prev) => prev.map((a) => (a.account_id === selectedAccount.account_id ? { ...a, real_consent_recorded: true } : a)));
+      setConsentModalOpen(false);
+      setFeedback({ type: "info", message: "Real-account consent recorded. Live execution remains locked by platform safety controls." });
+      if (pendingAction === "CONFIG") setIsConfigModalOpen(true);
+      setPendingAction(null);
+      if (selectedPair) runValidation(selectedPair);
+    } catch (err: any) {
+      setFeedback({ type: "error", message: err.message });
+    } finally {
+      setConsentBusy(false);
+    }
+  };
 
   useEffect(() => {
     fetchOverview();
@@ -853,6 +967,71 @@ export default function InstitutionalTradingDashboard({
       {/* ─── INSTITUTIONAL RISK & PROTECTION CENTER (DYNAMIC) ───────────────── */}
       <ProtectionCenter token={token} />
 
+      {/* ─── CONNECTED EXCHANGE & ACCOUNT SELECTOR (Section J) ─────────────── */}
+      <div id="hft-account-selector" className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-3 shadow-lg font-mono">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label htmlFor="hft-account-select" className="text-xs font-bold text-white uppercase tracking-wide">Trading Account</label>
+          <button type="button" onClick={fetchConnectedAccounts} className="text-[10px] text-[#94A3B8] hover:text-white flex items-center gap-1 cursor-pointer">
+            <RefreshCw className="w-3 h-3" /> Refresh accounts
+          </button>
+        </div>
+        <select
+          id="hft-account-select"
+          value={selectedAccountId}
+          onChange={(e) => setSelectedAccountId(e.target.value)}
+          className="w-full bg-[#0B0E11] border border-[#272735] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#00E5FF]"
+        >
+          <option value="">— Select a connected exchange account —</option>
+          {connectedAccounts.map((a) => (
+            <option key={a.account_id} value={a.account_id}>
+              {a.display_label} · {a.connected ? "Connected" : a.connection_status}
+              {a.available_balance !== null ? ` · ${a.available_balance.toFixed(2)} ${a.currency}` : ""}
+            </option>
+          ))}
+        </select>
+        {accountsError && <div className="text-xs text-[#F6465D]">{accountsError}</div>}
+        {connectedAccounts.length === 0 && !accountsError && (
+          <div className="text-xs text-[#94A3B8]">No connected accounts. Connect an exchange account in Settings → Connected Accounts.</div>
+        )}
+        {selectedAccount && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-[11px]">
+            {[
+              ["Exchange", selectedAccount.exchange],
+              ["Environment", selectedAccount.environment],
+              ["Account", selectedAccount.masked_id],
+              ["Status", selectedAccount.connected ? "CONNECTED" : selectedAccount.connection_status],
+              ["Currency", selectedAccount.currency],
+              ["Available", selectedAccount.available_balance !== null ? selectedAccount.available_balance.toFixed(2) : "Not retrieved"],
+              ["Equity", selectedAccount.equity !== null ? selectedAccount.equity.toFixed(2) : "Not retrieved"],
+              ["Last connected", selectedAccount.last_connected_at ? new Date(selectedAccount.last_connected_at).toLocaleString() : "Never"],
+            ].map(([k, v]) => (
+              <div key={k} className="p-2 rounded-lg bg-[#0B0E11] border border-[#272735]">
+                <div className="text-[#64748B] uppercase text-[9px]">{k}</div>
+                <div className={`font-bold truncate ${k === "Environment" && v === "REAL" ? "text-[#F6465D]" : k === "Status" && v !== "CONNECTED" ? "text-amber-400" : "text-white"}`}>{v}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {selectedAccount && !selectedAccount.connected && (
+          <div className="p-2.5 rounded-lg bg-[#F6465D]/10 border border-[#F6465D]/30 text-xs text-[#F6465D] flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            This account could not be verified ({selectedAccount.connection_status}). Execution is disabled for this account.
+          </div>
+        )}
+        {selectedAccount?.environment === "REAL" && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            REAL account selected — real funds. {selectedAccount.real_consent_recorded ? "Consent on record." : "Explicit consent is required before configuring or arming."}
+          </div>
+        )}
+        {hasDuplicatePair && selectedAccount && (
+          <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {selectedPair} already has an open position or working order on {selectedAccount.masked_id}.
+          </div>
+        )}
+      </div>
+
       {/* ─── STEP 1: DYNAMIC BINANCE USD(S)-M PAIR DISCOVERY ─────────────────── */}
       <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-4 shadow-lg">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#272735] pb-3">
@@ -1091,7 +1270,7 @@ export default function InstitutionalTradingDashboard({
                 onClick={() => {
                   if (activationStatus !== "ACTIVE") {
                     setIsActivationModalOpen(true);
-                  } else {
+                  } else if (guardAccountAction("CONFIG")) {
                     setIsConfigModalOpen(true);
                   }
                 }}
@@ -1303,11 +1482,11 @@ export default function InstitutionalTradingDashboard({
                 onClick={() => {
                   if (activationStatus !== "ACTIVE") {
                     setIsActivationModalOpen(true);
-                  } else {
+                  } else if (guardAccountAction("START")) {
                     handleStartSession();
                   }
                 }}
-                disabled={(activationStatus === "ACTIVE" && !isReady) || sessionActionLoading || hasDuplicatePair}
+                disabled={(activationStatus === "ACTIVE" && !isReady) || sessionActionLoading || hasDuplicatePair || !selectedAccount || !selectedAccount.connected}
                 className={`px-5 py-2.5 rounded-xl font-bold transition-all flex items-center gap-2 ${
                   activationStatus !== "ACTIVE"
                     ? "bg-amber-500 hover:bg-amber-400 text-[#0B0E11] cursor-pointer shadow-lg shadow-amber-500/20"
@@ -2048,6 +2227,35 @@ export default function InstitutionalTradingDashboard({
                   <span>Verify $20.00 Payment &amp; Unlock HFT</span>
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {consentModalOpen && selectedAccount && (
+        <div className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4" role="dialog" aria-modal="true" id="real-consent-modal">
+          <div className="w-full max-w-lg rounded-2xl bg-[#121218] border border-[#F6465D]/40 shadow-2xl p-6 space-y-4 font-mono">
+            <div className="flex items-center gap-2 text-[#F6465D]">
+              <AlertTriangle className="w-5 h-5" />
+              <h3 className="text-sm font-bold uppercase">Real Trading Account — Risk Acknowledgement</h3>
+            </div>
+            <div className="text-xs text-white">{selectedAccount.display_label}</div>
+            <ul className="text-xs text-[#94A3B8] space-y-1.5 list-disc pl-5">
+              <li>This account uses real money. You can lose part or all of the funds allocated.</li>
+              <li>Leveraged positions can be liquidated, and losses can exceed your expectations.</li>
+              <li>Trading fees, spreads, swaps and slippage apply and reduce returns.</li>
+              <li>No profit is guaranteed. Past or simulated results do not predict future results.</li>
+              <li>Live execution remains locked by platform safety controls; this consent does not unlock it.</li>
+            </ul>
+            <label className="flex items-start gap-2 text-xs text-white cursor-pointer">
+              <input type="checkbox" id="real-consent-checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} className="mt-0.5" />
+              <span>I understand that I am about to use a REAL trading account and that real financial losses are possible. I explicitly consent to proceeding.</span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => { setConsentModalOpen(false); setPendingAction(null); }} className="px-4 py-2 rounded-lg bg-[#181822] border border-[#272735] text-xs text-[#94A3B8] hover:text-white cursor-pointer">Cancel</button>
+              <button type="button" id="real-consent-confirm" disabled={!consentChecked || consentBusy} onClick={submitRealConsent}
+                className={`px-4 py-2 rounded-lg text-xs font-bold ${consentChecked && !consentBusy ? "bg-[#F6465D] text-white cursor-pointer" : "bg-[#181822] text-[#64748B] cursor-not-allowed"}`}>
+                {consentBusy ? "Recording…" : "Confirm & Record Consent"}
+              </button>
             </div>
           </div>
         </div>
