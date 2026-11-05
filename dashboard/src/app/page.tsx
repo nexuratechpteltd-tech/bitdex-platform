@@ -23,6 +23,19 @@ export default function TauricPortal() {
     if (typeof window !== "undefined") {
       const h = window.location.hash.toLowerCase();
       if (
+        h === "#trading" ||
+        h === "#terminal" ||
+        h === "#dashboard" ||
+        h === "#signals" ||
+        h === "#balances" ||
+        h === "#connections" ||
+        h === "#settings" ||
+        h === "#funding" ||
+        h === "#orders"
+      ) {
+        return "CUSTOMER";
+      }
+      if (
         h.startsWith("#admin") ||
         h === "#customers" ||
         h === "#support" ||
@@ -32,6 +45,15 @@ export default function TauricPortal() {
         h === "#provider_operations"
       ) {
         return "ADMIN";
+      }
+      const savedUserStr = localStorage.getItem("tauric_session_user");
+      if (savedUserStr) {
+        try {
+          const u = JSON.parse(savedUserStr);
+          if (u && (u.role === "ADMIN" || u.role === "OWNER")) {
+            return "ADMIN";
+          }
+        } catch {}
       }
     }
     return "CUSTOMER";
@@ -88,7 +110,7 @@ export default function TauricPortal() {
         }
       }
       // Validate session with backend
-      fetch("/trading/api/backend/saas/customer/me", {
+      fetch("/api/backend/saas/customer/me", {
         headers: { Authorization: `Bearer ${savedToken}` },
       })
         .then((res) => {
@@ -116,6 +138,13 @@ export default function TauricPortal() {
     localStorage.setItem("tauric_session_user", JSON.stringify(user));
     setAuthToken(token);
     setCurrentUser(user);
+    if (user && (user.role === "ADMIN" || user.role === "OWNER")) {
+      const h = typeof window !== "undefined" ? window.location.hash.toLowerCase() : "";
+      if (!h || h.startsWith("#admin") || h === "#customers" || h === "#support" || h === "#pricing" || h === "#exchanges" || h === "#audit") {
+        setPortalMode("ADMIN");
+        if (typeof window !== "undefined") window.location.hash = "admin";
+      }
+    }
   };
 
   const handleSignOut = async () => {

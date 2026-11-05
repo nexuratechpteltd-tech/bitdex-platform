@@ -95,11 +95,7 @@ export default function SidebarNav({
       hash: "hft",
       icon: Zap,
       group: "MAIN NAVIGATION",
-      badge: (
-        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/30">
-          SIMULATED
-        </span>
-      ),
+      badge: null,
     },
     {
       id: "CONNECTIONS" as NavDestination,
@@ -155,6 +151,23 @@ export default function SidebarNav({
       group: "SYSTEM",
       badge: null,
     },
+    ...(userRole === "ADMIN" || userRole === "OWNER"
+      ? [
+          {
+            id: "ADMIN_PORTAL" as any,
+            label: "Administrator Portal",
+            hash: "admin",
+            icon: ShieldCheck,
+            group: "SYSTEM",
+            badge: (
+              <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                ADMIN
+              </span>
+            ),
+            onClick: onSwitchPortal,
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -213,7 +226,7 @@ export default function SidebarNav({
                   return (
                     <button
                       key={item.id}
-                      onClick={() => onNavigate(item.id)}
+                      onClick={() => (item as any).onClick ? (item as any).onClick() : onNavigate(item.id)}
                       title={isCollapsed ? item.label : undefined}
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all group ${
                         isActive
@@ -321,7 +334,11 @@ export default function SidebarNav({
                         <button
                           key={item.id}
                           onClick={() => {
-                            onNavigate(item.id);
+                            if ((item as any).onClick) {
+                              (item as any).onClick();
+                            } else {
+                              onNavigate(item.id);
+                            }
                             onCloseMobileDrawer();
                           }}
                           className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all ${

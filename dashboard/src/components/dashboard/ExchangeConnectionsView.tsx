@@ -43,7 +43,7 @@ export default function ExchangeConnectionsView({
   // Form states (Exness Trader API)
   const [accountEnv, setAccountEnv] = useState<"DEMO" | "REAL">("REAL");
   const [accountLogin, setAccountLogin] = useState("");
-  const [serverName, setServerName] = useState("https://www.exness-api.com");
+  const [serverName, setServerName] = useState("https://gateway.exness.com");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [accountTier, setAccountTier] = useState("STANDARD");
@@ -133,13 +133,19 @@ export default function ExchangeConnectionsView({
       });
 
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail?.reason || data.detail || "Authentication test failed.");
+      if (!res.ok || data.status !== "SUCCESS" || data.broker_result?.broker_authenticated === false) {
+        const errorDetail =
+          data.detail?.reason ||
+          (typeof data.detail === "string" ? data.detail : null) ||
+          data.broker_result?.reason ||
+          data.error_detail ||
+          "Authentication test failed.";
+        throw new Error(errorDetail);
       }
 
       setStatusMsg({
         type: "success",
-        text: `Connection handshake verified against https://www.exness-api.com. Account mode: ${accountEnv}.`,
+        text: `Connection handshake verified against Exness Trader API gateway. Account mode: ${accountEnv}.`,
       });
       await fetchStatus();
       if (onRefresh) onRefresh();
@@ -190,8 +196,14 @@ export default function ExchangeConnectionsView({
       });
 
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail?.reason || data.detail || "Trader API connection failed.");
+      if (!res.ok || data.status !== "SUCCESS" || data.broker_result?.broker_authenticated === false) {
+        const errorDetail =
+          data.detail?.reason ||
+          (typeof data.detail === "string" ? data.detail : null) ||
+          data.broker_result?.reason ||
+          data.error_detail ||
+          "Trader API connection failed.";
+        throw new Error(errorDetail);
       }
 
       setStatusMsg({

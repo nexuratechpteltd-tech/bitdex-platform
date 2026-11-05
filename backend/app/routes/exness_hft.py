@@ -513,6 +513,7 @@ async def connect_exness_real(
         conn_res = await adapter.connect(password=req.password)
         adapter_mode = "EXNESS_MT5_GATEWAY"
 
+    is_authenticated = bool(conn_res.get("broker_authenticated", False))
     conn = get_db_connection()
     try:
         conn_id = save_exness_connection(
@@ -523,28 +524,45 @@ async def connect_exness_real(
             enc_credentials=enc_creds,
             adapter_mode=adapter_mode,
             account_type="REAL",
-            balance=0.0,
-            equity=0.0,
+            balance=float(conn_res.get("balance", 0.0)) if is_authenticated else 0.0,
+            equity=float(conn_res.get("equity", 0.0)) if is_authenticated else 0.0,
             leverage=200,
             currency="USD",
             account_label=label,
-            is_preferred=1,
+            is_preferred=1 if is_authenticated else 0,
         )
+        if is_authenticated:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("UPDATE exness_demo_connections SET last_reconciled_at = ? WHERE connection_id = ?", (now, conn_id))
+            conn.commit()
+        else:
+            conn.execute("UPDATE exness_demo_connections SET last_reconciled_at = NULL WHERE connection_id = ?", (conn_id,))
+            conn.commit()
     finally:
         conn.close()
 
-    _USER_ADAPTERS[(user_id, "REAL")] = adapter
-
-    return {
-        "status": "SUCCESS",
-        "connection_id": conn_id,
-        "environment": "REAL",
-        "connection_method": adapter_mode,
-        "account_id": mask_id(req.account_login),
-        "server": req.server_name,
-        "broker_result": conn_res,
-        "live_execution_locked": True,
-    }
+    if is_authenticated:
+        _USER_ADAPTERS[(user_id, "REAL")] = adapter
+        return {
+            "status": "SUCCESS",
+            "connection_id": conn_id,
+            "environment": "REAL",
+            "connection_method": adapter_mode,
+            "account_id": mask_id(req.account_login),
+            "server": req.server_name,
+            "broker_result": conn_res,
+            "live_execution_locked": True,
+        }
+    else:
+        reason = conn_res.get("reason") or conn_res.get("error") or conn_res.get("detail") or "Broker authentication failed"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "status": "FAILED",
+                "reason": reason,
+                "broker_result": conn_res,
+            }
+        )
 
 
 @router.post("/disconnect")

@@ -2784,14 +2784,14 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
         r = dict(r)
         env = "REAL" if (r.get("account_type") or "").upper() == "REAL" else "DEMO"
         verified = bool(r.get("last_reconciled_at"))
+        status = "VERIFIED" if verified else "NOT TESTED"
         return {
             "account_id": r["connection_id"], "source": "EXNESS", "exchange": "Exness",
             "environment": env, "environment_label": "Real" if env == "REAL" else "Demo",
             "masked_id": _mask_id(r.get("account_login")),
-            "connection_status": "CONNECTED" if verified else "NOT_VERIFIED",
+            "connection_status": status,
             "connected": verified,
             "currency": r.get("currency") or "USD",
-            # Balances are only reported when genuinely retrieved from the broker.
             "available_balance": float(r["balance_usd"]) if verified and r.get("balance_usd") is not None else None,
             "equity": float(r["equity_usd"]) if verified and r.get("equity_usd") is not None else None,
             "last_connected_at": r.get("last_reconciled_at"),
@@ -2803,8 +2803,20 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
         return None
     r = dict(r)
     env = "REAL" if (r.get("environment") or "").upper() in ("LIVE", "REAL", "MAINNET") else "DEMO"
-    status = (r.get("connection_status") or "UNKNOWN").upper()
-    connected = status in ("CONNECTED", "VERIFIED_READ_ONLY", "VERIFIED")
+    raw_status = (r.get("connection_status") or "").upper()
+    has_verified_ts = bool(r.get("last_verified_at"))
+    if not has_verified_ts:
+        status = "NOT TESTED"
+        connected = False
+    elif raw_status in ("VERIFIED", "VERIFIED_READ_ONLY", "CONNECTED"):
+        status = "VERIFIED"
+        connected = True
+    elif "ERROR" in raw_status or "FAIL" in raw_status:
+        status = "ERROR"
+        connected = False
+    else:
+        status = "DISCONNECTED"
+        connected = False
     fa = conn.execute("SELECT * FROM futures_accounts WHERE user_id = ? AND exchange_connection_id = ? LIMIT 1",
                       (user_id, account_id)).fetchone()
     fa = dict(fa) if fa else None
@@ -2816,8 +2828,8 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
         "masked_id": _mask_id(r["account_id"]),
         "connection_status": status, "connected": connected,
         "currency": (fa or {}).get("margin_asset") or "USDT",
-        "available_balance": float(fa["available_balance"]) if fa and fa.get("updated_at") else None,
-        "equity": round(float(fa["wallet_balance"]) + float(fa["unrealized_pnl"]), 2) if fa and fa.get("updated_at") else None,
+        "available_balance": float(fa["available_balance"]) if fa and fa.get("updated_at") and connected else None,
+        "equity": round(float(fa["wallet_balance"]) + float(fa["unrealized_pnl"]), 2) if fa and fa.get("updated_at") and connected else None,
         "last_connected_at": r.get("last_verified_at"),
         "futures_account_id": (fa or {}).get("account_id"),
     }

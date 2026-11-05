@@ -1483,14 +1483,18 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               <span>EXNESS: NOT CONNECTED</span>
             </div>
 
-            {/* Environment Badge */}
-            <StatusBadge type="ENVIRONMENT" state="SIMULATED" />
-
-            {/* Emergency Lock Indicator */}
-            <div className="hidden md:flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-[#EF4444]/15 text-[#EF4444] border border-[#EF4444]/30">
-              <Lock className="w-3 h-3" />
-              <span>Locked</span>
-            </div>
+            {/* Admin Switcher (when user is admin/owner) */}
+            {onSwitchPortal && (
+              <button
+                id="btn-nav-admin-portal"
+                onClick={onSwitchPortal}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-300 text-xs font-mono font-bold transition-all shadow-sm cursor-pointer"
+                title="Switch to Administrator Portal"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+                <span className="hidden sm:inline">Admin Portal</span>
+              </button>
+            )}
 
             {/* Profile Dropdown */}
             <div className="relative">

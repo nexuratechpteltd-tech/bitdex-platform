@@ -153,6 +153,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             sec_bytes = self.api_secret.encode("utf-8")
             if b"BEGIN PRIVATE KEY" in sec_bytes:
                 self._private_key = serialization.load_pem_private_key(sec_bytes, password=None)
+            elif len(self.api_secret) == 128:
+                # Exness official 128-hex character private key (64-byte keypair: 32-byte seed + 32-byte public key)
+                seed_bytes = bytes.fromhex(self.api_secret[:64])
+                self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(seed_bytes)
             elif len(self.api_secret) == 64:
                 # Raw hex representation of 32-byte seed
                 seed_bytes = bytes.fromhex(self.api_secret)
@@ -160,6 +164,17 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             elif len(self.api_secret) == 32:
                 self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(sec_bytes)
             else:
+                # Check base64 format
+                try:
+                    b64_raw = base64.b64decode(self.api_secret)
+                    if len(b64_raw) == 32:
+                        self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(b64_raw)
+                        return
+                    elif len(b64_raw) == 64:
+                        self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(b64_raw[:32])
+                        return
+                except Exception:
+                    pass
                 # Deterministic seed derivation from secret text for development/staging testing
                 derived_seed = hashlib.sha256(sec_bytes).digest()
                 self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(derived_seed)
@@ -269,10 +284,17 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                             "access_point": self.api_url,
                             "account_id": data.get("account_id", self.account_id),
                         }
+                ct = res.headers.get("content-type", "").lower()
+                is_html = "text/html" in ct or res.text.strip().startswith("<!DOCTYPE") or res.text.strip().startswith("<html")
+                detail_msg = (
+                    f"Gateway host '{self.discovery_base_url}' returned HTML documentation (HTTP {res.status_code}). "
+                    f"The Gateway host must be the server URL provided in Key Management DNS widget in your Exness Personal Area."
+                    if is_html else res.text[:200]
+                )
                 return {
                     "status": "DISCOVERY_FAILED",
                     "http_status": res.status_code,
-                    "detail": res.text,
+                    "detail": detail_msg,
                     "gateway": self.discovery_base_url,
                 }
         except Exception as e:
@@ -308,16 +330,41 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             async with httpx.AsyncClient(timeout=4.0) as client:
                 res = await client.get(f"{target_api}{path}", headers=headers)
                 if res.status_code == 200:
-                    data = res.json()
+                    try:
+                        data = res.json()
+                    except Exception:
+                        data = None
+
+                    if not isinstance(data, dict) or not data:
+                        self.is_connected = False
+                        self.broker_authenticated = False
+                        ct = res.headers.get("content-type", "").lower()
+                        return {
+                            "status": "RESOURCE_NOT_FOUND",
+                            "adapter_connected": False,
+                            "broker_authenticated": False,
+                            "broker_mode": "EXNESS_TRADER_API",
+                            "account_id": self.account_id,
+                            "http_status": 200,
+                            "target_endpoint": f"{target_api}{path}",
+                            "reason": f"Target host '{target_api}' returned non-API response (content-type: {ct or 'empty'}). The Gateway Host must be the official Exness Gateway host obtained from your Exness Personal Area Key Management DNS widget.",
+                        }
+
                     is_demo = bool(data.get("is_demo", self.environment == "DEMO"))
                     expected_demo = (self.environment == "DEMO")
 
                     if is_demo != expected_demo:
                         self.is_connected = False
                         self.broker_authenticated = False
-                        raise PermissionError(
-                            f"Account environment mismatch: Requested {self.environment}, but broker returned is_demo={is_demo}."
-                        )
+                        return {
+                            "status": "ENVIRONMENT_MISMATCH",
+                            "adapter_connected": False,
+                            "broker_authenticated": False,
+                            "broker_mode": "EXNESS_TRADER_API",
+                            "account_id": self.account_id,
+                            "http_status": 400,
+                            "reason": f"Account environment mismatch: Requested {self.environment}, but broker returned is_demo={is_demo}.",
+                        }
 
                     self.is_connected = True
                     self.broker_authenticated = True
@@ -364,16 +411,22 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 elif res.status_code == 404:
                     self.is_connected = False
                     self.broker_authenticated = False
+                    ct = res.headers.get("content-type", "").lower()
+                    is_html = "text/html" in ct or res.text.strip().startswith("<!DOCTYPE") or res.text.strip().startswith("<html")
+                    if is_html:
+                        reason_msg = f"Host '{target_api}' returned HTML documentation (404 Not Found). The Gateway Host must be the official Exness Gateway host obtained from your Exness Personal Area Key Management DNS widget."
+                    else:
+                        reason_msg = f"Account or endpoint '{path}' not found on Exness Trader API ({target_api}). Verify that the API Key has access to Account ID {self.account_id} in Exness Personal Area."
                     return {
                         "status": "RESOURCE_NOT_FOUND",
-                        "adapter_connected": True,
+                        "adapter_connected": False,
                         "broker_authenticated": False,
                         "is_mock": False,
                         "broker_mode": "EXNESS_TRADER_API",
                         "account_id": self.account_id,
                         "http_status": 404,
                         "target_endpoint": f"{target_api}{path}",
-                        "reason": f"Account or endpoint '{path}' not found on Exness Trader API ({target_api}). Verify that the API Key has access to Account ID {self.account_id} in Exness Personal Area.",
+                        "reason": reason_msg,
                     }
                 elif res.status_code in (502, 503, 504):
                     self.is_connected = False
