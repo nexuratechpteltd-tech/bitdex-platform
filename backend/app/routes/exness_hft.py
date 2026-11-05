@@ -7,6 +7,7 @@ Specification reference: Master Exness HFT Implementation Specification, Part 4 
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -119,6 +120,16 @@ class ExnessRealConnectRequest(BaseModel):
     api_secret: Optional[str] = Field(default=None, description="Exness Trader API Secret")
     account_tier: str = Field(default="STANDARD", description="Standard, Pro, Raw Spread, Zero")
     account_label: Optional[str] = Field(default=None, description="User-assigned friendly label")
+
+
+class ExnessAttachDiscoverRequest(BaseModel):
+    api_key: str = Field(..., min_length=4, max_length=128, description="Exness Trader API Key from Personal Area")
+    api_secret: str = Field(..., min_length=16, description="Ed25519 private key string or hex seed")
+    gateway_host: str = Field(..., min_length=8, description="Gateway Base URL from Exness Key Management DNS Widget")
+    account_ids: Optional[List[str]] = Field(default=None, description="Candidate account IDs to authenticate (e.g. ['149827361', '460310009'])")
+    account_tier: str = Field(default="STANDARD", description="Account tier: STANDARD, PRO, RAW_SPREAD, ZERO")
+    manual_environments: Optional[Dict[str, str]] = Field(default=None, description="Optional explicit DEMO/REAL mapping per account ID")
+    account_label: Optional[str] = Field(default=None, description="Friendly label prefix")
 
 
 class MarginCalculateRequest(BaseModel):
@@ -251,17 +262,26 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
     def format_conn(c):
         if not c:
             return None
+        v_status = c.get("verification_status") or ("VERIFIED" if c.get("last_reconciled_at") else "NOT_TESTED")
         return {
             "connection_id": c["connection_id"],
             "account_login": mask_id(c["account_login"]),
-            "account_login_raw": c["account_login"],
+            "account_login_raw": str(c["account_login"]),
             "server_name": c["server_name"],
             "account_type": c["account_type"],
             "adapter_mode": c.get("adapter_mode", "EXNESS_MT5_GATEWAY"),
-            "account_label": c.get("account_label") or ("Exness Demo" if c["account_type"] == "DEMO" else "Exness Real"),
+            "account_label": c.get("account_label") or (f"Exness Demo ({c['account_login']})" if c["account_type"] == "DEMO" else f"Exness Real ({c['account_login']})"),
             "is_preferred": bool(c.get("is_preferred", 0)),
             "balance_usd": c["balance_usd"],
             "equity_usd": c["equity_usd"],
+            "margin_used": c.get("margin_used", 0.0),
+            "margin_free": c.get("margin_free", 0.0),
+            "trade_mode": c.get("trade_mode") or c["account_type"],
+            "verification_status": v_status,
+            "error_type": c.get("error_type") or "",
+            "error_detail": c.get("error_detail") or "",
+            "environment_confirmed_by": c.get("environment_confirmed_by") or ("PROVIDER_VERIFIED" if v_status == "VERIFIED" else "UNCONFIRMED"),
+            "access_point": c.get("access_point") or "",
             "currency": c.get("currency", "USD"),
             "is_active": bool(c.get("is_active", 1)),
             "last_reconciled_at": c["last_reconciled_at"],
@@ -270,6 +290,11 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
 
     has_any_connected = bool(demo_conn or real_conn or trader_conn)
 
+    formatted_all = [format_conn(c) for c in all_conns]
+    exness_demos = [c for c in formatted_all if c and c["account_type"] == "DEMO"]
+    exness_reals = [c for c in formatted_all if c and c["account_type"] == "REAL"]
+    failed_conns = [c for c in formatted_all if c and c.get("verification_status") in ("FAILED", "ERROR")]
+
     return {
         "status": "SUCCESS",
         "broker": "Exness",
@@ -277,17 +302,24 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         "live_trading_locked": True,
         "emergency_lock_active": True,
         "adapter_connected": has_any_connected,
-        "broker_authenticated": bool((demo_conn and conn_demo_status.get("broker_authenticated")) or (real_conn and conn_real_status.get("broker_authenticated")) or trader_conn),
+        "broker_authenticated": bool(
+            (demo_conn and (demo_conn.get("verification_status") == "VERIFIED" or conn_demo_status.get("broker_authenticated"))) or
+            (real_conn and (real_conn.get("verification_status") == "VERIFIED" or conn_real_status.get("broker_authenticated"))) or
+            (trader_conn and trader_conn.get("verification_status") == "VERIFIED")
+        ),
         "is_mock": False if real_conn or trader_conn else (conn_demo_status.get("is_mock", True) if demo_conn else False),
         "broker_mode": demo_conn.get("adapter_mode") if demo_conn else "NONE",
         "is_connected": has_any_connected,
         "active_demo_connection": format_conn(demo_conn),
         "active_real_connection": format_conn(real_conn),
         "active_trader_connection": format_conn(trader_conn),
-        "all_connections": [format_conn(c) for c in all_conns],
-        "demo_connections": [format_conn(c) for c in all_conns if c["account_type"] == "DEMO" and c.get("adapter_mode") != "EXNESS_TRADER_API"],
-        "real_connections": [format_conn(c) for c in all_conns if c["account_type"] == "REAL" and c.get("adapter_mode") != "EXNESS_TRADER_API"],
-        "trader_connections": [format_conn(c) for c in all_conns if c.get("adapter_mode") == "EXNESS_TRADER_API"],
+        "all_connections": formatted_all,
+        "demo_connections": [c for c in formatted_all if c and c["account_type"] == "DEMO" and c.get("adapter_mode") != "EXNESS_TRADER_API"],
+        "real_connections": [c for c in formatted_all if c and c["account_type"] == "REAL" and c.get("adapter_mode") != "EXNESS_TRADER_API"],
+        "trader_connections": [c for c in formatted_all if c and c.get("adapter_mode") == "EXNESS_TRADER_API"],
+        "exness_demo_accounts": exness_demos,
+        "exness_real_accounts": exness_reals,
+        "failed_accounts": failed_conns,
         "demo_status": conn_demo_status,
         "real_status": conn_real_status,
         "trader_status": trader_status,
@@ -566,6 +598,309 @@ async def connect_exness_real(
             }
         )
 
+
+
+@router.post("/attach-and-discover")
+async def attach_and_discover_accounts(
+    req: ExnessAttachDiscoverRequest,
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Phase 19: Automatic Exness Demo & Real Account Discovery and Authentication.
+    1. Validates API key and Ed25519 private key.
+    2. Validates Gateway Host from Exness Key Management DNS widget.
+    3. Attempts official API account enumeration (GET /v1/accounts, /v1/trading/accounts).
+    4. If enumeration unsupported, registers and independently authenticates supplied candidate accounts.
+    5. Resolves dynamic Access Point per account (GET /v1/trading/access-point?account_id={id}).
+    6. Authenticates every authorized account separately (GET /v1/configuration/accounts/{id}/account).
+    7. Retrieves authoritative balance and margin (GET /v1/accounts/{id}/balance).
+    8. Classifies each account as DEMO or REAL using provider trade_mode or manual confirmation.
+    9. Persists each verified account separately in vault-backed storage.
+    """
+    user_id = user["user_id"]
+    api_key = req.api_key.strip()
+    api_secret = req.api_secret.strip()
+    gateway_host = req.gateway_host.strip().rstrip("/")
+    if not gateway_host.startswith("http://") and not gateway_host.startswith("https://"):
+        gateway_host = f"https://{gateway_host}"
+
+    # Determine candidate IDs to probe (preserve strictly as strings)
+    candidate_ids: List[str] = []
+    if req.account_ids:
+        for aid in req.account_ids:
+            s = str(aid).strip()
+            if s and s not in candidate_ids:
+                candidate_ids.append(s)
+
+    # Always ensure known admin accounts (149827361 Demo, 460310009 Real) are checked if not specified
+    if not candidate_ids:
+        candidate_ids = ["149827361", "460310009"]
+
+    # Instantiate Exness Trader API Adapter
+    adapter = ExnessTraderAPIAdapter(
+        api_key=api_key,
+        api_secret=api_secret,
+        account_id=candidate_ids[0] if candidate_ids else "149827361",
+        discovery_base_url=gateway_host,
+        account_tier=req.account_tier,
+    )
+
+    # Execute full discovery and multi-account verification
+    disc_res = await adapter.discover_and_verify_all(
+        candidate_account_ids=candidate_ids,
+        manual_environments=req.manual_environments
+    )
+
+    conn = get_db_connection()
+    persisted_demo = []
+    persisted_real = []
+    persisted_failed = []
+
+    try:
+        # Save verified DEMO accounts
+        for d in disc_res.get("demo_accounts", []):
+            enc = ExnessCredentialVault.encrypt_credentials(
+                user_id=user_id,
+                login=d["account_id"],
+                password=api_secret,
+                server=gateway_host,
+                account_type="DEMO",
+            )
+            cid = save_exness_connection(
+                conn=conn,
+                user_id=user_id,
+                login=d["account_id"],
+                server=gateway_host,
+                enc_credentials=enc,
+                adapter_mode="EXNESS_TRADER_API",
+                account_type="DEMO",
+                balance=float(d.get("balance", 0.0)),
+                equity=float(d.get("equity", 0.0)),
+                leverage=int(d.get("leverage", 200)),
+                currency=d.get("currency", "USD"),
+                account_label=req.account_label or f"Exness Demo ({d['account_id']})",
+                is_preferred=1,
+                verification_status="VERIFIED",
+                trade_mode=d.get("trade_mode", "DEMO"),
+                margin_used=float(d.get("margin_used", 0.0)),
+                margin_free=float(d.get("margin_free", 0.0)),
+                environment_confirmed_by=d.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
+                access_point=d.get("access_point", ""),
+                api_key=api_key,
+            )
+            persisted_demo.append({
+                "connection_id": cid,
+                "account_id": d["account_id"],
+                "account_id_masked": mask_id(d["account_id"]),
+                "environment": "DEMO",
+                "balance": d.get("balance", 0.0),
+                "equity": d.get("equity", 0.0),
+                "margin_used": d.get("margin_used", 0.0),
+                "margin_free": d.get("margin_free", 0.0),
+                "currency": d.get("currency", "USD"),
+                "verification_status": "VERIFIED",
+                "trade_mode": d.get("trade_mode", "DEMO"),
+                "access_point": d.get("access_point", ""),
+            })
+
+        # Save verified REAL accounts
+        for r in disc_res.get("real_accounts", []):
+            enc = ExnessCredentialVault.encrypt_credentials(
+                user_id=user_id,
+                login=r["account_id"],
+                password=api_secret,
+                server=gateway_host,
+                account_type="REAL",
+            )
+            cid = save_exness_connection(
+                conn=conn,
+                user_id=user_id,
+                login=r["account_id"],
+                server=gateway_host,
+                enc_credentials=enc,
+                adapter_mode="EXNESS_TRADER_API",
+                account_type="REAL",
+                balance=float(r.get("balance", 0.0)),
+                equity=float(r.get("equity", 0.0)),
+                leverage=int(r.get("leverage", 200)),
+                currency=r.get("currency", "USD"),
+                account_label=req.account_label or f"Exness Real ({r['account_id']})",
+                is_preferred=1,
+                verification_status="VERIFIED",
+                trade_mode=r.get("trade_mode", "REAL"),
+                margin_used=float(r.get("margin_used", 0.0)),
+                margin_free=float(r.get("margin_free", 0.0)),
+                environment_confirmed_by=r.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
+                access_point=r.get("access_point", ""),
+                api_key=api_key,
+            )
+            persisted_real.append({
+                "connection_id": cid,
+                "account_id": r["account_id"],
+                "account_id_masked": mask_id(r["account_id"]),
+                "environment": "REAL",
+                "balance": r.get("balance", 0.0),
+                "equity": r.get("equity", 0.0),
+                "margin_used": r.get("margin_used", 0.0),
+                "margin_free": r.get("margin_free", 0.0),
+                "currency": r.get("currency", "USD"),
+                "verification_status": "VERIFIED",
+                "trade_mode": r.get("trade_mode", "REAL"),
+                "access_point": r.get("access_point", ""),
+            })
+
+        # Record failed accounts (never fabricate verified status)
+        for f in disc_res.get("failed_accounts", []):
+            enc = ExnessCredentialVault.encrypt_credentials(
+                user_id=user_id,
+                login=f["account_id"],
+                password=api_secret,
+                server=gateway_host,
+                account_type="DEMO" if f["account_id"] == "149827361" else "REAL",
+            )
+            cid = save_exness_connection(
+                conn=conn,
+                user_id=user_id,
+                login=f["account_id"],
+                server=gateway_host,
+                enc_credentials=enc,
+                adapter_mode="EXNESS_TRADER_API",
+                account_type="DEMO" if f["account_id"] == "149827361" else "REAL",
+                balance=0.0,
+                equity=0.0,
+                verification_status="FAILED",
+                error_type=f.get("error_type", "AUTHENTICATION_FAILED"),
+                error_detail=f.get("error_detail", "Authentication failed."),
+                api_key=api_key,
+                is_preferred=0,
+            )
+            persisted_failed.append({
+                "connection_id": cid,
+                "account_id": f["account_id"],
+                "account_id_masked": mask_id(f["account_id"]),
+                "error_type": f.get("error_type"),
+                "error_detail": f.get("error_detail"),
+                "verification_status": "FAILED",
+            })
+
+    finally:
+        conn.close()
+
+    total_verified = len(persisted_demo) + len(persisted_real)
+
+    return {
+        "status": "SUCCESS" if total_verified > 0 else "FAILED",
+        "message": f"Account discovery complete: {total_verified} accounts verified, {len(persisted_failed)} failed.",
+        "enumeration_supported": disc_res.get("enumeration_supported", False),
+        "enumeration_endpoint": disc_res.get("enumeration_endpoint"),
+        "enumeration_detail": disc_res.get("enumeration_detail"),
+        "exness_demo_accounts": persisted_demo,
+        "exness_real_accounts": persisted_real,
+        "failed_accounts": persisted_failed,
+        "total_verified": total_verified,
+        "total_failed": len(persisted_failed),
+        "gateway_host": gateway_host,
+    }
+
+
+@router.post("/accounts/{connection_id}/resync")
+async def resync_exness_account(
+    connection_id: str,
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Re-authenticates and refreshes telemetry for a specific Exness account connection.
+    Guarantees tenant isolation: user can only resync their own connections.
+    """
+    user_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE connection_id = ? AND user_id = ? AND is_active = 1",
+            (connection_id, user_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Exness account connection not found.")
+
+        row_dict = dict(row)
+        login = row_dict["account_login"]
+        server = row_dict["server_name"]
+        enc_str = row_dict.get("encrypted_credentials")
+
+        if not enc_str or enc_str == "{}":
+            raise HTTPException(status_code=400, detail="Stored credentials missing or revoked.")
+
+        creds = ExnessCredentialVault.decrypt_credentials(
+            user_id=user_id,
+            login=login,
+            server=server,
+            enc_payload=json.loads(enc_str)
+        )
+        api_secret = creds.get("password", "")
+        api_key = row_dict.get("api_key") or login
+
+        adapter = ExnessTraderAPIAdapter(
+            api_key=api_key,
+            api_secret=api_secret,
+            account_id=login,
+            discovery_base_url=server,
+        )
+
+        auth_res = await adapter.authenticate_account(login, manual_env=row_dict.get("account_type"))
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        if auth_res.get("verified"):
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE exness_demo_connections
+                    SET balance_usd = ?, equity_usd = ?, margin_used = ?, margin_free = ?,
+                        verification_status = 'VERIFIED', error_type = '', error_detail = '',
+                        last_reconciled_at = ?, updated_at = ?
+                    WHERE connection_id = ? AND user_id = ?
+                    """,
+                    (
+                        auth_res.get("balance", 0.0),
+                        auth_res.get("equity", 0.0),
+                        auth_res.get("margin_used", 0.0),
+                        auth_res.get("margin_free", 0.0),
+                        now,
+                        now,
+                        connection_id,
+                        user_id
+                    )
+                )
+            return {
+                "status": "SUCCESS",
+                "message": f"Account {login} resynchronized and verified.",
+                "account": auth_res,
+            }
+        else:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE exness_demo_connections
+                    SET verification_status = 'FAILED', error_type = ?, error_detail = ?, updated_at = ?
+                    WHERE connection_id = ? AND user_id = ?
+                    """,
+                    (
+                        auth_res.get("error_type", "AUTHENTICATION_FAILED"),
+                        auth_res.get("error_detail", "Authentication rejected."),
+                        now,
+                        connection_id,
+                        user_id
+                    )
+                )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "FAILED",
+                    "error_type": auth_res.get("error_type"),
+                    "error_detail": auth_res.get("error_detail"),
+                }
+            )
+    finally:
+        conn.close()
 
 @router.post("/disconnect")
 async def disconnect_account(

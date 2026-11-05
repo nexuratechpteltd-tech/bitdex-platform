@@ -2783,17 +2783,28 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
     if r:
         r = dict(r)
         env = "REAL" if (r.get("account_type") or "").upper() == "REAL" else "DEMO"
-        verified = bool(r.get("last_reconciled_at"))
-        status = "VERIFIED" if verified else "NOT TESTED"
+        v_status = r.get("verification_status")
+        if v_status:
+            verified = (v_status == "VERIFIED")
+            status = v_status
+        else:
+            verified = bool(r.get("last_reconciled_at"))
+            status = "VERIFIED" if verified else "NOT TESTED"
         return {
             "account_id": r["connection_id"], "source": "EXNESS", "exchange": "Exness",
             "environment": env, "environment_label": "Real" if env == "REAL" else "Demo",
             "masked_id": _mask_id(r.get("account_login")),
+            "account_login": str(r.get("account_login")),
             "connection_status": status,
             "connected": verified,
             "currency": r.get("currency") or "USD",
             "available_balance": float(r["balance_usd"]) if verified and r.get("balance_usd") is not None else None,
             "equity": float(r["equity_usd"]) if verified and r.get("equity_usd") is not None else None,
+            "margin_used": float(r.get("margin_used") or 0.0),
+            "margin_free": float(r.get("margin_free") or 0.0),
+            "trade_mode": r.get("trade_mode") or env,
+            "error_type": r.get("error_type") or "",
+            "error_detail": r.get("error_detail") or "",
             "last_connected_at": r.get("last_reconciled_at"),
             "adapter_mode": r.get("adapter_mode"),
         }

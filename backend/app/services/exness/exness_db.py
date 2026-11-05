@@ -214,6 +214,21 @@ def apply_exness_migrations(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE exness_demo_connections ADD COLUMN account_label TEXT DEFAULT '';"
             )
             logger.info("Added account_label column to exness_demo_connections.")
+        new_cols_defs = [
+            ("verification_status", "TEXT DEFAULT 'NOT_TESTED'"),
+            ("error_type", "TEXT DEFAULT ''"),
+            ("error_detail", "TEXT DEFAULT ''"),
+            ("trade_mode", "TEXT DEFAULT ''"),
+            ("margin_used", "REAL DEFAULT 0.0"),
+            ("margin_free", "REAL DEFAULT 0.0"),
+            ("environment_confirmed_by", "TEXT DEFAULT ''"),
+            ("access_point", "TEXT DEFAULT ''"),
+            ("api_key", "TEXT DEFAULT ''"),
+        ]
+        for c_name, c_type in new_cols_defs:
+            if c_name not in columns:
+                conn.execute(f"ALTER TABLE exness_demo_connections ADD COLUMN {c_name} {c_type};")
+                logger.info(f"Added {c_name} column to exness_demo_connections.")
 
     logger.info("Successfully verified and applied additive Exness schema migrations.")
 
@@ -336,34 +351,47 @@ def save_exness_connection(
     currency: str = "USD",
     account_label: str = "",
     is_preferred: int = 1,
+    verification_status: str = "NOT_TESTED",
+    error_type: str = "",
+    error_detail: str = "",
+    trade_mode: str = "",
+    margin_used: float = 0.0,
+    margin_free: float = 0.0,
+    environment_confirmed_by: str = "",
+    access_point: str = "",
+    api_key: str = "",
 ) -> str:
-    """Creates or updates an Exness connection with explicit tenant isolation and preference tracking."""
+    """Creates or updates an Exness connection with explicit tenant isolation, preference, and verification tracking."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     acct_type = (account_type or "DEMO").upper()
+    reconciled_at = now if verification_status == "VERIFIED" else None
 
     with conn:
-        # If preferred, reset previous preferred of same type for this user
         if is_preferred:
             conn.execute(
                 "UPDATE exness_demo_connections SET is_preferred = 0 WHERE user_id = ? AND account_type = ?",
                 (user_id, acct_type),
             )
 
-        # Check if identical (user_id, account_login, server_name) exists
         existing = conn.execute(
-            "SELECT connection_id FROM exness_demo_connections WHERE user_id = ? AND account_login = ? AND server_name = ?",
+            "SELECT connection_id, last_reconciled_at FROM exness_demo_connections WHERE user_id = ? AND account_login = ? AND server_name = ?",
             (user_id, login, server),
         ).fetchone()
 
         if existing:
             conn_id = existing["connection_id"]
+            final_reconciled = reconciled_at or existing["last_reconciled_at"]
             conn.execute(
                 """
                 UPDATE exness_demo_connections
                 SET account_type = ?, adapter_mode = ?, encrypted_credentials = ?,
                     is_active = 1, balance_usd = ?, equity_usd = ?, leverage = ?,
                     currency = ?, account_label = COALESCE(NULLIF(?, ''), account_label),
-                    is_preferred = ?, updated_at = ?
+                    is_preferred = ?, updated_at = ?,
+                    verification_status = ?, error_type = ?, error_detail = ?,
+                    trade_mode = ?, margin_used = ?, margin_free = ?,
+                    environment_confirmed_by = ?, access_point = ?, api_key = ?,
+                    last_reconciled_at = ?
                 WHERE connection_id = ? AND user_id = ?
                 """,
                 (
@@ -377,6 +405,16 @@ def save_exness_connection(
                     account_label,
                     is_preferred,
                     now,
+                    verification_status,
+                    error_type,
+                    error_detail,
+                    trade_mode,
+                    margin_used,
+                    margin_free,
+                    environment_confirmed_by,
+                    access_point,
+                    api_key,
+                    final_reconciled,
                     conn_id,
                     user_id,
                 ),
@@ -389,8 +427,10 @@ def save_exness_connection(
                     connection_id, user_id, account_login, server_name, account_type,
                     adapter_mode, encrypted_credentials, is_active, is_read_only, balance_usd,
                     equity_usd, leverage, currency, account_label, is_preferred,
-                    last_reconciled_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    verification_status, error_type, error_detail, trade_mode,
+                    margin_used, margin_free, environment_confirmed_by, access_point,
+                    api_key, last_reconciled_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conn_id,
@@ -406,12 +446,21 @@ def save_exness_connection(
                     currency,
                     account_label,
                     is_preferred,
+                    verification_status,
+                    error_type,
+                    error_detail,
+                    trade_mode,
+                    margin_used,
+                    margin_free,
+                    environment_confirmed_by,
+                    access_point,
+                    api_key,
+                    reconciled_at,
                     now,
                     now,
                 ),
             )
     return conn_id
-
 
 def create_exness_transfer(
     conn: sqlite3.Connection,

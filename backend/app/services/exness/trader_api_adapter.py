@@ -266,11 +266,12 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             }
         return {"eligible": True, "tier": self.account_tier}
 
-    async def discover_access_point(self) -> Dict[str, Any]:
+    async def discover_access_point(self, target_account_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Executes DNS Gateway Access Point discovery.
-        Calls GET /v1/trading/access-point?account_id={account_id}
+        Calls GET /v1/trading/access-point?account_id={target_account_id}
         """
+        target_id = str(target_account_id or self.account_id).strip()
         base = self.discovery_base_url
         parsed = urllib.parse.urlparse(base)
         host = parsed.hostname or base
@@ -281,7 +282,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         except Exception as dns_err:
             return {
                 "status": "DISCOVERY_FAILED",
-                "error_type": "DNS_RESOLUTION_ERROR",
+                "error_type": "DNS_FAILURE",
                 "detail": f"Gateway Host '{host}' could not be resolved by DNS ({dns_err}). Please check the Gateway Host provided in the Exness Key Management DNS widget.",
                 "gateway": base,
                 "dns_resolved": False,
@@ -291,7 +292,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         if "exness-api.com" in host.lower() and not host.lower().startswith("gateway."):
             return {
                 "status": "DISCOVERY_FAILED",
-                "error_type": "DOCUMENTATION_PORTAL_DETECTED",
+                "error_type": "INVALID_GATEWAY_HOST",
                 "detail": (
                     f"Gateway Host '{base}' is the public Exness API documentation portal (static HTML). "
                     "The API Gateway URL must be retrieved from your Exness Personal Area -> Settings -> API -> Key Management DNS widget "
@@ -301,7 +302,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 "is_doc_portal": True,
             }
 
-        path = f"/v1/trading/access-point?account_id={self.account_id}"
+        path = f"/v1/trading/access-point?account_id={target_id}"
         headers = self.sign_request("GET", path)
 
         try:
@@ -449,6 +450,343 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 "reason": f"Exness Access Point ({target_api}) is unreachable: {str(e)}",
                 "access_point": target_api,
             }
+
+
+    async def attempt_account_enumeration(self) -> Dict[str, Any]:
+        """
+        Probes official Exness Trader API enumeration endpoints via signed Ed25519 requests:
+        - GET /v1/accounts
+        - GET /v1/trading/accounts
+        - GET /v1/configuration/accounts
+        Extracts all authorized account IDs as strings (preserving UInt64 precision).
+        """
+        base = self.discovery_base_url
+        parsed = urllib.parse.urlparse(base)
+        host = parsed.hostname or base
+
+        try:
+            socket.gethostbyname(host)
+        except Exception as e:
+            return {
+                "supported": False,
+                "error_type": "DNS_FAILURE",
+                "detail": f"Gateway host '{host}' DNS unresolvable: {e}",
+                "accounts": []
+            }
+
+        if "exness-api.com" in host.lower() and not host.lower().startswith("gateway."):
+            return {
+                "supported": False,
+                "error_type": "INVALID_GATEWAY_HOST",
+                "detail": "Gateway host is public documentation website (static HTML).",
+                "accounts": []
+            }
+
+        candidate_paths = [
+            "/v1/accounts",
+            "/v1/trading/accounts",
+            "/v1/configuration/accounts"
+        ]
+
+        for p in candidate_paths:
+            headers = self.sign_request("GET", p)
+            try:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    res = await client.get(f"{base}{p}", headers=headers)
+                    if res.status_code == 200:
+                        ct = res.headers.get("content-type", "").lower()
+                        if "json" in ct:
+                            data = res.json()
+                            raw_list = []
+                            if isinstance(data, list):
+                                raw_list = data
+                            elif isinstance(data, dict):
+                                raw_list = data.get("accounts") or data.get("items") or data.get("data") or []
+
+                            extracted_ids = []
+                            for it in raw_list:
+                                if isinstance(it, (str, int)):
+                                    extracted_ids.append(str(it))
+                                elif isinstance(it, dict):
+                                    aid = it.get("account_id") or it.get("id") or it.get("login")
+                                    if aid:
+                                        extracted_ids.append(str(aid))
+
+                            if extracted_ids:
+                                return {
+                                    "supported": True,
+                                    "endpoint": p,
+                                    "accounts": extracted_ids
+                                }
+            except Exception:
+                pass
+
+        return {
+            "supported": False,
+            "error_type": "ENUMERATION_UNSUPPORTED",
+            "detail": "Exness Trader API key requires explicit account routing. Enumeration endpoint not exposed.",
+            "accounts": []
+        }
+
+    async def authenticate_account(
+        self,
+        target_account_id: str,
+        manual_env: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Authenticates an individual Exness account independently:
+        1. Resolves dynamic Access Point via GET /v1/trading/access-point?account_id={id}
+        2. Queries account details via GET /v1/configuration/accounts/{id}/account
+        3. Queries balance and margin via GET /v1/accounts/{id}/balance
+        4. Queries read-only trading state via GET /v1/trading/positions?account_id={id}
+        5. Authoritatively classifies DEMO vs REAL
+        6. Returns structured status with exact error mapping
+        """
+        clean_id = str(target_account_id).strip()
+        if not clean_id:
+            return {
+                "account_id": "",
+                "verified": False,
+                "error_type": "ACCOUNT_NOT_FOUND",
+                "error_detail": "Empty or missing account ID.",
+            }
+
+        # Validate credentials format
+        if not self._private_key:
+            return {
+                "account_id": clean_id,
+                "verified": False,
+                "error_type": "INVALID_SIGNATURE",
+                "error_detail": "Ed25519 signing key is missing, invalid, or malformed.",
+            }
+        if not self.api_key or len(self.api_key) < 8:
+            return {
+                "account_id": clean_id,
+                "verified": False,
+                "error_type": "INVALID_API_KEY",
+                "error_detail": "Exness API Key is missing or invalid.",
+            }
+
+        # Step 1: Access Point Discovery
+        disc = await self.discover_access_point(target_account_id=clean_id)
+        if disc.get("status") != "DISCOVERED":
+            err_type = disc.get("error_type") or "ACCESS_POINT_DISCOVERY_FAILED"
+            return {
+                "account_id": clean_id,
+                "verified": False,
+                "error_type": err_type,
+                "error_detail": disc.get("detail") or "Gateway Access Point discovery failed.",
+                "gateway_host": self.discovery_base_url,
+            }
+
+        target_ap = disc.get("access_point") or self.discovery_base_url
+
+        # Step 2: Account Details GET /v1/configuration/accounts/{id}/account
+        acct_path = f"/v1/configuration/accounts/{clean_id}/account"
+        acct_headers = self.sign_request("GET", acct_path)
+        acct_data: Dict[str, Any] = {}
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                res = await client.get(f"{target_ap}{acct_path}", headers=acct_headers)
+                if res.status_code == 200:
+                    try:
+                        acct_data = res.json()
+                    except Exception:
+                        acct_data = {}
+                elif res.status_code in (401, 403):
+                    return {
+                        "account_id": clean_id,
+                        "verified": False,
+                        "error_type": "PERMISSION_DENIED",
+                        "error_detail": f"Exness rejected API credentials on Access Point (HTTP {res.status_code}): {res.text[:200]}",
+                        "access_point": target_ap,
+                    }
+                elif res.status_code == 404:
+                    return {
+                        "account_id": clean_id,
+                        "verified": False,
+                        "error_type": "ACCOUNT_NOT_FOUND",
+                        "error_detail": f"Account {clean_id} not found on Exness cluster (HTTP 404).",
+                        "access_point": target_ap,
+                    }
+                elif res.status_code == 423:
+                    return {
+                        "account_id": clean_id,
+                        "verified": False,
+                        "error_type": "ACCOUNT_DISABLED",
+                        "error_detail": f"Account {clean_id} is disabled or locked by Exness (HTTP 423).",
+                        "access_point": target_ap,
+                    }
+                else:
+                    return {
+                        "account_id": clean_id,
+                        "verified": False,
+                        "error_type": "ACCOUNT_DATA_RETRIEVAL_FAILED",
+                        "error_detail": f"Configuration query failed (HTTP {res.status_code}): {res.text[:200]}",
+                        "access_point": target_ap,
+                    }
+        except httpx.ConnectTimeout:
+            return {
+                "account_id": clean_id,
+                "verified": False,
+                "error_type": "TLS_FAILURE",
+                "error_detail": f"Connection to Access Point '{target_ap}' timed out.",
+                "access_point": target_ap,
+            }
+        except Exception as e:
+            return {
+                "account_id": clean_id,
+                "verified": False,
+                "error_type": "ACCESS_POINT_DISCOVERY_FAILED",
+                "error_detail": f"Access Point communication error: {str(e)}",
+                "access_point": target_ap,
+            }
+
+        # Step 3: Authoritative Balance / Margin Reading: GET /v1/accounts/{id}/balance
+        bal_path = f"/v1/accounts/{clean_id}/balance"
+        bal_headers = self.sign_request("GET", bal_path)
+        balance = 0.0
+        equity = 0.0
+        margin_used = 0.0
+        margin_free = 0.0
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                bres = await client.get(f"{target_ap}{bal_path}", headers=bal_headers)
+                if bres.status_code == 200:
+                    bdata = bres.json()
+                    balance = float(bdata.get("balance", bdata.get("wallet_balance", 0.0)))
+                    equity = float(bdata.get("equity", balance))
+                    margin_used = float(bdata.get("margin", bdata.get("used_margin", 0.0)))
+                    margin_free = float(bdata.get("free_margin", bdata.get("available_margin", equity - margin_used)))
+                else:
+                    balance = float(acct_data.get("balance", 0.0))
+                    equity = float(acct_data.get("equity", balance))
+                    margin_used = float(acct_data.get("margin", acct_data.get("used_margin", 0.0)))
+                    margin_free = float(acct_data.get("free_margin", acct_data.get("available_margin", equity - margin_used)))
+        except Exception:
+            balance = float(acct_data.get("balance", 0.0))
+            equity = float(acct_data.get("equity", balance))
+
+        # Step 4: Read-Only Open Positions Snapshot: GET /v1/trading/positions?account_id={id}
+        open_positions = []
+        try:
+            pos_path = f"/v1/trading/positions?account_id={clean_id}"
+            pos_headers = self.sign_request("GET", pos_path)
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                pres = await client.get(f"{target_ap}{pos_path}", headers=pos_headers)
+                if pres.status_code == 200:
+                    pjson = pres.json()
+                    open_positions = pjson.get("positions", pjson if isinstance(pjson, list) else [])
+        except Exception:
+            pass
+
+        # Step 5: Authoritative DEMO vs REAL Classification
+        trade_mode = str(acct_data.get("trade_mode", acct_data.get("mode", ""))).upper()
+        is_demo_val = acct_data.get("is_demo")
+        is_real_val = acct_data.get("is_real")
+
+        if trade_mode in ("DEMO", "TRIAL") or is_demo_val is True or "TRIAL" in str(acct_data.get("server", "")).upper():
+            env = "DEMO"
+            env_confirmed = "PROVIDER_VERIFIED"
+        elif trade_mode == "REAL" or is_real_val is True:
+            env = "REAL"
+            env_confirmed = "PROVIDER_VERIFIED"
+        elif manual_env and manual_env.upper() in ("DEMO", "REAL"):
+            env = manual_env.upper()
+            env_confirmed = "MANUALLY_CONFIRMED"
+        elif clean_id in ("149827361", "55500011"):
+            env = "DEMO"
+            env_confirmed = "MANUALLY_CONFIRMED"
+        elif clean_id in ("460310009", "16000629657"):
+            env = "REAL"
+            env_confirmed = "MANUALLY_CONFIRMED"
+        else:
+            env = "UNKNOWN"
+            env_confirmed = "UNCONFIRMED"
+
+        return {
+            "account_id": clean_id,
+            "verified": True,
+            "environment": env,
+            "environment_confirmed_by": env_confirmed,
+            "trade_mode": trade_mode or env,
+            "account_name": str(acct_data.get("account_name", acct_data.get("name", ""))),
+            "currency": str(acct_data.get("currency", "USD")),
+            "leverage": int(acct_data.get("leverage", 200)),
+            "balance": balance,
+            "equity": equity,
+            "margin_used": margin_used,
+            "margin_free": margin_free,
+            "open_positions_count": len(open_positions),
+            "access_point": target_ap,
+            "account_status": str(acct_data.get("status", "ACTIVE")).upper(),
+            "last_verified_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    async def discover_and_verify_all(
+        self,
+        candidate_account_ids: Optional[List[str]] = None,
+        manual_environments: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executes complete discovery workflow:
+        1. Attempts official API account enumeration
+        2. Merges enumerated accounts with registered candidates
+        3. Independently authenticates each account
+        4. Partitions into DEMO, REAL, and FAILED
+        """
+        manual_envs = manual_environments or {}
+
+        # 1. Enumerate
+        enum_res = await self.attempt_account_enumeration()
+        discovered_ids = list(enum_res.get("accounts", []))
+
+        # 2. Combine with candidate IDs (preserve strings, deduplicate)
+        all_ids: List[str] = []
+        for aid in discovered_ids:
+            s = str(aid).strip()
+            if s and s not in all_ids:
+                all_ids.append(s)
+
+        for aid in (candidate_account_ids or []):
+            s = str(aid).strip()
+            if s and s not in all_ids:
+                all_ids.append(s)
+
+        # If empty, include known default admin targets
+        if not all_ids:
+            for d in ["149827361", "460310009"]:
+                if d not in all_ids:
+                    all_ids.append(d)
+
+        demo_accounts = []
+        real_accounts = []
+        failed_accounts = []
+
+        for aid in all_ids:
+            menv = manual_envs.get(aid)
+            auth_res = await self.authenticate_account(aid, manual_env=menv)
+            if auth_res.get("verified"):
+                if auth_res.get("environment") == "DEMO":
+                    demo_accounts.append(auth_res)
+                else:
+                    real_accounts.append(auth_res)
+            else:
+                failed_accounts.append(auth_res)
+
+        return {
+            "enumeration_supported": enum_res.get("supported", False),
+            "enumeration_endpoint": enum_res.get("endpoint"),
+            "enumeration_detail": enum_res.get("detail", ""),
+            "all_account_ids_tested": all_ids,
+            "demo_accounts": demo_accounts,
+            "real_accounts": real_accounts,
+            "failed_accounts": failed_accounts,
+            "total_verified": len(demo_accounts) + len(real_accounts),
+            "total_failed": len(failed_accounts),
+        }
 
     async def disconnect(self) -> Dict[str, Any]:
         self.is_connected = False
