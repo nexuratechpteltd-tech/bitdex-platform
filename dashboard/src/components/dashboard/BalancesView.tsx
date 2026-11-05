@@ -1,9 +1,11 @@
 "use client";
 
 import React from "react";
-import { Wallet, Scale, ArrowUpRight, ArrowDownRight, RefreshCw, ShieldCheck } from "lucide-react";
+import { Wallet, Scale, ArrowUpRight, ArrowDownRight, RefreshCw, ShieldCheck, ShieldAlert, AlertCircle } from "lucide-react";
 
 interface BalancesViewProps {
+  accounts?: any[];
+  isConnected?: boolean;
   balance?: number;
   equity?: number;
   freeMargin?: number;
@@ -21,6 +23,8 @@ export default function BalancesView({
   realizedPnl = 0.0,
   unrealizedPnl = 0.0,
   onRefresh,
+  accounts = [],
+  isConnected = false,
 }: BalancesViewProps) {
   return (
     <div className="space-y-6 font-sans animate-in fade-in duration-200">
@@ -141,19 +145,48 @@ export default function BalancesView({
       <div className="rounded-xl bg-[#0E131B] border border-[#1E2736] overflow-hidden">
         <div className="p-4 bg-[#151C28]/60 border-b border-[#1E2736] flex items-center justify-between text-xs font-mono">
           <span className="font-bold text-[#F1F5F9]">Broker Account Breakdown</span>
-          <span className="text-[#94A3B8]">1 Verified Execution Account</span>
+          <span className="text-[#94A3B8]">
+            {accounts.length > 0 ? `${accounts.length} Verified Execution Account${accounts.length > 1 ? "s" : ""}` : "0 Connected Accounts"}
+          </span>
         </div>
         <div className="p-4 text-xs font-mono space-y-3">
-          <div className="flex items-center justify-between p-3 rounded-lg bg-[#151C28] border border-[#1E2736]">
-            <div>
-              <span className="font-bold text-[#F1F5F9] block">Exness MT5 (Account #5842)</span>
-              <span className="text-[11px] text-[#94A3B8]">Primary Multi-Asset CFD Venue • DEMO</span>
+          {accounts.length > 0 ? (
+            accounts.map((acc: any, idx: number) => {
+              const isDemo = acc.environment === "DEMO";
+              const isVerified = acc.verification_status === "VERIFIED";
+              return (
+                <div key={acc.account_id || idx} className="flex items-center justify-between p-3 rounded-lg bg-[#151C28] border border-[#1E2736]">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-[#F1F5F9]">{acc.exchange_name || acc.provider || "Broker"} ({acc.account_id || "Account"})</span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${isDemo ? "bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30" : "bg-amber-500/15 text-amber-400 border border-amber-500/30"}`}>
+                        {acc.environment || "DEMO"}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-[#94A3B8] block mt-0.5">{acc.label || "Verified Multi-Asset Venue"}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold text-[#F1F5F9] text-sm tabular-nums">
+                      ${(acc.estimated_usd ?? 0.0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                    </span>
+                    <span className={`text-[10px] block mt-0.5 font-bold ${isVerified ? "text-[#10B981]" : "text-slate-400"}`}>
+                      {isVerified ? "● Verified Gateway" : "○ Unverified"}
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="p-6 text-center text-xs font-mono text-[#94A3B8]">
+              <div className="w-8 h-8 rounded-full bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 mx-auto mb-2">
+                <ShieldAlert className="w-4 h-4" />
+              </div>
+              <div className="font-bold text-[#F1F5F9]">NO BROKER ACCOUNTS CONNECTED</div>
+              <p className="text-[11px] text-[#64748B] mt-1 max-w-md mx-auto">
+                No genuine Exness or exchange execution accounts have been authenticated. Attach your verified API key to stream live broker balances and equity.
+              </p>
             </div>
-            <div className="text-right">
-              <span className="font-bold text-[#F1F5F9] text-sm tabular-nums">$5,000.00 USD</span>
-              <span className="text-[10px] text-[#10B981] block">● Verified Gateway</span>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </div>

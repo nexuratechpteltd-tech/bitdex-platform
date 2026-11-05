@@ -21,6 +21,7 @@ Authoritative Security & Cryptographic Implementation:
 """
 
 import os
+import re
 import sys
 import socket
 import urllib.parse
@@ -150,41 +151,90 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         self._initialize_private_key()
 
     def _initialize_private_key(self):
-        """Loads or parses the Ed25519 private key from the provided secret string."""
+        """
+        Loads and parses the Ed25519 private key from the provided secret string.
+        Supports:
+        - 128-character hexadecimal keypairs (32-byte seed + 32-byte public key)
+        - 64-character hexadecimal seeds (32-byte seed)
+        - PKCS#8 PEM private keys (-----BEGIN PRIVATE KEY-----)
+        - Base64-encoded seeds (32 bytes) or expanded keys (64 bytes)
+        - Raw 32 bytes
+        Validates public key correspondence against EXN-API-KEY where applicable.
+        Strictly avoids silent fake seed derivations.
+        """
         if not self.api_secret:
             return
 
+        self.key_mismatch_detected = False
+        self.derived_public_key_hex = None
+        self.derived_public_key_b64url = None
+
+        raw_secret = str(self.api_secret).strip().strip("'\"")
+        sec_bytes = raw_secret.encode("utf-8")
+
         try:
-            sec_bytes = self.api_secret.encode("utf-8")
-            if b"BEGIN PRIVATE KEY" in sec_bytes:
+            # Format 1: PKCS#8 PEM private key
+            if b"BEGIN" in sec_bytes and b"PRIVATE KEY" in sec_bytes:
                 self._private_key = serialization.load_pem_private_key(sec_bytes, password=None)
-            elif len(self.api_secret) == 128:
-                # Exness official 128-hex character private key (64-byte keypair: 32-byte seed + 32-byte public key)
-                seed_bytes = bytes.fromhex(self.api_secret[:64])
-                self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(seed_bytes)
-            elif len(self.api_secret) == 64:
-                # Raw hex representation of 32-byte seed
-                seed_bytes = bytes.fromhex(self.api_secret)
-                self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(seed_bytes)
-            elif len(self.api_secret) == 32:
-                self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(sec_bytes)
+
             else:
-                # Check base64 format
-                try:
-                    b64_raw = base64.b64decode(self.api_secret)
-                    if len(b64_raw) == 32:
-                        self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(b64_raw)
-                        return
-                    elif len(b64_raw) == 64:
-                        self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(b64_raw[:32])
-                        return
-                except Exception:
-                    pass
-                # Deterministic seed derivation from secret text for development/staging testing
-                derived_seed = hashlib.sha256(sec_bytes).digest()
-                self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(derived_seed)
+                # Remove internal whitespace and linebreaks
+                clean_hex = re.sub(r"[^0-9a-fA-F]", "", raw_secret)
+
+                # Format 2: 128-hex character private key (64-byte keypair)
+                if len(clean_hex) == 128:
+                    raw_64 = bytes.fromhex(clean_hex)
+                    # Standard Ed25519/libsodium: seed (first 32 bytes) + pubkey (last 32 bytes)
+                    k1 = ed25519.Ed25519PrivateKey.from_private_bytes(raw_64[:32])
+                    k1_pub = k1.public_key().public_bytes_raw()
+                    if k1_pub == raw_64[32:]:
+                        self._private_key = k1
+                    else:
+                        # Check alternative layout: pubkey (first 32) + seed (last 32)
+                        k2 = ed25519.Ed25519PrivateKey.from_private_bytes(raw_64[32:])
+                        if k2.public_key().public_bytes_raw() == raw_64[:32]:
+                            self._private_key = k2
+                        else:
+                            # Default to standard seed at bytes 0..31
+                            self._private_key = k1
+
+                # Format 3: 64-hex character private seed (32 bytes)
+                elif len(clean_hex) == 64:
+                    seed_bytes = bytes.fromhex(clean_hex)
+                    self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(seed_bytes)
+
+                # Format 4: Raw 32 bytes
+                elif len(sec_bytes) == 32:
+                    self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(sec_bytes)
+
+                # Format 5: Base64-encoded key
+                else:
+                    try:
+                        b64_raw = base64.b64decode(raw_secret)
+                        if len(b64_raw) == 32:
+                            self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(b64_raw)
+                        elif len(b64_raw) == 64:
+                            self._private_key = ed25519.Ed25519PrivateKey.from_private_bytes(b64_raw[:32])
+                    except Exception:
+                        self._private_key = None
+
+            # Verify public key correspondence with EXN-API-KEY
+            if self._private_key:
+                derived_pub = self._private_key.public_key().public_bytes_raw()
+                self.derived_public_key_hex = derived_pub.hex()
+                self.derived_public_key_b64url = base64url_encode(derived_pub)
+
+                clean_api_key = str(self.api_key).strip()
+                if clean_api_key.startswith("exnsk-"):
+                    key_pub_part = clean_api_key[6:]
+                    if key_pub_part != self.derived_public_key_b64url and key_pub_part != self.derived_public_key_hex:
+                        self.key_mismatch_detected = True
+                        logger.warning(
+                            f"Ed25519 Key Verification: Registered public key in EXN-API-KEY does not correspond "
+                            f"to the private key provided. Expected public key: {self.derived_public_key_b64url}"
+                        )
         except Exception as e:
-            logger.warning(f"Failed to load Ed25519 private key from api_secret: {e}")
+            logger.warning(f"Failed to load Ed25519 private key: {e}")
             self._private_key = None
 
     def sign_request(
@@ -193,24 +243,22 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         path: str,
         body: Optional[Union[str, bytes, dict]] = None,
         idempotency_key: str = "",
+        sign_mode: str = "BASE64_DATA",
     ) -> Dict[str, str]:
         """
         Generates official Exness Ed25519 signed request headers.
-        Returns:
-            {
-                "EXN-API-KEY": "exnsk-...",
-                "EXN-DATA": "<base64url_json>",
-                "EXN-SIGN": "<base64url_signature>",
-                "EXN-IDEMPOTENCY-KEY": "...",
-                "Content-Type": "application/json"
-            }
+        Implements official canonical request construction:
+        - Assembles payload object with api_key, idempotency_key, timestamp, sign_version (int), method, path, body_hash
+        - Generates SHA-256 Base64URL body hash (EMPTY_BODY_HASH_B64URL for GET requests)
+        - Serializes compact JSON bytes (ensure_ascii=False, no extra spaces)
+        - Signs either raw JSON bytes (default spec) or Base64URL ASCII string (fallback compatibility)
         """
         # 1. Compute SHA-256 body hash encoded in Base64URL
         if body is None or (isinstance(body, (str, bytes)) and len(body) == 0):
             body_hash_b64url = EMPTY_BODY_HASH_B64URL
         else:
             if isinstance(body, dict):
-                body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+                body_bytes = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             elif isinstance(body, str):
                 body_bytes = body.encode("utf-8")
             else:
@@ -220,23 +268,27 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
         timestamp_ms = int(time.time() * 1000)
 
-        # 2. Build EXN-DATA payload
+        # 2. Build official canonical EXN-DATA payload object
         payload = {
             "api_key": self.api_key,
-            "timestamp": timestamp_ms,
-            "body_hash": body_hash_b64url,
-            "path": path,
             "idempotency_key": idempotency_key or "",
+            "timestamp": timestamp_ms,
+            "sign_version": 1,
+            "method": method.upper(),
+            "path": path,
+            "body_hash": body_hash_b64url,
         }
-        data_json_str = json.dumps(payload, separators=(",", ":"))
-        exn_data_b64url = base64url_encode(data_json_str.encode("utf-8"))
+        data_json_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        exn_data_b64url = base64url_encode(data_json_bytes)
 
         # 3. Generate Ed25519 signature
         if self._private_key:
-            signature = self._private_key.sign(exn_data_b64url.encode("utf-8"))
+            if sign_mode == "PAYLOAD_BYTES":
+                signature = self._private_key.sign(data_json_bytes)
+            else:
+                signature = self._private_key.sign(exn_data_b64url.encode("utf-8"))
             exn_sign_b64url = base64url_encode(signature)
         else:
-            # Fallback signature marker if key is not configured
             exn_sign_b64url = "UNCONFIGURED_KEY_SIGNATURE"
 
         headers = {
@@ -296,11 +348,23 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
         # 2. Build signed GET request directly to official discovery endpoint
         path = f"/v1/trading/access-point?account_id={target_id}"
-        headers = self.sign_request("GET", path, idempotency_key="")
+        headers = self.sign_request("GET", path, idempotency_key="", sign_mode="BASE64_DATA")
 
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 res = await client.get(f"{base}{path}", headers=headers)
+
+                # If primary signature rejected with AUTH_INVALID_SIGNATURE, attempt secondary signature mode
+                if res.status_code == 401:
+                    try:
+                        j_try = res.json()
+                        if j_try.get("code") == 1001 or j_try.get("error_message") == "AUTH_INVALID_SIGNATURE":
+                            headers_alt = self.sign_request("GET", path, idempotency_key="", sign_mode="PAYLOAD_BYTES")
+                            res_alt = await client.get(f"{base}{path}", headers=headers_alt)
+                            if res_alt.status_code == 200:
+                                res = res_alt
+                    except Exception:
+                        pass
                 ct = res.headers.get("content-type", "").lower()
                 is_html = "text/html" in ct or res.text.strip().startswith("<!DOCTYPE") or res.text.strip().startswith("<html")
 
@@ -768,12 +832,6 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             env_confirmed = "PROVIDER_VERIFIED"
         elif manual_env and manual_env.upper() in ("DEMO", "REAL"):
             env = manual_env.upper()
-            env_confirmed = "MANUALLY_CONFIRMED"
-        elif clean_id in ("149827361", "55500011"):
-            env = "DEMO"
-            env_confirmed = "MANUALLY_CONFIRMED"
-        elif clean_id in ("460310009", "16000629657"):
-            env = "REAL"
             env_confirmed = "MANUALLY_CONFIRMED"
         else:
             env = "UNKNOWN"

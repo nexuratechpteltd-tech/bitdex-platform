@@ -74,15 +74,21 @@ export default function OverviewView({
         {/* Card 1: Account Balance */}
         <div className="p-4 rounded-xl bg-[#0E131B] border border-[#1E2736] space-y-2">
           <div className="flex items-center justify-between text-[#94A3B8]">
-            <span className="text-[11px] uppercase tracking-wider">Simulated Balance</span>
+            <span className="text-[11px] uppercase tracking-wider">Account Cash Balance</span>
             <Wallet className="w-4 h-4 text-[#38BDF8]" />
           </div>
           <div className="text-xl sm:text-2xl font-bold text-[#F1F5F9] tabular-nums">
-            ${balance ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "5,000.00"}
+            {exnessConnected || balance > 0 ? (
+              `$${balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            ) : (
+              <span className="text-rose-400 text-lg font-bold">NOT CONNECTED</span>
+            )}
           </div>
           <div className="text-[11px] text-[#64748B] flex items-center justify-between pt-1 border-t border-[#1E2736]">
-            <span>Equity: ${equity ? equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "5,000.00"}</span>
-            <span className="text-[9px] px-1 rounded bg-[#38BDF8]/10 text-[#38BDF8]">DEMO SEED</span>
+            <span>Equity: {exnessConnected || equity > 0 ? `$${equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "$0.00"}</span>
+            <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${exnessConnected ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>
+              {exnessConnected ? "VERIFIED" : "DISCONNECTED"}
+            </span>
           </div>
         </div>
 

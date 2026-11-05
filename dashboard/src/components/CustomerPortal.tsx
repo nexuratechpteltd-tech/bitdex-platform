@@ -47,6 +47,7 @@ import {
   Info,
   Bell,
   Sliders,
+  Link2,
 } from "lucide-react";
 import BinancePayModal from "./BinancePayModal";
 
@@ -1546,22 +1547,12 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               <span>EXNESS: NOT CONNECTED</span>
             </div>
 
-            {/* Admin Switcher (when user is admin/owner) */}
-            {onSwitchPortal && (
-              <button
-                id="btn-nav-admin-portal"
-                onClick={onSwitchPortal}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-300 text-xs font-mono font-bold transition-all shadow-sm cursor-pointer"
-                title="Switch to Administrator Portal"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
-                <span className="hidden sm:inline">Admin Portal</span>
-              </button>
-            )}
+            {/* Duplicate top-right Admin Portal button removed (preserved in sidebar and profile dropdown) */}
 
             {/* Profile Dropdown */}
             <div className="relative" ref={profileDropdownRef}>
               <button
+                id="btn-customer-profile-dropdown"
                 onClick={() => setIsProfileDropdownOpen(!isProfileDropdownOpen)}
                 className="flex items-center gap-2 p-1.5 rounded-xl bg-[#151C28] border border-[#1E2736] hover:border-[#38BDF8] text-xs font-mono transition-colors"
               >
@@ -1726,6 +1717,8 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               usedMargin={0.0}
               realizedPnl={0.0}
               unrealizedPnl={0.0}
+              accounts={balancesData?.exchange_accounts || []}
+              isConnected={Boolean(connections.find(c => (c.provider === "EXNESS" || c.exchange === "EXNESS") && (c.status === "CONNECTED" || c.status === "ACTIVE") && c.is_active))}
               onRefresh={() => fetchBalances(true)}
             />
           )}
