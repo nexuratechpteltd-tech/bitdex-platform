@@ -22,6 +22,8 @@ Authoritative Security & Cryptographic Implementation:
 
 import os
 import sys
+import socket
+import urllib.parse
 import time
 import json
 import base64
@@ -129,7 +131,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
         # Gateway discovery host
         default_discovery = "https://www.exness-api.com"
-        self.discovery_base_url = (discovery_base_url or os.getenv("EXN_DISCOVERY_BASE_URL", default_discovery)).rstrip("/")
+        raw_disc = (discovery_base_url or os.getenv("EXN_DISCOVERY_BASE_URL", default_discovery)).strip().rstrip("/")
+        if raw_disc and not raw_disc.startswith("http://") and not raw_disc.startswith("https://"):
+            raw_disc = f"https://{raw_disc}"
+        self.discovery_base_url = raw_disc or default_discovery
 
         # Dynamically discovered access point (resolved via DNS Gateway Discovery)
         self.api_url: Optional[str] = os.getenv("EXN_API_BASE_URL")
@@ -239,10 +244,9 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "EXN-API-KEY": self.api_key,
             "EXN-DATA": exn_data_b64url,
             "EXN-SIGN": exn_sign_b64url,
+            "EXN-IDEMPOTENCY-KEY": idempotency_key or "",
             "User-Agent": f"Bitdex-Institutional-Terminal/4.3 ({self.environment})",
         }
-        if idempotency_key:
-            headers["EXN-IDEMPOTENCY-KEY"] = idempotency_key
 
         return headers
 
@@ -267,42 +271,89 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         Executes DNS Gateway Access Point discovery.
         Calls GET /v1/trading/access-point?account_id={account_id}
         """
+        base = self.discovery_base_url
+        parsed = urllib.parse.urlparse(base)
+        host = parsed.hostname or base
+
+        # 1. DNS Resolution check
+        try:
+            resolved_ip = socket.gethostbyname(host)
+        except Exception as dns_err:
+            return {
+                "status": "DISCOVERY_FAILED",
+                "error_type": "DNS_RESOLUTION_ERROR",
+                "detail": f"Gateway Host '{host}' could not be resolved by DNS ({dns_err}). Please check the Gateway Host provided in the Exness Key Management DNS widget.",
+                "gateway": base,
+                "dns_resolved": False,
+            }
+
+        # 2. Check if user inadvertently targeted the public documentation portal
+        if "exness-api.com" in host.lower() and not host.lower().startswith("gateway."):
+            return {
+                "status": "DISCOVERY_FAILED",
+                "error_type": "DOCUMENTATION_PORTAL_DETECTED",
+                "detail": (
+                    f"Gateway Host '{base}' is the public Exness API documentation portal (static HTML). "
+                    "The API Gateway URL must be retrieved from your Exness Personal Area -> Settings -> API -> Key Management DNS widget "
+                    "(e.g. https://gateway-xxx.exness.com). Please enter your Gateway Host."
+                ),
+                "gateway": base,
+                "is_doc_portal": True,
+            }
+
         path = f"/v1/trading/access-point?account_id={self.account_id}"
         headers = self.sign_request("GET", path)
 
         try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
-                res = await client.get(f"{self.discovery_base_url}{path}", headers=headers)
-                if res.status_code == 200:
-                    data = res.json()
-                    access_point = data.get("access_point")
-                    if access_point:
-                        self.api_url = access_point.rstrip("/")
-                        self.ws_url = self.api_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
-                        return {
-                            "status": "DISCOVERED",
-                            "access_point": self.api_url,
-                            "account_id": data.get("account_id", self.account_id),
-                        }
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(f"{base}{path}", headers=headers)
                 ct = res.headers.get("content-type", "").lower()
                 is_html = "text/html" in ct or res.text.strip().startswith("<!DOCTYPE") or res.text.strip().startswith("<html")
-                detail_msg = (
-                    f"Gateway host '{self.discovery_base_url}' returned HTML documentation (HTTP {res.status_code}). "
-                    f"The Gateway host must be the server URL provided in Key Management DNS widget in your Exness Personal Area."
-                    if is_html else res.text[:200]
-                )
+
+                if res.status_code == 200 and not is_html:
+                    try:
+                        data = res.json()
+                        access_point = data.get("access_point")
+                        if access_point:
+                            self.api_url = access_point.rstrip("/")
+                            self.ws_url = self.api_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
+                            return {
+                                "status": "DISCOVERED",
+                                "access_point": self.api_url,
+                                "account_id": data.get("account_id", self.account_id),
+                                "gateway": base,
+                                "dns_ip": resolved_ip,
+                            }
+                    except Exception:
+                        pass
+
+                if is_html:
+                    detail_msg = (
+                        f"Gateway host '{base}' returned HTML documentation (HTTP {res.status_code}). "
+                        "The Gateway host must be the server URL provided in Key Management DNS widget in your Exness Personal Area."
+                    )
+                elif res.status_code in (401, 403):
+                    detail_msg = f"Exness rejected API credentials (HTTP {res.status_code}): {res.text[:200]}"
+                elif res.status_code == 404:
+                    detail_msg = f"Exness Gateway endpoint {path} not found on host '{base}' (HTTP 404). Verify account ID and gateway host."
+                else:
+                    detail_msg = f"Gateway Discovery HTTP {res.status_code}: {res.text[:200]}"
+
                 return {
                     "status": "DISCOVERY_FAILED",
                     "http_status": res.status_code,
                     "detail": detail_msg,
-                    "gateway": self.discovery_base_url,
+                    "gateway": base,
+                    "dns_ip": resolved_ip,
                 }
         except Exception as e:
             logger.warning(f"DNS Gateway Access Point discovery failed for {self.account_id}: {e}")
             return {
                 "status": "DISCOVERY_OFFLINE",
                 "error": str(e),
-                "gateway": self.discovery_base_url,
+                "detail": f"Failed to connect to Gateway '{base}': {e}",
+                "gateway": base,
+                "dns_ip": resolved_ip,
             }
 
     async def connect(self) -> Dict[str, Any]:
@@ -320,14 +371,26 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
         # 1. Access Point discovery
         disc = await self.discover_access_point()
+        if disc.get("status") != "DISCOVERED":
+            self.is_connected = False
+            self.broker_authenticated = False
+            return {
+                "status": "FAILED",
+                "adapter_connected": False,
+                "broker_authenticated": False,
+                "reason": disc.get("detail") or "Gateway Access Point discovery failed.",
+                "discovery_result": disc,
+                "gateway": self.discovery_base_url,
+            }
+
         target_api = self.api_url or self.discovery_base_url
 
-        # 2. Signed account request
-        path = f"/v1/accounts/{self.account_id}"
+        # 2. Signed account telemetry request on discovered Access Point
+        path = f"/v1/configuration/accounts/{self.account_id}/account"
         headers = self.sign_request("GET", path)
 
         try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{target_api}{path}", headers=headers)
                 if res.status_code == 200:
                     try:
@@ -335,135 +398,57 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                     except Exception:
                         data = None
 
-                    if not isinstance(data, dict) or not data:
-                        self.is_connected = False
-                        self.broker_authenticated = False
-                        ct = res.headers.get("content-type", "").lower()
+                    if isinstance(data, dict) and data:
+                        self.is_connected = True
+                        self.broker_authenticated = True
+                        self._cached_account_info = data
                         return {
-                            "status": "RESOURCE_NOT_FOUND",
-                            "adapter_connected": False,
-                            "broker_authenticated": False,
+                            "status": "CONNECTED",
+                            "adapter_connected": True,
+                            "broker_authenticated": True,
                             "broker_mode": "EXNESS_TRADER_API",
                             "account_id": self.account_id,
-                            "http_status": 200,
-                            "target_endpoint": f"{target_api}{path}",
-                            "reason": f"Target host '{target_api}' returned non-API response (content-type: {ct or 'empty'}). The Gateway Host must be the official Exness Gateway host obtained from your Exness Personal Area Key Management DNS widget.",
+                            "environment": self.environment,
+                            "account_tier": self.account_tier,
+                            "access_point": self.api_url,
+                            "balance": float(data.get("balance", 0.0)),
+                            "equity": float(data.get("equity", 0.0)),
+                            "currency": data.get("currency", "USD"),
+                            "live_execution_locked": self.live_execution_locked,
+                            "connected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                         }
 
-                    is_demo = bool(data.get("is_demo", self.environment == "DEMO"))
-                    expected_demo = (self.environment == "DEMO")
-
-                    if is_demo != expected_demo:
-                        self.is_connected = False
-                        self.broker_authenticated = False
-                        return {
-                            "status": "ENVIRONMENT_MISMATCH",
-                            "adapter_connected": False,
-                            "broker_authenticated": False,
-                            "broker_mode": "EXNESS_TRADER_API",
-                            "account_id": self.account_id,
-                            "http_status": 400,
-                            "reason": f"Account environment mismatch: Requested {self.environment}, but broker returned is_demo={is_demo}.",
-                        }
-
-                    self.is_connected = True
-                    self.broker_authenticated = True
-                    self._cached_account_info = data
-                    return {
-                        "status": "CONNECTED",
-                        "adapter_connected": True,
-                        "broker_authenticated": True,
-                        "is_mock": False,
-                        "broker_mode": "EXNESS_TRADER_API",
-                        "connection_type": f"REAL_EXNESS_{self.environment}",
-                        "account_id": self.account_id,
-                        "environment": self.environment,
-                        "account_tier": self.account_tier,
-                        "access_point": self.api_url,
-                        "connected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    }
-                elif res.status_code in (401, 403):
-                    self.is_connected = True
-                    self.broker_authenticated = False
-                    return {
-                        "status": "AUTHENTICATION_FAILED",
-                        "adapter_connected": True,
-                        "broker_authenticated": False,
-                        "is_mock": False,
-                        "broker_mode": "EXNESS_TRADER_API",
-                        "account_id": self.account_id,
-                        "http_status": res.status_code,
-                        "reason": "Invalid Exness Trader API Key or Ed25519 Signature.",
-                    }
-                elif res.status_code == 429:
-                    self.is_connected = True
-                    self.broker_authenticated = False
-                    return {
-                        "status": "RATE_LIMITED",
-                        "adapter_connected": True,
-                        "broker_authenticated": False,
-                        "is_mock": False,
-                        "broker_mode": "EXNESS_TRADER_API",
-                        "account_id": self.account_id,
-                        "http_status": 429,
-                        "reason": "Exness Trader API rate limit exceeded.",
-                    }
-                elif res.status_code == 404:
-                    self.is_connected = False
-                    self.broker_authenticated = False
-                    ct = res.headers.get("content-type", "").lower()
-                    is_html = "text/html" in ct or res.text.strip().startswith("<!DOCTYPE") or res.text.strip().startswith("<html")
-                    if is_html:
-                        reason_msg = f"Host '{target_api}' returned HTML documentation (404 Not Found). The Gateway Host must be the official Exness Gateway host obtained from your Exness Personal Area Key Management DNS widget."
-                    else:
-                        reason_msg = f"Account or endpoint '{path}' not found on Exness Trader API ({target_api}). Verify that the API Key has access to Account ID {self.account_id} in Exness Personal Area."
-                    return {
-                        "status": "RESOURCE_NOT_FOUND",
-                        "adapter_connected": False,
-                        "broker_authenticated": False,
-                        "is_mock": False,
-                        "broker_mode": "EXNESS_TRADER_API",
-                        "account_id": self.account_id,
-                        "http_status": 404,
-                        "target_endpoint": f"{target_api}{path}",
-                        "reason": reason_msg,
-                    }
-                elif res.status_code in (502, 503, 504):
-                    self.is_connected = False
-                    self.broker_authenticated = False
-                    return {
-                        "status": "CLUSTER_UNAVAILABLE",
-                        "adapter_connected": False,
-                        "broker_authenticated": False,
-                        "is_mock": False,
-                        "broker_mode": "EXNESS_TRADER_API",
-                        "account_id": self.account_id,
-                        "http_status": res.status_code,
-                        "reason": "Exness trading cluster temporarily unavailable.",
-                    }
-        except (ValueError, PermissionError):
-            raise
+                # Authentication rejected or non-200 from Access Point
+                self.is_connected = True
+                self.broker_authenticated = False
+                return {
+                    "status": "AUTHENTICATION_FAILED",
+                    "adapter_connected": True,
+                    "broker_authenticated": False,
+                    "reason": f"Exness Access Point authentication rejected (HTTP {res.status_code}): {res.text[:200]}",
+                    "http_status": res.status_code,
+                    "access_point": target_api,
+                }
+        except httpx.ConnectTimeout:
+            self.is_connected = False
+            self.broker_authenticated = False
+            return {
+                "status": "TIMEOUT",
+                "adapter_connected": False,
+                "broker_authenticated": False,
+                "reason": f"Connection to Exness Access Point ({target_api}) timed out.",
+                "access_point": target_api,
+            }
         except Exception as e:
-            logger.warning(f"Exness Trader API at {target_api} unreachable: {e}")
-
-        # Offline state report
-        self.is_connected = False
-        self.broker_authenticated = False
-        return {
-            "status": "API_OFFLINE",
-            "adapter_connected": False,
-            "broker_authenticated": False,
-            "is_connected": False,
-            "is_mock": False,
-            "broker_mode": "EXNESS_TRADER_API",
-            "connection_type": f"REAL_EXNESS_{self.environment}",
-            "account_id": self.account_id,
-            "environment": self.environment,
-            "discovery_gateway": self.discovery_base_url,
-            "access_point": self.api_url or "UNRESOLVED",
-            "reason": f"Exness Trader API Gateway ({self.discovery_base_url}) is unreachable from this node.",
-            "live_execution_locked": self.live_execution_locked,
-        }
+            self.is_connected = False
+            self.broker_authenticated = False
+            return {
+                "status": "OFFLINE",
+                "adapter_connected": False,
+                "broker_authenticated": False,
+                "reason": f"Exness Access Point ({target_api}) is unreachable: {str(e)}",
+                "access_point": target_api,
+            }
 
     async def disconnect(self) -> Dict[str, Any]:
         self.is_connected = False

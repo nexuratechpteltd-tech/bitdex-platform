@@ -85,6 +85,7 @@ def get_user_adapter(
                     api_secret="",
                     account_id=login,
                     environment=env,
+                    discovery_base_url=server,
                 )
             else:
                 adapter = ExnessDeterministicMockAdapter(
@@ -485,6 +486,7 @@ async def connect_exness_real(
             api_secret=api_secret,
             account_id=req.account_login,
             environment="REAL",
+            discovery_base_url=req.server_name.strip() if req.server_name else None,
             account_tier=req.account_tier,
         )
         enc_creds = ExnessCredentialVault.encrypt_credentials(

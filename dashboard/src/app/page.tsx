@@ -25,6 +25,10 @@ export default function TauricPortal() {
       if (
         h === "#trading" ||
         h === "#terminal" ||
+        h === "#overview" ||
+        h === "#hft" ||
+        h === "#long-term" ||
+        h === "#terminal" ||
         h === "#dashboard" ||
         h === "#signals" ||
         h === "#balances" ||
@@ -74,6 +78,14 @@ export default function TauricPortal() {
         setPortalMode("ADMIN");
       } else if (
         h === "#trading" ||
+        h === "#terminal" ||
+        h === "#overview" ||
+        h === "#hft" ||
+        h === "#long-term" ||
+        h === "#terminal" ||
+        h === "#overview" ||
+        h === "#hft" ||
+        h === "#long-term" ||
         h === "#dashboard" ||
         h === "#account" ||
         h === "#signals" ||

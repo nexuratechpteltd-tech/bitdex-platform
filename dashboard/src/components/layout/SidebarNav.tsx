@@ -65,64 +65,58 @@ export default function SidebarNav({
   onSwitchPortal,
 }: SidebarNavProps) {
   const navItems = [
-    {
-      id: "OVERVIEW" as NavDestination,
-      label: "Overview",
-      hash: "overview",
-      icon: LayoutGrid,
-      group: "MAIN NAVIGATION",
-      badge: null,
-    },
-    {
-      id: "TERMINAL" as NavDestination,
-      label: "Trading Dashboard",
-      hash: "terminal",
-      icon: TrendingUp,
-      group: "MAIN NAVIGATION",
-      badge: <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30">LIVE</span>,
-    },
+    // ─── 1. TRADING PRODUCTS (Exactly 2 main products) ───
     {
       id: "LONG_TERM" as NavDestination,
       label: "Long-Term Strategy",
       hash: "long-term",
       icon: Compass,
-      group: "MAIN NAVIGATION",
-      badge: <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981]">{activeSignalsCount}</span>,
+      group: "TRADING PRODUCTS",
+      badge: (
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981]">
+          {activeSignalsCount}
+        </span>
+      ),
     },
     {
       id: "HFT" as NavDestination,
       label: "High-Frequency Trading",
       hash: "hft",
       icon: Zap,
-      group: "MAIN NAVIGATION",
+      group: "TRADING PRODUCTS",
+      badge: (
+        <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/30">
+          HFT
+        </span>
+      ),
+    },
+    // ─── 2. PORTFOLIO & ASSETS ───
+    {
+      id: "OVERVIEW" as NavDestination,
+      label: "Overview",
+      hash: "overview",
+      icon: LayoutGrid,
+      group: "PORTFOLIO & ASSETS",
       badge: null,
     },
     {
-      id: "CONNECTIONS" as NavDestination,
-      label: "Exchange Connections",
-      hash: "connections",
-      icon: Link2,
-      group: "ACCOUNT & BROKER",
-      badge: exnessConnected ? (
-        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981]">CONNECTED</span>
-      ) : (
-        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#EF4444]/15 text-[#EF4444]">DISCONNECTED</span>
+      id: "TERMINAL" as NavDestination,
+      label: "Trading Terminal",
+      hash: "terminal",
+      icon: TrendingUp,
+      group: "PORTFOLIO & ASSETS",
+      badge: (
+        <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30">
+          LIVE
+        </span>
       ),
-    },
-    {
-      id: "FUNDING" as NavDestination,
-      label: "Funding & Transfers",
-      hash: "funding",
-      icon: ArrowLeftRight,
-      group: "ACCOUNT & BROKER",
-      badge: <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30">EXNESS</span>,
     },
     {
       id: "BALANCES" as NavDestination,
       label: "Balances",
       hash: "balances",
       icon: Wallet,
-      group: "ACCOUNT & BROKER",
+      group: "PORTFOLIO & ASSETS",
       badge: null,
     },
     {
@@ -130,17 +124,36 @@ export default function SidebarNav({
       label: "Orders & Holdings",
       hash: "orders",
       icon: Layers,
-      group: "ACCOUNT & BROKER",
+      group: "PORTFOLIO & ASSETS",
       badge: openOrdersCount > 0 ? (
-        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#38BDF8]/20 text-[#38BDF8]">{openOrdersCount}</span>
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#38BDF8]/20 text-[#38BDF8]">
+          {openOrdersCount}
+        </span>
       ) : null,
     },
     {
+      id: "CONNECTIONS" as NavDestination,
+      label: "Connected Accounts",
+      hash: "connections",
+      icon: Link2,
+      group: "PORTFOLIO & ASSETS",
+      badge: exnessConnected ? (
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981]">
+          CONNECTED
+        </span>
+      ) : (
+        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#EF4444]/15 text-[#EF4444]">
+          DISCONNECTED
+        </span>
+      ),
+    },
+    // ─── 3. SYSTEM & ACCOUNT ───
+    {
       id: "SETTINGS" as NavDestination,
-      label: "Customer Settings",
+      label: "Settings & Security",
       hash: "settings",
       icon: Sliders,
-      group: "SYSTEM",
+      group: "ACCOUNT",
       badge: null,
     },
     {
@@ -148,7 +161,7 @@ export default function SidebarNav({
       label: "Help & Support",
       hash: "support",
       icon: LifeBuoy,
-      group: "SYSTEM",
+      group: "ACCOUNT",
       badge: null,
     },
     ...(userRole === "ADMIN" || userRole === "OWNER"
@@ -158,7 +171,7 @@ export default function SidebarNav({
             label: "Administrator Portal",
             hash: "admin",
             icon: ShieldCheck,
-            group: "SYSTEM",
+            group: "ACCOUNT",
             badge: (
               <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40">
                 ADMIN
@@ -211,7 +224,7 @@ export default function SidebarNav({
 
         {/* Navigation Items List */}
         <div className="flex-1 py-4 px-2 space-y-5 overflow-y-auto font-mono">
-          {["MAIN NAVIGATION", "ACCOUNT & BROKER", "SYSTEM"].map((grp) => {
+          {["TRADING PRODUCTS", "PORTFOLIO & ASSETS", "ACCOUNT"].map((grp) => {
             const items = navItems.filter((i) => i.group === grp);
             return (
               <div key={grp} className="space-y-1">
@@ -320,7 +333,7 @@ export default function SidebarNav({
 
             {/* Mobile Nav Links */}
             <div className="flex-1 py-4 space-y-4 overflow-y-auto font-mono text-xs">
-              {["MAIN NAVIGATION", "ACCOUNT & BROKER", "SYSTEM"].map((grp) => {
+              {["TRADING PRODUCTS", "PORTFOLIO & ASSETS", "ACCOUNT"].map((grp) => {
                 const items = navItems.filter((i) => i.group === grp);
                 return (
                   <div key={grp} className="space-y-1">

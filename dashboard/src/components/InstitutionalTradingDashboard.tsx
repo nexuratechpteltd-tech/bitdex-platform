@@ -223,6 +223,24 @@ interface ChecklistItem {
   detail: string;
 }
 
+
+// Safe numeric formatting helpers to prevent TypeError crashes on undefined/null metrics
+function safeNum(val: any, decimals = 2, fallback = "0.00"): string {
+  if (val === null || val === undefined || val === "") return fallback;
+  const n = Number(val);
+  return isNaN(n) ? fallback : n.toFixed(decimals);
+}
+
+function safeFormatPrice(val: any, fallback = "---"): string {
+  if (val === null || val === undefined || val === "") return fallback;
+  const n = Number(val);
+  if (isNaN(n)) return fallback;
+  if (n >= 1) {
+    return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return n.toFixed(4);
+}
+
 export default function InstitutionalTradingDashboard({
   token,
   className = "",
@@ -985,7 +1003,7 @@ export default function InstitutionalTradingDashboard({
           {connectedAccounts.map((a) => (
             <option key={a.account_id} value={a.account_id}>
               {a.display_label} · {a.connected ? "Connected" : a.connection_status}
-              {a.available_balance !== null ? ` · ${a.available_balance.toFixed(2)} ${a.currency}` : ""}
+              {typeof a.available_balance === "number" && !isNaN(a.available_balance) ? ` · ${a.available_balance.toFixed(2)} ${a.currency}` : ""}
             </option>
           ))}
         </select>
@@ -1001,8 +1019,8 @@ export default function InstitutionalTradingDashboard({
               ["Account", selectedAccount.masked_id],
               ["Status", selectedAccount.connected ? "CONNECTED" : selectedAccount.connection_status],
               ["Currency", selectedAccount.currency],
-              ["Available", selectedAccount.available_balance !== null ? selectedAccount.available_balance.toFixed(2) : "Not retrieved"],
-              ["Equity", selectedAccount.equity !== null ? selectedAccount.equity.toFixed(2) : "Not retrieved"],
+              ["Available", typeof selectedAccount.available_balance === "number" && !isNaN(selectedAccount.available_balance) ? selectedAccount.available_balance.toFixed(2) : "Not retrieved"],
+              ["Equity", typeof selectedAccount.equity === "number" && !isNaN(selectedAccount.equity) ? selectedAccount.equity.toFixed(2) : "Not retrieved"],
               ["Last connected", selectedAccount.last_connected_at ? new Date(selectedAccount.last_connected_at).toLocaleString() : "Never"],
             ].map(([k, v]) => (
               <div key={k} className="p-2 rounded-lg bg-[#0B0E11] border border-[#272735]">
@@ -1110,10 +1128,10 @@ export default function InstitutionalTradingDashboard({
                   </div>
                   <div className="mt-1 flex items-baseline justify-between text-[11px]">
                     <span className="font-bold text-[#EAECEF] tabular-nums">
-                      {price !== undefined ? `$${price >= 1 ? price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : price.toFixed(4)}` : "---"}
+                      {price !== undefined && price !== null ? `$${safeFormatPrice(price)}` : "---"}
                     </span>
                     <span className={`text-[10px] font-bold tabular-nums ${isPos ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                      {chg !== undefined ? `${isPos ? "+" : ""}${chg.toFixed(2)}%` : ""}
+                      {chg !== undefined && chg !== null ? `${isPos ? "+" : ""}${safeNum(chg, 2)}%` : ""}
                     </span>
                   </div>
                 </button>
@@ -1162,11 +1180,11 @@ export default function InstitutionalTradingDashboard({
 
                   <div className="flex items-baseline justify-between mb-2">
                     <span className="text-sm font-bold text-white tabular-nums">
-                      ${pair.price >= 1 ? pair.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pair.price.toFixed(4)}
+                      ${safeFormatPrice(pair?.price)}
                     </span>
                     <span className={`text-xs font-bold tabular-nums flex items-center ${isPositive ? "text-[#10B981]" : "text-[#F6465D]"}`}>
                       {isPositive ? <ArrowUpRight className="w-3 h-3 mr-0.5" /> : <ArrowDownRight className="w-3 h-3 mr-0.5" />}
-                      {pair.price_change_pct_24h > 0 ? "+" : ""}{pair.price_change_pct_24h.toFixed(2)}%
+                      {pair?.price_change_pct_24h > 0 ? "+" : ""}{safeNum(pair?.price_change_pct_24h, 2)}%
                     </span>
                   </div>
 
@@ -1174,19 +1192,19 @@ export default function InstitutionalTradingDashboard({
                     <div>
                       <span className="text-[#64748B] block">24h Vol:</span>
                       <span className="text-white font-medium">
-                        ${(pair.quote_volume_24h / 1e6).toFixed(1)}M
+                        ${safeNum((pair?.quote_volume_24h ?? 0) / 1e6, 1)}M
                       </span>
                     </div>
                     <div>
                       <span className="text-[#64748B] block">Spread:</span>
                       <span className="text-[#00E5FF] font-medium">
-                        {pair.spread_bps.toFixed(1)} bps
+                        {safeNum(pair?.spread_bps, 1)} bps
                       </span>
                     </div>
                     <div>
                       <span className="text-[#64748B] block">Funding:</span>
                       <span className="text-white font-medium">
-                        {(pair.funding_rate * 100).toFixed(4)}%
+                        {safeNum((pair?.funding_rate ?? 0) * 100, 4)}%
                       </span>
                     </div>
                     <div>
@@ -1289,7 +1307,7 @@ export default function InstitutionalTradingDashboard({
               </div>
               <div className="p-2.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block">Margin Allocated:</span>
-                <span className="font-bold text-white">${strategyConfig.margin_allocation_usd.toFixed(2)}</span>
+                <span className="font-bold text-white">${safeNum(strategyConfig?.margin_allocation_usd, 2)}</span>
               </div>
               <div className="p-2.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block">Isolated Leverage:</span>
@@ -1297,11 +1315,11 @@ export default function InstitutionalTradingDashboard({
               </div>
               <div className="p-2.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block">Net Target (TP):</span>
-                <span className="font-bold text-[#10B981]">+{strategyConfig.net_profit_target_pct.toFixed(2)}%</span>
+                <span className="font-bold text-[#10B981]">+{safeNum(strategyConfig?.net_profit_target_pct, 2)}%</span>
               </div>
               <div className="p-2.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block">Max Loss (SL):</span>
-                <span className="font-bold text-[#F6465D]">-{strategyConfig.max_loss_pct.toFixed(2)}%</span>
+                <span className="font-bold text-[#F6465D]">-{safeNum(strategyConfig?.max_loss_pct, 2)}%</span>
               </div>
               <div className="p-2.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block">Holding Max:</span>
@@ -1313,15 +1331,15 @@ export default function InstitutionalTradingDashboard({
             <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735] text-xs font-mono space-y-1.5">
               <div className="flex items-center justify-between text-[#94A3B8]">
                 <span>Notional Scalp Exposure:</span>
-                <span className="font-bold text-white">${breakEvenMath.notional.toFixed(2)}</span>
+                <span className="font-bold text-white">${safeNum(breakEvenMath?.notional, 2)}</span>
               </div>
               <div className="flex items-center justify-between text-[#94A3B8]">
                 <span>Estimated Maker Friction (0.04% + Buffer):</span>
-                <span className="font-bold text-[#00E5FF]">+{breakEvenMath.totalFrictionPct.toFixed(3)}% (~${breakEvenMath.estFeeDollar.toFixed(3)})</span>
+                <span className="font-bold text-[#00E5FF]">+{safeNum(breakEvenMath?.totalFrictionPct, 3)}% (~${safeNum(breakEvenMath?.estFeeDollar, 3)})</span>
               </div>
               <div className="flex items-center justify-between text-[#94A3B8] border-t border-[#181822] pt-1.5">
                 <span className="text-[#10B981]">Net Target Return at Fill:</span>
-                <span className="font-bold text-[#10B981]">+{breakEvenMath.netReturnPct.toFixed(2)}% (~+${breakEvenMath.estDollarProfit.toFixed(2)}/cycle)</span>
+                <span className="font-bold text-[#10B981]">+{safeNum(breakEvenMath?.netReturnPct, 2)}% (~+${safeNum(breakEvenMath?.estDollarProfit, 2)}/cycle)</span>
               </div>
             </div>
           </div>
@@ -1652,17 +1670,17 @@ export default function InstitutionalTradingDashboard({
                               </span>
                             </td>
                             <td className="py-2.5 px-3 tabular-nums text-white font-medium">{pos.size}</td>
-                            <td className="py-2.5 px-3 tabular-nums text-white">${pos.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                            <td className="py-2.5 px-3 tabular-nums text-white font-medium">${pos.mark_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className="py-2.5 px-3 tabular-nums text-white">${safeFormatPrice(pos.entry_price)}</td>
+                            <td className="py-2.5 px-3 tabular-nums text-white font-medium">${safeFormatPrice(pos.mark_price)}</td>
                             <td className={`py-2.5 px-3 tabular-nums font-bold ${isProfitable ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                              {isProfitable ? "+" : ""}${pos.unrealized_pnl.toFixed(2)}
+                              {isProfitable ? "+" : ""}${safeNum(pos.unrealized_pnl, 2)}
                             </td>
                             <td className="py-2.5 px-3 tabular-nums text-[#00E5FF] font-bold">{pos.leverage}x</td>
                             <td className="py-2.5 px-3 tabular-nums text-[#F6465D]">
-                              {pos.stop_loss_price ? `$${pos.stop_loss_price.toFixed(2)}` : "STANDBY"}
+                              {pos.stop_loss_price ? `$${safeNum(pos.stop_loss_price, 2)}` : "STANDBY"}
                             </td>
                             <td className="py-2.5 px-3 tabular-nums text-[#10B981]">
-                              {pos.take_profit_price ? `$${pos.take_profit_price.toFixed(2)}` : "STANDBY"}
+                              {pos.take_profit_price ? `$${safeNum(pos.take_profit_price, 2)}` : "STANDBY"}
                             </td>
                             <td className="py-2.5 px-3">
                               <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30">
@@ -1713,7 +1731,7 @@ export default function InstitutionalTradingDashboard({
                             {ord.side}
                           </td>
                           <td className="py-2.5 px-3 text-[#94A3B8]">{ord.order_type}</td>
-                          <td className="py-2.5 px-3 tabular-nums text-white">${ord.price.toFixed(2)}</td>
+                          <td className="py-2.5 px-3 tabular-nums text-white">${safeNum(ord.price, 2)}</td>
                           <td className="py-2.5 px-3 tabular-nums text-white">{ord.quantity}</td>
                           <td className="py-2.5 px-3">
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/30">
@@ -1762,11 +1780,11 @@ export default function InstitutionalTradingDashboard({
                           {t.side}
                         </td>
                         <td className="py-2.5 px-3 tabular-nums">{t.quantity}</td>
-                        <td className="py-2.5 px-3 tabular-nums">${t.entry_price.toFixed(2)}</td>
-                        <td className="py-2.5 px-3 tabular-nums">${t.exit_price.toFixed(2)}</td>
-                        <td className="py-2.5 px-3 tabular-nums text-[#94A3B8]">${t.fee_usd.toFixed(4)}</td>
+                        <td className="py-2.5 px-3 tabular-nums">${safeNum(t.entry_price, 2)}</td>
+                        <td className="py-2.5 px-3 tabular-nums">${safeNum(t.exit_price, 2)}</td>
+                        <td className="py-2.5 px-3 tabular-nums text-[#94A3B8]">${safeNum(t.fee_usd, 4)}</td>
                         <td className={`py-2.5 px-3 tabular-nums font-bold ${t.realized_pnl >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                          ${t.realized_pnl.toFixed(2)}
+                          ${safeNum(t.realized_pnl, 2)}
                         </td>
                       </tr>
                     ))}
@@ -1811,9 +1829,9 @@ export default function InstitutionalTradingDashboard({
                         <td className="py-2.5 px-3 font-bold text-white">{t.symbol}</td>
                         <td className={`py-2.5 px-3 font-bold ${t.side === "BUY" ? "text-[#10B981]" : "text-[#F6465D]"}`}>{t.side}</td>
                         <td className="py-2.5 px-3 tabular-nums">{t.quantity}</td>
-                        <td className="py-2.5 px-3 tabular-nums">${t.exit_price.toFixed(2)}</td>
-                        <td className="py-2.5 px-3 tabular-nums text-[#94A3B8]">${t.fee_usd.toFixed(4)}</td>
-                        <td className={`py-2.5 px-3 tabular-nums font-bold ${t.realized_pnl >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>${t.realized_pnl.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 tabular-nums">${safeNum(t.exit_price, 2)}</td>
+                        <td className="py-2.5 px-3 tabular-nums text-[#94A3B8]">${safeNum(t.fee_usd, 4)}</td>
+                        <td className={`py-2.5 px-3 tabular-nums font-bold ${t.realized_pnl >= 0 ? "text-[#10B981]" : "text-[#F6465D]"}`}>${safeNum(t.realized_pnl, 2)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1838,25 +1856,25 @@ export default function InstitutionalTradingDashboard({
               <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block uppercase">Authoritative Wallet Balance:</span>
                 <span className="font-bold text-white font-mono text-sm">
-                  ${(hftAccountSummary?.wallet_balance_usd ?? data?.account?.wallet_balance ?? 0).toFixed(2)}
+                  ${safeNum(hftAccountSummary?.wallet_balance_usd ?? data?.account?.wallet_balance ?? 0, 2)}
                 </span>
               </div>
               <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block uppercase">Available Margin:</span>
                 <span className="font-bold text-[#10B981] font-mono text-sm">
-                  ${(hftAccountSummary?.available_balance_usd ?? data?.account?.available_balance ?? 0).toFixed(2)}
+                  ${safeNum(hftAccountSummary?.available_balance_usd ?? data?.account?.available_balance ?? 0, 2)}
                 </span>
               </div>
               <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block uppercase">Margin In Use:</span>
                 <span className="font-bold text-white font-mono">
-                  ${(hftAccountSummary?.margin_balance_usd ?? data?.account?.margin_balance ?? 0).toFixed(2)}
+                  ${safeNum(hftAccountSummary?.margin_balance_usd ?? data?.account?.margin_balance ?? 0, 2)}
                 </span>
               </div>
               <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block uppercase">Total Equity:</span>
                 <span className="font-bold text-white font-mono text-sm">
-                  ${(hftAccountSummary?.equity_usd ?? (data?.account?.wallet_balance || 0)).toFixed(2)}
+                  ${safeNum(hftAccountSummary?.equity_usd ?? (data?.account?.wallet_balance || 0), 2)}
                 </span>
               </div>
               <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
@@ -1923,7 +1941,7 @@ export default function InstitutionalTradingDashboard({
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-white font-bold">Demo / Testnet Margin Allocation ($):</label>
-                  <span className="text-[#00E5FF] font-bold">${strategyConfig.margin_allocation_usd.toFixed(2)}</span>
+                  <span className="text-[#00E5FF] font-bold">${safeNum(strategyConfig?.margin_allocation_usd, 2)}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <input
@@ -1973,7 +1991,7 @@ export default function InstitutionalTradingDashboard({
                   ))}
                 </div>
                 <p className="text-[10px] text-[#64748B]">
-                  Notional position: ${(strategyConfig.margin_allocation_usd * strategyConfig.leverage).toFixed(2)} USD.
+                  Notional position: ${safeNum((strategyConfig?.margin_allocation_usd ?? 0) * (strategyConfig?.leverage ?? 1), 2)} USD.
                 </p>
               </div>
 
@@ -2054,12 +2072,12 @@ export default function InstitutionalTradingDashboard({
                   </div>
                   <div>
                     <span>Gross Break-Even Required:</span>
-                    <span className="font-bold text-[#00E5FF] block">+{breakEvenMath.requiredMovePct.toFixed(3)}%</span>
+                    <span className="font-bold text-[#00E5FF] block">+{safeNum(breakEvenMath?.requiredMovePct, 3)}%</span>
                   </div>
                   <div>
                     <span>Net Gain at Target:</span>
                     <span className="font-bold text-[#10B981] block">
-                      +${breakEvenMath.estDollarProfit.toFixed(2)} (+{breakEvenMath.netReturnPct.toFixed(2)}%)
+                      +${safeNum(breakEvenMath?.estDollarProfit, 2)} (+{safeNum(breakEvenMath?.netReturnPct, 2)}%)
                     </span>
                   </div>
                 </div>
@@ -2185,7 +2203,7 @@ export default function InstitutionalTradingDashboard({
                   <span>{activationCheckoutData.payment_reference}</span>
                 </div>
                 <div className="text-[11px] text-[#94A3B8]">
-                  Amount Due: <strong className="text-white">${Number(activationCheckoutData.amount).toFixed(2)} {activationCheckoutData.currency}</strong> via <strong className="text-white">{activationCheckoutData.provider}</strong>
+                  Amount Due: <strong className="text-white">${safeNum(activationCheckoutData?.amount, 2)} {activationCheckoutData.currency}</strong> via <strong className="text-white">{activationCheckoutData.provider}</strong>
                 </div>
               </div>
             )}

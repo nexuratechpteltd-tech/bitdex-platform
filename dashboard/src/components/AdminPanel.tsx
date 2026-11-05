@@ -1,7 +1,7 @@
 "use client";
 import ProtectionCenter from "./ProtectionCenter";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   ShieldAlert,
   ShieldCheck,
@@ -45,7 +45,8 @@ import {
   Server,
   Settings,
   Layers,
-  ChevronDown
+  ChevronDown,
+  ArrowRight
 } from "lucide-react";
 
 interface AdminPanelProps {
@@ -89,6 +90,24 @@ export default function AdminPanel({
   onSwitchPortal,
 }: AdminPanelProps) {
   // Navigation
+  // Admin Profile Dropdown State
+  const [isAdminDropdownOpen, setIsAdminDropdownOpen] = useState(false);
+  const adminDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (adminDropdownRef.current && !adminDropdownRef.current.contains(event.target as Node)) {
+        setIsAdminDropdownOpen(false);
+      }
+    }
+    if (isAdminDropdownOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isAdminDropdownOpen]);
+
   const [activeModule, setActiveModule] = useState<
     "CUSTOMERS" | "SUPPORT" | "AI_PRICING" | "EXCHANGES" | "AUDIT" | "TERMINAL"
   >(() => {
@@ -909,33 +928,140 @@ export default function AdminPanel({
         <div className="flex items-center gap-3">
           {onSwitchPortal && (
             <button
+              id="btn-switch-to-trading-terminal"
               onClick={onSwitchPortal}
-              className="text-xs px-3 py-1.5 rounded-md bg-[#181822] hover:bg-[#272735] text-slate-300 hover:text-white border border-[#272735] transition flex items-center gap-1.5"
+              className="text-xs px-3.5 py-1.5 rounded-lg bg-[#00E5FF]/15 hover:bg-[#00E5FF]/25 text-[#00E5FF] hover:text-white border border-[#00E5FF]/40 font-semibold transition flex items-center gap-2 cursor-pointer shadow-sm"
+              title="Switch to Customer Trading Terminal"
             >
-              <Activity className="w-3.5 h-3.5 text-[#00E5FF]" />
-              Trading Terminal
+              <Activity className="w-4 h-4 text-[#00E5FF]" />
+              <span>Trading Terminal</span>
+              <ArrowRight className="w-3.5 h-3.5 text-[#00E5FF]/80" />
             </button>
           )}
 
-          <div className="flex items-center gap-2 pl-2 border-l border-[#272735]">
-            <div className="w-7 h-7 rounded-full bg-[#8B5CF6]/20 border border-[#8B5CF6]/40 flex items-center justify-center text-xs font-bold text-[#8B5CF6]">
-              {adminUser?.first_name?.[0] || adminUser?.email?.[0]?.toUpperCase() || "A"}
-            </div>
-            <div className="text-left hidden sm:block">
-              <div className="text-xs font-semibold leading-tight text-white">
-                {adminUser?.email || "sysadmin@bitdex.ltd"}
-              </div>
-              <div className="text-[10px] font-mono text-[#8B5CF6] uppercase">
-                {adminUser?.role || "ADMINISTRATOR"}
-              </div>
-            </div>
+          <div className="relative" ref={adminDropdownRef}>
             <button
-              onClick={onSignOut}
-              title="Sign Out"
-              className="p-1.5 rounded-md hover:bg-[#F43F5E]/15 text-slate-400 hover:text-[#F43F5E] transition ml-1"
+              id="btn-admin-profile-dropdown"
+              onClick={() => setIsAdminDropdownOpen(!isAdminDropdownOpen)}
+              className="flex items-center gap-2.5 p-1.5 pl-2 rounded-lg bg-[#181822] border border-[#272735] hover:border-[#8B5CF6]/60 transition cursor-pointer select-none"
             >
-              <LogOut className="w-4 h-4" />
+              <div className="w-7 h-7 rounded-full bg-[#8B5CF6]/20 border border-[#8B5CF6]/40 flex items-center justify-center text-xs font-bold text-[#8B5CF6]">
+                {adminUser?.first_name?.[0] || adminUser?.email?.[0]?.toUpperCase() || "A"}
+              </div>
+              <div className="text-left hidden sm:block">
+                <div className="text-xs font-semibold leading-tight text-white max-w-[140px] truncate">
+                  {adminUser?.email || "sysadmin@bitdex.ltd"}
+                </div>
+                <div className="text-[10px] font-mono text-[#8B5CF6] uppercase">
+                  {adminUser?.role || "ADMINISTRATOR"}
+                </div>
+              </div>
+              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isAdminDropdownOpen ? "rotate-180" : ""}`} />
             </button>
+
+            {isAdminDropdownOpen && (
+              <div className="absolute right-0 mt-2 w-64 bg-[#121218] border border-[#272735] rounded-xl shadow-2xl py-2 z-50 text-xs font-sans animate-in fade-in duration-150">
+                <div className="px-3 py-2 border-b border-[#272735]">
+                  <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">
+                    Authenticated Administrator
+                  </span>
+                  <span className="font-semibold text-white truncate block mt-0.5">
+                    {adminUser?.email || "sysadmin@bitdex.ltd"}
+                  </span>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-[#8B5CF6]/20 text-[#8B5CF6] border border-[#8B5CF6]/30">
+                      {adminUser?.role || "ADMINISTRATOR"}
+                    </span>
+                    <span className="text-[10px] font-mono text-[#10B981]">
+                      ISOLATION ACTIVE
+                    </span>
+                  </div>
+                </div>
+
+                <div className="py-1">
+                  {onSwitchPortal && (
+                    <button
+                      id="dropdown-switch-to-terminal"
+                      onClick={() => {
+                        setIsAdminDropdownOpen(false);
+                        onSwitchPortal();
+                      }}
+                      className="w-full px-3 py-2 text-left text-slate-300 hover:text-white hover:bg-[#181822] flex items-center justify-between group cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Activity className="w-3.5 h-3.5 text-[#00E5FF]" />
+                        <span className="font-medium text-[#00E5FF]">Trading Terminal</span>
+                      </div>
+                      <ArrowRight className="w-3 h-3 text-slate-500 group-hover:text-white" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setActiveModule("CUSTOMERS");
+                      setIsAdminDropdownOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-slate-300 hover:text-white hover:bg-[#181822] flex items-center gap-2 cursor-pointer"
+                  >
+                    <Users className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Customer Directory</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveModule("AI_PRICING");
+                      setIsAdminDropdownOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-slate-300 hover:text-white hover:bg-[#181822] flex items-center gap-2 cursor-pointer"
+                  >
+                    <Cpu className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Global Pricing &amp; Overrides</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveModule("EXCHANGES");
+                      setIsAdminDropdownOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-slate-300 hover:text-white hover:bg-[#181822] flex items-center gap-2 cursor-pointer"
+                  >
+                    <Zap className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Exchange Infrastructure</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveModule("AUDIT");
+                      setIsAdminDropdownOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-slate-300 hover:text-white hover:bg-[#181822] flex items-center gap-2 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-slate-400" />
+                    <span>System Audit Trail</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveModule("SUPPORT");
+                      setIsAdminDropdownOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-slate-300 hover:text-white hover:bg-[#181822] flex items-center gap-2 cursor-pointer"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Support Inbox</span>
+                  </button>
+                </div>
+
+                <div className="pt-1 border-t border-[#272735]">
+                  <button
+                    id="btn-admin-sign-out"
+                    onClick={() => {
+                      setIsAdminDropdownOpen(false);
+                      onSignOut();
+                    }}
+                    className="w-full px-3 py-2 text-left text-rose-400 hover:bg-rose-500/10 flex items-center gap-2 cursor-pointer font-medium"
+                  >
+                    <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Sign Out</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -1036,6 +1162,16 @@ export default function AdminPanel({
 
           {/* Rail Footer */}
           <div className="p-3 border-t border-[#272735] space-y-2">
+            {onSwitchPortal && (
+              <button
+                id="btn-rail-switch-terminal"
+                onClick={onSwitchPortal}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[#00E5FF]/10 hover:bg-[#00E5FF]/20 text-[#00E5FF] hover:text-white text-xs font-semibold border border-[#00E5FF]/30 transition cursor-pointer shadow-sm"
+              >
+                <Activity className="w-3.5 h-3.5 text-[#00E5FF]" />
+                <span>Trading Terminal</span>
+              </button>
+            )}
             <div className="p-2.5 rounded-lg bg-[#181822] border border-[#272735] text-[11px]">
               <div className="flex items-center justify-between text-slate-400 mb-1">
                 <span>Global AI Run Rate</span>

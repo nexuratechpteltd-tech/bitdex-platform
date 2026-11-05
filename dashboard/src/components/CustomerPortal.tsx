@@ -2,7 +2,7 @@
 import InstitutionalTradingDashboard from "./InstitutionalTradingDashboard";
 import ProtectionCenter from "./ProtectionCenter";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import {
   Search,
@@ -70,6 +70,54 @@ interface CustomerPortalProps {
   onSignOut: () => void;
   children?: React.ReactNode; // Trading Console / Signals
   onSwitchPortal?: () => void;
+}
+
+
+// Institutional Error Boundary Component to prevent full-screen crashes
+class InstitutionalErrorBoundary extends React.Component<
+  { children: React.ReactNode; componentTitle?: string },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: any) {
+    console.error("Institutional Component Caught Exception:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-6 rounded-2xl bg-[#0E131B] border border-rose-500/30 text-white font-mono space-y-4 m-4">
+          <div className="flex items-center gap-2 text-rose-400">
+            <AlertTriangle className="w-5 h-5 shrink-0" />
+            <h3 className="font-bold text-sm">
+              {this.props.componentTitle || "Execution Module Recovery Notice"}
+            </h3>
+          </div>
+          <p className="text-xs text-[#94A3B8]">
+            An unexpected client exception was intercepted in this component. Platform safety locks remain actively engaged.
+          </p>
+          <div className="p-3 bg-[#080B10] rounded-xl border border-[#1E2736] text-[11px] text-rose-300">
+            {this.state.error?.message || "Render exception"}
+          </div>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            className="px-4 py-2 bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] text-xs font-bold rounded-xl text-white transition cursor-pointer"
+          >
+            Reset Module State
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 export default function CustomerPortal({ token, user, onSignOut, children, onSwitchPortal }: CustomerPortalProps) {
@@ -503,6 +551,21 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
   // Account Settings & Profile Dropdown State
   const [isProfileDropdownOpen, setIsProfileDropdownOpen] = useState(false);
+  const profileDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (profileDropdownRef.current && !profileDropdownRef.current.contains(event.target as Node)) {
+        setIsProfileDropdownOpen(false);
+      }
+    }
+    if (isProfileDropdownOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isProfileDropdownOpen]);
   const [activeAccountModal, setActiveAccountModal] = useState<"PROFILE" | "CHANGE_USERNAME" | "CHANGE_EMAIL" | "CHANGE_PASSWORD" | null>(null);
 
   // Change Username State
@@ -1497,7 +1560,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             )}
 
             {/* Profile Dropdown */}
-            <div className="relative">
+            <div className="relative" ref={profileDropdownRef}>
               <button
                 onClick={() => setIsProfileDropdownOpen(!isProfileDropdownOpen)}
                 className="flex items-center gap-2 p-1.5 rounded-xl bg-[#151C28] border border-[#1E2736] hover:border-[#38BDF8] text-xs font-mono transition-colors"
@@ -1637,7 +1700,9 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {currentNav === "HFT" && (
             <div>
-              <InstitutionalTradingDashboard token={token} />
+              <InstitutionalErrorBoundary componentTitle="Institutional HFT Scalping Engine">
+                <InstitutionalTradingDashboard token={token} />
+              </InstitutionalErrorBoundary>
             </div>
           )}
 

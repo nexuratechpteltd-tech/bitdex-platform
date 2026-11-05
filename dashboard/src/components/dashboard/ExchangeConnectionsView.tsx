@@ -43,7 +43,7 @@ export default function ExchangeConnectionsView({
   // Form states (Exness Trader API)
   const [accountEnv, setAccountEnv] = useState<"DEMO" | "REAL">("REAL");
   const [accountLogin, setAccountLogin] = useState("");
-  const [serverName, setServerName] = useState("https://gateway.exness.com");
+  const [serverName, setServerName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [accountTier, setAccountTier] = useState("STANDARD");
@@ -698,17 +698,25 @@ export default function ExchangeConnectionsView({
                 />
               </div>
 
-              {/* Target Server Endpoint (Authoritative https://www.exness-api.com) */}
+              {/* Target Gateway Endpoint (Official Exness DNS Widget) */}
               <div className="space-y-1">
-                <label className="text-[10px] uppercase text-[#64748B] block font-bold">
-                  Target Endpoint (Official Exness Gateway)
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] uppercase text-[#64748B] block font-bold">
+                    Gateway Host URL (From Exness DNS Widget)
+                  </label>
+                  <span className="text-[10px] text-amber-400 font-mono font-bold">DNS Widget</span>
+                </div>
                 <input
                   type="text"
                   value={serverName}
                   onChange={(e) => setServerName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-[#151C28] border border-[#1E2736] text-[#38BDF8] focus:outline-none focus:border-[#38BDF8] font-mono"
+                  placeholder="https://gateway-xxx.exness.com"
+                  className="w-full px-3 py-2 rounded-lg bg-[#151C28] border border-[#1E2736] text-[#38BDF8] focus:outline-none focus:border-[#38BDF8] font-mono text-xs"
                 />
+                <p className="text-[10px] text-[#64748B] mt-1 leading-relaxed">
+                  Enter your assigned Gateway Host from Exness Personal Area &rarr; Settings &rarr; API &rarr; Key Management DNS widget.
+                  Do <strong>NOT</strong> enter <code>https://www.exness-api.com</code> (documentation site).
+                </p>
               </div>
 
               {/* Account Tier */}
