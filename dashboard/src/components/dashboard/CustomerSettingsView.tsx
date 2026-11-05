@@ -30,7 +30,7 @@ export default function CustomerSettingsView({ user, token, onSwitchPortal }: Cu
   useEffect(() => {
     if (!isAdmin || activeSection !== "ADMIN_SETTINGS") return;
     const t = token || (typeof window !== "undefined" ? window.localStorage.getItem("token") || "" : "");
-    const h = { headers: t ? { Authorization: "Bearer " + t } : {} };
+    const h: RequestInit = { headers: (t ? { Authorization: "Bearer " + t } : {}) as Record<string, string> };
     const get = (u: string) => fetch(u, h).then((r) => (r.ok ? r.json() : null)).catch(() => null);
     Promise.all([
       get("/api/backend/saas/admin/protection/status"),
