@@ -44,7 +44,7 @@ export default function ExchangeConnectionsView({
   // Form states (Exness Multi-Account Discovery)
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
-  const [gatewayHost, setGatewayHost] = useState("");
+  const [gatewayHost, setGatewayHost] = useState("https://api.exness.com");
   const [candidateAccountIds, setCandidateAccountIds] = useState("149827361, 460310009");
   const [accountTier, setAccountTier] = useState("STANDARD");
   const [accountLabel, setAccountLabel] = useState("");
@@ -99,7 +99,7 @@ export default function ExchangeConnectionsView({
     setStatusMsg(null);
     setApiKey("");
     setApiSecret("");
-    setGatewayHost("");
+    setGatewayHost("https://api.exness.com");
     setCandidateAccountIds("149827361, 460310009");
     setAccountLabel("");
     setIsModalOpen(true);
@@ -740,30 +740,62 @@ export default function ExchangeConnectionsView({
               </div>
 
               {/* Gateway Host URL */}
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-[10px] uppercase text-[#64748B] block font-bold">
                     Gateway Host URL (From Key Management DNS Widget)
                   </label>
-                  <span className="text-[10px] text-amber-400 font-mono font-bold">DNS Widget Target</span>
+                  <span className="text-[10px] text-[#38BDF8] font-mono font-bold">Official DNS Host</span>
                 </div>
+
+                {/* Host Quick Select Presets */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setGatewayHost("https://api.exness.com")}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-mono transition-colors cursor-pointer ${
+                      gatewayHost === "https://api.exness.com"
+                        ? "bg-[#38BDF8]/20 text-[#38BDF8] border border-[#38BDF8]/40 font-bold"
+                        : "bg-[#151C28] text-[#94A3B8] border border-[#1E2736] hover:text-white"
+                    }`}
+                  >
+                    Main DNS: api.exness.com
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGatewayHost("https://api.exness-api.com")}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-mono transition-colors cursor-pointer ${
+                      gatewayHost === "https://api.exness-api.com"
+                        ? "bg-[#38BDF8]/20 text-[#38BDF8] border border-[#38BDF8]/40 font-bold"
+                        : "bg-[#151C28] text-[#94A3B8] border border-[#1E2736] hover:text-white"
+                    }`}
+                  >
+                    Alternative DNS: api.exness-api.com
+                  </button>
+                </div>
+
                 <input
                   type="text"
                   value={gatewayHost}
                   onChange={(e) => setGatewayHost(e.target.value)}
-                  placeholder="https://gateway-xxx.exness.com"
+                  placeholder="https://api.exness.com"
                   required
                   className="w-full px-3 py-2 rounded-lg bg-[#151C28] border border-[#1E2736] text-[#38BDF8] focus:outline-none focus:border-[#38BDF8] font-mono text-xs"
                 />
                 <div className="p-2.5 rounded-lg bg-[#151C28]/80 border border-[#1E2736] text-[10px] text-[#94A3B8] space-y-1">
-                  <p className="text-amber-300 font-bold">
-                    Where to find your Gateway Host in Exness:
+                  <p className="text-[#38BDF8] font-bold">
+                    Exness Key Management DNS Widget Hostnames:
                   </p>
                   <p>
-                    Log into <strong>Exness Personal Area</strong> &rarr; <strong>Settings</strong> &rarr; <strong>API</strong> &rarr; <strong>Key Management</strong> &rarr; <strong>DNS Widget</strong>. Copy the assigned gateway URL (e.g. <code>https://gateway-xxx.exness.com</code>).
+                    Log into <strong>Exness Personal Area</strong> &rarr; <strong>Settings</strong> &rarr; <strong>API</strong> &rarr; <strong>Key Management</strong> &rarr; <strong>DNS Widget</strong>:
                   </p>
-                  <p className="text-rose-400">
-                    &bull; Do NOT use <code>https://www.exness-api.com</code> (documentation portal).
+                  <div className="text-[#F1F5F9] font-mono space-y-0.5 pl-2">
+                    <p>&bull; <strong>Main DNS:</strong> <code>https://api.exness.com</code></p>
+                    <p>&bull; <strong>Alternative DNS:</strong> <code>https://api.exness-api.com</code></p>
+                    <p>&bull; <strong>Cluster Gateway:</strong> <code>https://gateway-xxx.exness.com</code></p>
+                  </div>
+                  <p className="text-[#64748B] pt-0.5">
+                    BITDEX directly invokes signed discovery (<code>GET /v1/trading/access-point?account_id=...</code>) with full Ed25519 authentication and resolves your dynamic trading cluster automatically.
                   </p>
                 </div>
               </div>

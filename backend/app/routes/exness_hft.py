@@ -594,6 +594,9 @@ async def connect_exness_real(
             detail={
                 "status": "FAILED",
                 "reason": reason,
+                "error_type": conn_res.get("error_type", "AUTHENTICATION_FAILED"),
+                "http_status": conn_res.get("http_status"),
+                "exness_code": conn_res.get("exness_code"),
                 "broker_result": conn_res,
             }
         )
@@ -780,6 +783,8 @@ async def attach_and_discover_accounts(
                 "account_id_masked": mask_id(f["account_id"]),
                 "error_type": f.get("error_type"),
                 "error_detail": f.get("error_detail"),
+                "http_status": f.get("http_status"),
+                "exness_code": f.get("exness_code"),
                 "verification_status": "FAILED",
             })
 
