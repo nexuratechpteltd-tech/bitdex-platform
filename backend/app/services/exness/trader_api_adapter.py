@@ -243,7 +243,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         path: str,
         body: Optional[Union[str, bytes, dict]] = None,
         idempotency_key: str = "",
-        sign_mode: str = "BASE64_DATA",
+        sign_mode: str = "PAYLOAD_BYTES",
     ) -> Dict[str, str]:
         """
         Generates official Exness Ed25519 signed request headers.
@@ -251,7 +251,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         - Assembles payload object with api_key, idempotency_key, timestamp, sign_version (int), method, path, body_hash
         - Generates SHA-256 Base64URL body hash (EMPTY_BODY_HASH_B64URL for GET requests)
         - Serializes compact JSON bytes (ensure_ascii=False, no extra spaces)
-        - Signs either raw JSON bytes (default spec) or Base64URL ASCII string (fallback compatibility)
+        - Signs the raw decoded UTF-8 JSON bytes of EXN-DATA (default official spec)
         """
         # 1. Compute SHA-256 body hash encoded in Base64URL
         if body is None or (isinstance(body, (str, bytes)) and len(body) == 0):
@@ -281,12 +281,12 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         data_json_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         exn_data_b64url = base64url_encode(data_json_bytes)
 
-        # 3. Generate Ed25519 signature
+        # 3. Generate Ed25519 signature over raw UTF-8 JSON payload bytes
         if self._private_key:
-            if sign_mode == "PAYLOAD_BYTES":
-                signature = self._private_key.sign(data_json_bytes)
-            else:
+            if sign_mode == "BASE64_DATA":
                 signature = self._private_key.sign(exn_data_b64url.encode("utf-8"))
+            else:
+                signature = self._private_key.sign(data_json_bytes)
             exn_sign_b64url = base64url_encode(signature)
         else:
             exn_sign_b64url = "UNCONFIGURED_KEY_SIGNATURE"
@@ -348,7 +348,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
         # 2. Build signed GET request directly to official discovery endpoint
         path = f"/v1/trading/access-point?account_id={target_id}"
-        headers = self.sign_request("GET", path, idempotency_key="", sign_mode="BASE64_DATA")
+        headers = self.sign_request("GET", path, idempotency_key="", sign_mode="PAYLOAD_BYTES")
 
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
@@ -359,7 +359,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                     try:
                         j_try = res.json()
                         if j_try.get("code") == 1001 or j_try.get("error_message") == "AUTH_INVALID_SIGNATURE":
-                            headers_alt = self.sign_request("GET", path, idempotency_key="", sign_mode="PAYLOAD_BYTES")
+                            headers_alt = self.sign_request("GET", path, idempotency_key="", sign_mode="BASE64_DATA")
                             res_alt = await client.get(f"{base}{path}", headers=headers_alt)
                             if res_alt.status_code == 200:
                                 res = res_alt
@@ -503,6 +503,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 res = await client.get(f"{target_api}{path}", headers=headers)
+                if res.status_code == 404:
+                    alt_path = f"/v1/trading/accounts/{self.account_id}"
+                    alt_headers = self.sign_request("GET", alt_path, idempotency_key="")
+                    res = await client.get(f"{target_api}{alt_path}", headers=alt_headers)
                 ct = res.headers.get("content-type", "").lower()
                 is_html = "text/html" in ct or res.text.strip().startswith("<!DOCTYPE") or res.text.strip().startswith("<html")
                 json_data = None
@@ -578,69 +582,14 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
     async def attempt_account_enumeration(self) -> Dict[str, Any]:
         """
-        Probes official Exness Trader API enumeration endpoints via signed Ed25519 requests:
-        - GET /v1/accounts
-        - GET /v1/trading/accounts
-        - GET /v1/configuration/accounts
-        Extracts all authorized account IDs as strings (preserving UInt64 precision).
+        Documented Exness Trader API limitation:
+        Exness Trader API does not expose a zero-input account enumeration endpoint;
+        account discovery requires explicit account_id routing via GET /v1/trading/access-point?account_id={id}.
         """
-        base = self.discovery_base_url
-        parsed = urllib.parse.urlparse(base)
-        host = parsed.hostname or base
-
-        try:
-            socket.gethostbyname(host)
-        except Exception as e:
-            return {
-                "supported": False,
-                "error_type": "DNS_FAILURE",
-                "detail": f"Gateway host '{host}' DNS unresolvable: {e}",
-                "accounts": []
-            }
-
-        candidate_paths = [
-            "/v1/accounts",
-            "/v1/trading/accounts",
-            "/v1/configuration/accounts"
-        ]
-
-        for p in candidate_paths:
-            headers = self.sign_request("GET", p, idempotency_key="")
-            try:
-                async with httpx.AsyncClient(timeout=4.0) as client:
-                    res = await client.get(f"{base}{p}", headers=headers)
-                    if res.status_code == 200:
-                        ct = res.headers.get("content-type", "").lower()
-                        if "json" in ct:
-                            data = res.json()
-                            raw_list = []
-                            if isinstance(data, list):
-                                raw_list = data
-                            elif isinstance(data, dict):
-                                raw_list = data.get("accounts") or data.get("items") or data.get("data") or []
-
-                            extracted_ids = []
-                            for it in raw_list:
-                                if isinstance(it, (str, int)):
-                                    extracted_ids.append(str(it))
-                                elif isinstance(it, dict):
-                                    aid = it.get("account_id") or it.get("id") or it.get("login")
-                                    if aid:
-                                        extracted_ids.append(str(aid))
-
-                            if extracted_ids:
-                                return {
-                                    "supported": True,
-                                    "endpoint": p,
-                                    "accounts": extracted_ids
-                                }
-            except Exception:
-                pass
-
         return {
             "supported": False,
             "error_type": "ENUMERATION_UNSUPPORTED",
-            "detail": "Exness Trader API key requires explicit account routing. Enumeration endpoint not exposed.",
+            "detail": "Exness Trader API requires explicit account_id routing for Access Point discovery.",
             "accounts": []
         }
 
@@ -652,11 +601,11 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         """
         Authenticates an individual Exness account independently:
         1. Resolves dynamic Access Point via GET /v1/trading/access-point?account_id={id}
-        2. Queries account details via GET /v1/configuration/accounts/{id}/account
-        3. Queries balance and margin via GET /v1/accounts/{id}/balance
+        2. Queries account details via GET /v1/configuration/accounts/{id}/account (or /v1/trading/accounts/{id})
+        3. Queries balance and margin via GET /v1/accounts/{id}/balance (or /v1/trading/accounts/{id}/balance)
         4. Queries read-only trading state via GET /v1/trading/positions?account_id={id}
-        5. Authoritatively classifies DEMO vs REAL
-        6. Returns structured status with exact error mapping
+        5. Authoritatively classifies DEMO vs REAL only from provider metadata (or marks ENVIRONMENT UNVERIFIED)
+        6. Identifies account_tier only if explicitly returned by provider (otherwise Exness Native)
         """
         clean_id = str(target_account_id).strip()
         if not clean_id:
@@ -699,7 +648,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
         target_ap = disc.get("access_point") or self.discovery_base_url
 
-        # Step 2: Account Details GET /v1/configuration/accounts/{id}/account
+        # Step 2: Account Details GET /v1/configuration/accounts/{id}/account (fallback /v1/trading/accounts/{id})
         acct_path = f"/v1/configuration/accounts/{clean_id}/account"
         acct_headers = self.sign_request("GET", acct_path, idempotency_key="")
         acct_data: Dict[str, Any] = {}
@@ -707,6 +656,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 res = await client.get(f"{target_ap}{acct_path}", headers=acct_headers)
+                if res.status_code == 404:
+                    alt_acct_path = f"/v1/trading/accounts/{clean_id}"
+                    alt_acct_headers = self.sign_request("GET", alt_acct_path, idempotency_key="")
+                    res = await client.get(f"{target_ap}{alt_acct_path}", headers=alt_acct_headers)
                 ct = res.headers.get("content-type", "").lower()
                 json_data = None
                 if "json" in ct:
@@ -780,7 +733,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 "access_point": target_ap,
             }
 
-        # Step 3: Authoritative Balance / Margin Reading: GET /v1/accounts/{id}/balance
+        # Step 3: Authoritative Balance / Margin Reading: GET /v1/accounts/{id}/balance (fallback /v1/trading/accounts/{id}/balance)
         bal_path = f"/v1/accounts/{clean_id}/balance"
         bal_headers = self.sign_request("GET", bal_path, idempotency_key="")
         balance = 0.0
@@ -791,6 +744,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 bres = await client.get(f"{target_ap}{bal_path}", headers=bal_headers)
+                if bres.status_code != 200:
+                    alt_bal_path = f"/v1/trading/accounts/{clean_id}/balance"
+                    alt_bal_headers = self.sign_request("GET", alt_bal_path, idempotency_key="")
+                    bres = await client.get(f"{target_ap}{alt_bal_path}", headers=alt_bal_headers)
                 if bres.status_code == 200:
                     bdata = bres.json()
                     balance = float(bdata.get("balance", bdata.get("wallet_balance", 0.0)))
@@ -820,22 +777,29 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             pass
 
         # Step 5: Authoritative DEMO vs REAL Classification
-        trade_mode = str(acct_data.get("trade_mode", acct_data.get("mode", ""))).upper()
+        trade_mode = str(acct_data.get("trade_mode", acct_data.get("mode", acct_data.get("environment", "")))).upper()
         is_demo_val = acct_data.get("is_demo")
         is_real_val = acct_data.get("is_real")
 
         if trade_mode in ("DEMO", "TRIAL") or is_demo_val is True or "TRIAL" in str(acct_data.get("server", "")).upper():
             env = "DEMO"
             env_confirmed = "PROVIDER_VERIFIED"
-        elif trade_mode == "REAL" or is_real_val is True:
+        elif trade_mode in ("REAL", "LIVE") or is_real_val is True:
             env = "REAL"
             env_confirmed = "PROVIDER_VERIFIED"
         elif manual_env and manual_env.upper() in ("DEMO", "REAL"):
             env = manual_env.upper()
             env_confirmed = "MANUALLY_CONFIRMED"
         else:
-            env = "UNKNOWN"
-            env_confirmed = "UNCONFIRMED"
+            env = "ENVIRONMENT UNVERIFIED"
+            env_confirmed = "UNVERIFIED"
+
+        # Step 6: Account Tier Classification (only if explicitly returned by provider)
+        raw_tier = str(acct_data.get("account_type") or acct_data.get("tier") or acct_data.get("group") or "").strip()
+        if raw_tier and raw_tier.upper() in ("STANDARD", "PRO", "RAW_SPREAD", "RAW SPREAD", "ZERO"):
+            account_tier = raw_tier.replace("_", " ").title()
+        else:
+            account_tier = "Exness Native"
 
         return {
             "account_id": clean_id,
@@ -843,6 +807,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "environment": env,
             "environment_confirmed_by": env_confirmed,
             "trade_mode": trade_mode or env,
+            "account_tier": account_tier,
             "account_name": str(acct_data.get("account_name", acct_data.get("name", ""))),
             "currency": str(acct_data.get("currency", "USD")),
             "leverage": int(acct_data.get("leverage", 200)),
@@ -863,34 +828,17 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
     ) -> Dict[str, Any]:
         """
         Executes complete discovery workflow:
-        1. Attempts official API account enumeration
-        2. Merges enumerated accounts with registered candidates
-        3. Independently authenticates each account
-        4. Partitions into DEMO, REAL, and FAILED
+        1. Accepts one or more explicit candidate account IDs
+        2. Independently authenticates each account via official two-stage routing
+        3. Partitions into DEMO, REAL, and FAILED
         """
         manual_envs = manual_environments or {}
 
-        # 1. Enumerate
-        enum_res = await self.attempt_account_enumeration()
-        discovered_ids = list(enum_res.get("accounts", []))
-
-        # 2. Combine with candidate IDs (preserve strings, deduplicate)
         all_ids: List[str] = []
-        for aid in discovered_ids:
-            s = str(aid).strip()
-            if s and s not in all_ids:
-                all_ids.append(s)
-
         for aid in (candidate_account_ids or []):
             s = str(aid).strip()
             if s and s not in all_ids:
                 all_ids.append(s)
-
-        # If empty, include known default admin targets
-        if not all_ids:
-            for d in ["149827361", "460310009"]:
-                if d not in all_ids:
-                    all_ids.append(d)
 
         demo_accounts = []
         real_accounts = []
@@ -902,15 +850,18 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             if auth_res.get("verified"):
                 if auth_res.get("environment") == "DEMO":
                     demo_accounts.append(auth_res)
-                else:
+                elif auth_res.get("environment") == "REAL":
                     real_accounts.append(auth_res)
+                else:
+                    # ENVIRONMENT UNVERIFIED: keep in demo_accounts list for display with ENVIRONMENT UNVERIFIED badge or separate
+                    demo_accounts.append(auth_res)
             else:
                 failed_accounts.append(auth_res)
 
         return {
-            "enumeration_supported": enum_res.get("supported", False),
-            "enumeration_endpoint": enum_res.get("endpoint"),
-            "enumeration_detail": enum_res.get("detail", ""),
+            "enumeration_supported": False,
+            "enumeration_endpoint": None,
+            "enumeration_detail": "Exness Trader API requires explicit account_id routing via GET /v1/trading/access-point?account_id={id}.",
             "all_account_ids_tested": all_ids,
             "demo_accounts": demo_accounts,
             "real_accounts": real_accounts,

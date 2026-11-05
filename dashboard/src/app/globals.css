@@ -69,3 +69,65 @@ pre,
   border: 1px solid #1E2736;
   border-radius: 4px;
 }
+
+/* ============================================================================
+ * MOBILE & TABLET RESPONSIVE REDESIGN (Strictly Scoped to < 1024px)
+ * Desktop layouts at 1440px and 1920px remain 100% visually & functionally unchanged.
+ * ============================================================================ */
+@media screen and (max-width: 1023px) {
+  html,
+  body {
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+
+  /* Responsive Card-Table Transformation for Mobile Viewports (320px - 430px) */
+  table.bitdex-responsive-table-cards {
+    display: block;
+    width: 100%;
+  }
+
+  table.bitdex-responsive-table-cards thead {
+    display: none;
+  }
+
+  table.bitdex-responsive-table-cards tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+  }
+
+  table.bitdex-responsive-table-cards tbody tr {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background-color: #0E131B;
+    border: 1px solid #1E2736;
+    border-radius: 10px;
+    padding: 12px;
+  }
+
+  table.bitdex-responsive-table-cards tbody td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 0 !important;
+    border: none !important;
+    text-align: right !important;
+    word-break: break-word;
+  }
+
+  table.bitdex-responsive-table-cards tbody td::before {
+    content: attr(data-label);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748B;
+    text-align: left;
+    flex-shrink: 0;
+  }
+}
+

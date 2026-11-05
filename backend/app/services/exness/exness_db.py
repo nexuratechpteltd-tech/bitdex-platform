@@ -224,6 +224,7 @@ def apply_exness_migrations(conn: sqlite3.Connection) -> None:
             ("environment_confirmed_by", "TEXT DEFAULT ''"),
             ("access_point", "TEXT DEFAULT ''"),
             ("api_key", "TEXT DEFAULT ''"),
+            ("account_tier", "TEXT DEFAULT 'Exness Native'"),
         ]
         for c_name, c_type in new_cols_defs:
             if c_name not in columns:
@@ -243,20 +244,21 @@ def get_user_exness_connection(
     Retrieves the active Exness connection for a user with strict tenant isolation.
     Prioritizes connection_id if supplied, then preferred account, then latest updated.
     Guarantees no user can access another user's Exness connection.
+    Excludes DETERMINISTIC_MOCK_DEMO seed accounts.
     """
     if connection_id:
         row = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1",
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'",
             (user_id, connection_id),
         ).fetchone()
     elif account_type:
         row = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 ORDER BY is_preferred DESC, updated_at DESC LIMIT 1",
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY is_preferred DESC, updated_at DESC LIMIT 1",
             (user_id, account_type.upper()),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY is_preferred DESC, updated_at DESC LIMIT 1",
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY is_preferred DESC, updated_at DESC LIMIT 1",
             (user_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -265,15 +267,15 @@ def get_user_exness_connection(
 def get_all_user_exness_connections(
     conn: sqlite3.Connection, user_id: str, account_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """Retrieves all active Exness connections for a user, isolated by user_id."""
+    """Retrieves all active genuine Exness connections for a user, isolated by user_id."""
     if account_type:
         rows = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 ORDER BY is_preferred DESC, updated_at DESC",
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY is_preferred DESC, updated_at DESC",
             (user_id, account_type.upper()),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY account_type ASC, is_preferred DESC, updated_at DESC",
+            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY account_type ASC, is_preferred DESC, updated_at DESC",
             (user_id,),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -360,6 +362,7 @@ def save_exness_connection(
     environment_confirmed_by: str = "",
     access_point: str = "",
     api_key: str = "",
+    account_tier: str = "Exness Native",
 ) -> str:
     """Creates or updates an Exness connection with explicit tenant isolation, preference, and verification tracking."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -391,7 +394,7 @@ def save_exness_connection(
                     verification_status = ?, error_type = ?, error_detail = ?,
                     trade_mode = ?, margin_used = ?, margin_free = ?,
                     environment_confirmed_by = ?, access_point = ?, api_key = ?,
-                    last_reconciled_at = ?
+                    account_tier = ?, last_reconciled_at = ?
                 WHERE connection_id = ? AND user_id = ?
                 """,
                 (
@@ -414,6 +417,7 @@ def save_exness_connection(
                     environment_confirmed_by,
                     access_point,
                     api_key,
+                    account_tier,
                     final_reconciled,
                     conn_id,
                     user_id,
@@ -429,8 +433,8 @@ def save_exness_connection(
                     equity_usd, leverage, currency, account_label, is_preferred,
                     verification_status, error_type, error_detail, trade_mode,
                     margin_used, margin_free, environment_confirmed_by, access_point,
-                    api_key, last_reconciled_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    api_key, account_tier, last_reconciled_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conn_id,
@@ -455,6 +459,7 @@ def save_exness_connection(
                     environment_confirmed_by,
                     access_point,
                     api_key,
+                    account_tier,
                     reconciled_at,
                     now,
                     now,

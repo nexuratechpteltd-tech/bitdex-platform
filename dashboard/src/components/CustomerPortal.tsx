@@ -1529,9 +1529,9 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
             <button
               type="button"
               onClick={() => setIsSearchOpen(true)}
-              className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] hover:border-[#38BDF8] text-xs font-mono text-[#94A3B8] transition-all cursor-pointer min-w-[160px] sm:min-w-[240px]"
+              className="flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] hover:border-[#38BDF8] text-xs font-mono text-[#94A3B8] transition-all cursor-pointer min-w-[110px] sm:min-w-[240px]"
             >
-              <Search className="w-3.5 h-3.5 text-[#38BDF8]" />
+              <Search className="w-3.5 h-3.5 text-[#38BDF8] shrink-0" />
               <span className="truncate">Search instrument...</span>
               <span className="hidden sm:inline-block ml-auto text-[10px] px-1.5 py-0.2 rounded bg-[#0E131B] text-[#64748B] border border-[#1E2736]">
                 Ctrl+K
@@ -1541,11 +1541,18 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {/* Right: Broker Pill, Environment Badge & User Menu */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Exness Connection Pill (Truthful Disconnected State) */}
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#EF4444]/15 text-[#EF4444] border border-[#EF4444]/30 text-xs font-mono font-bold">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#EF4444]" />
-              <span>EXNESS: NOT CONNECTED</span>
-            </div>
+            {/* Exness Connection Pill (Truthful Status based on verified accounts) */}
+            {connections && connections.some((c: any) => c.verification_status === "VERIFIED" && c.exchange === "EXNESS") ? (
+              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 text-xs font-mono font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
+                <span>EXNESS: CONNECTED</span>
+              </div>
+            ) : (
+              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#EF4444]/15 text-[#EF4444] border border-[#EF4444]/30 text-xs font-mono font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#EF4444]" />
+                <span>EXNESS: NOT CONNECTED</span>
+              </div>
+            )}
 
             {/* Duplicate top-right Admin Portal button removed (preserved in sidebar and profile dropdown) */}
 

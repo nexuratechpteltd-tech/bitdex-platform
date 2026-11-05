@@ -1,0 +1,145 @@
+{
+  "customer-terminal": {
+    "mobile": {
+      "320": {
+        "scrollWidth": 320,
+        "clientWidth": 320,
+        "bodyScrollWidth": 320
+      },
+      "360": {
+        "scrollWidth": 360,
+        "clientWidth": 360,
+        "bodyScrollWidth": 360
+      },
+      "375": {
+        "scrollWidth": 375,
+        "clientWidth": 375,
+        "bodyScrollWidth": 375
+      },
+      "390": {
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "bodyScrollWidth": 390
+      },
+      "414": {
+        "scrollWidth": 414,
+        "clientWidth": 414,
+        "bodyScrollWidth": 414
+      },
+      "430": {
+        "scrollWidth": 430,
+        "clientWidth": 430,
+        "bodyScrollWidth": 430
+      }
+    },
+    "desktop": {
+      "1440": {
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "bodyScrollWidth": 1440
+      },
+      "1920": {
+        "scrollWidth": 1920,
+        "clientWidth": 1920,
+        "bodyScrollWidth": 1920
+      }
+    }
+  },
+  "admin-terminal": {
+    "mobile": {
+      "320": {
+        "scrollWidth": 320,
+        "clientWidth": 320,
+        "bodyScrollWidth": 320
+      },
+      "360": {
+        "scrollWidth": 360,
+        "clientWidth": 360,
+        "bodyScrollWidth": 360
+      },
+      "375": {
+        "scrollWidth": 375,
+        "clientWidth": 375,
+        "bodyScrollWidth": 375
+      },
+      "390": {
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "bodyScrollWidth": 390
+      },
+      "414": {
+        "scrollWidth": 414,
+        "clientWidth": 414,
+        "bodyScrollWidth": 414
+      },
+      "430": {
+        "scrollWidth": 430,
+        "clientWidth": 430,
+        "bodyScrollWidth": 430
+      }
+    },
+    "desktop": {
+      "1440": {
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "bodyScrollWidth": 1440
+      },
+      "1920": {
+        "scrollWidth": 1920,
+        "clientWidth": 1920,
+        "bodyScrollWidth": 1920
+      }
+    }
+  },
+  "admin-settings": {
+    "mobile": {
+      "320": {
+        "scrollWidth": 320,
+        "clientWidth": 320,
+        "bodyScrollWidth": 320
+      },
+      "360": {
+        "scrollWidth": 360,
+        "clientWidth": 360,
+        "bodyScrollWidth": 360
+      },
+      "375": {
+        "scrollWidth": 375,
+        "clientWidth": 375,
+        "bodyScrollWidth": 375
+      },
+      "390": {
+        "scrollWidth": 390,
+        "clientWidth": 390,
+        "bodyScrollWidth": 390
+      },
+      "414": {
+        "scrollWidth": 414,
+        "clientWidth": 414,
+        "bodyScrollWidth": 414
+      },
+      "430": {
+        "scrollWidth": 430,
+        "clientWidth": 430,
+        "bodyScrollWidth": 430
+      }
+    },
+    "desktop": {
+      "1440": {
+        "scrollWidth": 1440,
+        "clientWidth": 1440,
+        "bodyScrollWidth": 1440
+      },
+      "1920": {
+        "scrollWidth": 1920,
+        "clientWidth": 1920,
+        "bodyScrollWidth": 1920
+      }
+    }
+  },
+  "consoleErrors": [],
+  "pageErrors": [],
+  "interactiveChecks": {
+    "hftDropdownEmptyState": ""
+  }
+}

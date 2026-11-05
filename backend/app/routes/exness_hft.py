@@ -125,7 +125,7 @@ class ExnessRealConnectRequest(BaseModel):
 class ExnessAttachDiscoverRequest(BaseModel):
     api_key: str = Field(..., min_length=4, max_length=128, description="Exness Trader API Key from Personal Area")
     api_secret: str = Field(..., min_length=16, description="Ed25519 private key string or hex seed")
-    gateway_host: str = Field(..., min_length=8, description="Gateway Base URL from Exness Key Management DNS Widget")
+    gateway_host: str = Field(default="https://api.exness.com", description="Gateway Base URL from Exness Key Management DNS Widget")
     account_ids: Optional[List[str]] = Field(default=None, description="Candidate account IDs to authenticate (e.g. ['149827361', '460310009'])")
     account_tier: str = Field(default="STANDARD", description="Account tier: STANDARD, PRO, RAW_SPREAD, ZERO")
     manual_environments: Optional[Dict[str, str]] = Field(default=None, description="Optional explicit DEMO/REAL mapping per account ID")
@@ -263,37 +263,43 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         if not c:
             return None
         v_status = c.get("verification_status") or ("VERIFIED" if c.get("last_reconciled_at") else "NOT_TESTED")
+        is_verified = (v_status == "VERIFIED")
+        env_raw = c.get("account_type") or "ENVIRONMENT UNVERIFIED"
+        env_display = env_raw if is_verified and env_raw in ("DEMO", "REAL") else "ENVIRONMENT UNVERIFIED"
+        tier_raw = c.get("account_tier") or ""
+        tier_display = tier_raw if (is_verified and tier_raw and tier_raw not in ("STANDARD", "UNVERIFIED")) else ("Exness Native" if is_verified else "UNVERIFIED")
         return {
             "connection_id": c["connection_id"],
             "account_login": mask_id(c["account_login"]),
             "account_login_raw": str(c["account_login"]),
             "server_name": c["server_name"],
-            "account_type": c["account_type"],
-            "adapter_mode": c.get("adapter_mode", "EXNESS_MT5_GATEWAY"),
-            "account_label": c.get("account_label") or (f"Exness Demo ({c['account_login']})" if c["account_type"] == "DEMO" else f"Exness Real ({c['account_login']})"),
+            "account_type": env_display,
+            "account_tier": tier_display,
+            "adapter_mode": c.get("adapter_mode", "EXNESS_TRADER_API"),
+            "account_label": c.get("account_label") or (f"Exness {env_display.title()} ({mask_id(c['account_login'])})" if is_verified else f"Exness Unverified ({mask_id(c['account_login'])})"),
             "is_preferred": bool(c.get("is_preferred", 0)),
-            "balance_usd": c["balance_usd"],
-            "equity_usd": c["equity_usd"],
-            "margin_used": c.get("margin_used", 0.0),
-            "margin_free": c.get("margin_free", 0.0),
-            "trade_mode": c.get("trade_mode") or c["account_type"],
+            "balance_usd": c["balance_usd"] if is_verified else None,
+            "equity_usd": c["equity_usd"] if is_verified else None,
+            "margin_used": c.get("margin_used", 0.0) if is_verified else None,
+            "margin_free": c.get("margin_free", 0.0) if is_verified else None,
+            "trade_mode": c.get("trade_mode") or env_display,
             "verification_status": v_status,
             "error_type": c.get("error_type") or "",
             "error_detail": c.get("error_detail") or "",
-            "environment_confirmed_by": c.get("environment_confirmed_by") or ("PROVIDER_VERIFIED" if v_status == "VERIFIED" else "UNCONFIRMED"),
+            "environment_confirmed_by": c.get("environment_confirmed_by") or ("PROVIDER_VERIFIED" if is_verified else "UNVERIFIED"),
             "access_point": c.get("access_point") or "",
-            "currency": c.get("currency", "USD"),
+            "currency": c.get("currency", "USD") if is_verified else "—",
             "is_active": bool(c.get("is_active", 1)),
             "last_reconciled_at": c["last_reconciled_at"],
             "data_source": "Exness REST/WS Gateway" if c.get("adapter_mode") == "EXNESS_TRADER_API" else "Windows MT5 IPC Bridge",
         }
 
-    has_any_connected = bool(demo_conn or real_conn or trader_conn)
-
-    formatted_all = [format_conn(c) for c in all_conns]
-    exness_demos = [c for c in formatted_all if c and c["account_type"] == "DEMO"]
-    exness_reals = [c for c in formatted_all if c and c["account_type"] == "REAL"]
-    failed_conns = [c for c in formatted_all if c and c.get("verification_status") in ("FAILED", "ERROR")]
+    formatted_all = [format_conn(c) for c in all_conns if c]
+    verified_all = [c for c in formatted_all if c.get("verification_status") == "VERIFIED"]
+    exness_demos = [c for c in verified_all if c["account_type"] == "DEMO"]
+    exness_reals = [c for c in verified_all if c["account_type"] == "REAL"]
+    failed_conns = [c for c in formatted_all if c.get("verification_status") in ("FAILED", "ERROR", "NOT_TESTED")]
+    has_any_verified = len(verified_all) > 0
 
     return {
         "status": "SUCCESS",
@@ -301,22 +307,20 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         "environments_supported": ["DEMO", "REAL"],
         "live_trading_locked": True,
         "emergency_lock_active": True,
-        "adapter_connected": has_any_connected,
-        "broker_authenticated": bool(
-            (demo_conn and (demo_conn.get("verification_status") == "VERIFIED" or conn_demo_status.get("broker_authenticated"))) or
-            (real_conn and (real_conn.get("verification_status") == "VERIFIED" or conn_real_status.get("broker_authenticated"))) or
-            (trader_conn and trader_conn.get("verification_status") == "VERIFIED")
-        ),
-        "is_mock": False if real_conn or trader_conn else (conn_demo_status.get("is_mock", True) if demo_conn else False),
-        "broker_mode": demo_conn.get("adapter_mode") if demo_conn else "NONE",
-        "is_connected": has_any_connected,
-        "active_demo_connection": format_conn(demo_conn),
-        "active_real_connection": format_conn(real_conn),
-        "active_trader_connection": format_conn(trader_conn),
+        "read_only_mode": True,
+        "adapter_connected": has_any_verified,
+        "broker_authenticated": has_any_verified,
+        "is_mock": False,
+        "broker_mode": "EXNESS_TRADER_API" if has_any_verified else "NONE",
+        "is_connected": has_any_verified,
+        "active_demo_connection": exness_demos[0] if exness_demos else None,
+        "active_real_connection": exness_reals[0] if exness_reals else None,
+        "active_trader_connection": verified_all[0] if verified_all else None,
         "all_connections": formatted_all,
-        "demo_connections": [c for c in formatted_all if c and c["account_type"] == "DEMO" and c.get("adapter_mode") != "EXNESS_TRADER_API"],
-        "real_connections": [c for c in formatted_all if c and c["account_type"] == "REAL" and c.get("adapter_mode") != "EXNESS_TRADER_API"],
-        "trader_connections": [c for c in formatted_all if c and c.get("adapter_mode") == "EXNESS_TRADER_API"],
+        "verified_accounts": verified_all,
+        "demo_connections": [c for c in exness_demos if c.get("adapter_mode") != "EXNESS_TRADER_API"],
+        "real_connections": [c for c in exness_reals if c.get("adapter_mode") != "EXNESS_TRADER_API"],
+        "trader_connections": [c for c in verified_all if c.get("adapter_mode") == "EXNESS_TRADER_API"],
         "exness_demo_accounts": exness_demos,
         "exness_real_accounts": exness_reals,
         "failed_accounts": failed_conns,
@@ -609,21 +613,20 @@ async def attach_and_discover_accounts(
     user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Phase 19: Automatic Exness Demo & Real Account Discovery and Authentication.
+    Universal Exness API Connection & Automatic Multi-Account Discovery:
     1. Validates API key and Ed25519 private key.
-    2. Validates Gateway Host from Exness Key Management DNS widget.
-    3. Attempts official API account enumeration (GET /v1/accounts, /v1/trading/accounts).
-    4. If enumeration unsupported, registers and independently authenticates supplied candidate accounts.
-    5. Resolves dynamic Access Point per account (GET /v1/trading/access-point?account_id={id}).
-    6. Authenticates every authorized account separately (GET /v1/configuration/accounts/{id}/account).
-    7. Retrieves authoritative balance and margin (GET /v1/accounts/{id}/balance).
-    8. Classifies each account as DEMO or REAL using provider trade_mode or manual confirmation.
-    9. Persists each verified account separately in vault-backed storage.
+    2. Uses automatic Gateway Host (default https://api.exness.com or user-supplied advanced fallback).
+    3. Accepts one or more explicit Exness Trading Account IDs in the same workflow.
+    4. Resolves dynamic Access Point per account (GET /v1/trading/access-point?account_id={id}).
+    5. Authenticates every account independently and retrieves genuine metadata and balance.
+    6. Classifies DEMO vs REAL strictly from authoritative provider metadata (or marks ENVIRONMENT UNVERIFIED).
+    7. Identifies account tier strictly from provider metadata (or shows Exness Native).
+    8. Persists verified accounts and records failed accounts honestly without fabricating balances.
     """
     user_id = user["user_id"]
     api_key = req.api_key.strip()
     api_secret = req.api_secret.strip()
-    gateway_host = req.gateway_host.strip().rstrip("/")
+    gateway_host = (req.gateway_host or "https://api.exness.com").strip().rstrip("/")
     if not gateway_host.startswith("http://") and not gateway_host.startswith("https://"):
         gateway_host = f"https://{gateway_host}"
 
@@ -635,15 +638,21 @@ async def attach_and_discover_accounts(
             if s and s not in candidate_ids:
                 candidate_ids.append(s)
 
-    # Always ensure known admin accounts (149827361 Demo, 460310009 Real) are checked if not specified
     if not candidate_ids:
-        candidate_ids = ["149827361", "460310009"]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "status": "FAILED",
+                "error_type": "ACCOUNT_IDS_REQUIRED",
+                "error_detail": "Please enter one or more Exness Trading Account IDs to authenticate (Exness Trader API requires explicit account_id routing for Access Point discovery).",
+            },
+        )
 
     # Instantiate Exness Trader API Adapter
     adapter = ExnessTraderAPIAdapter(
         api_key=api_key,
         api_secret=api_secret,
-        account_id=candidate_ids[0] if candidate_ids else "149827361",
+        account_id=candidate_ids[0],
         discovery_base_url=gateway_host,
         account_tier=req.account_tier,
     )
@@ -660,14 +669,16 @@ async def attach_and_discover_accounts(
     persisted_failed = []
 
     try:
-        # Save verified DEMO accounts
+        # Save verified DEMO accounts (or ENVIRONMENT UNVERIFIED if provider did not specify)
         for d in disc_res.get("demo_accounts", []):
+            env_val = d.get("environment") or "ENVIRONMENT UNVERIFIED"
+            tier_val = d.get("account_tier") or "Exness Native"
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
                 login=d["account_id"],
                 password=api_secret,
                 server=gateway_host,
-                account_type="DEMO",
+                account_type=env_val,
             )
             cid = save_exness_connection(
                 conn=conn,
@@ -676,38 +687,41 @@ async def attach_and_discover_accounts(
                 server=gateway_host,
                 enc_credentials=enc,
                 adapter_mode="EXNESS_TRADER_API",
-                account_type="DEMO",
+                account_type=env_val,
                 balance=float(d.get("balance", 0.0)),
                 equity=float(d.get("equity", 0.0)),
                 leverage=int(d.get("leverage", 200)),
                 currency=d.get("currency", "USD"),
-                account_label=req.account_label or f"Exness Demo ({d['account_id']})",
+                account_label=req.account_label or f"Exness {env_val.title()} ({mask_id(d['account_id'])})",
                 is_preferred=1,
                 verification_status="VERIFIED",
-                trade_mode=d.get("trade_mode", "DEMO"),
+                trade_mode=d.get("trade_mode", env_val),
                 margin_used=float(d.get("margin_used", 0.0)),
                 margin_free=float(d.get("margin_free", 0.0)),
                 environment_confirmed_by=d.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
                 access_point=d.get("access_point", ""),
                 api_key=api_key,
+                account_tier=tier_val,
             )
             persisted_demo.append({
                 "connection_id": cid,
                 "account_id": d["account_id"],
                 "account_id_masked": mask_id(d["account_id"]),
-                "environment": "DEMO",
+                "environment": env_val,
+                "account_tier": tier_val,
                 "balance": d.get("balance", 0.0),
                 "equity": d.get("equity", 0.0),
                 "margin_used": d.get("margin_used", 0.0),
                 "margin_free": d.get("margin_free", 0.0),
                 "currency": d.get("currency", "USD"),
                 "verification_status": "VERIFIED",
-                "trade_mode": d.get("trade_mode", "DEMO"),
+                "trade_mode": d.get("trade_mode", env_val),
                 "access_point": d.get("access_point", ""),
             })
 
         # Save verified REAL accounts
         for r in disc_res.get("real_accounts", []):
+            tier_val = r.get("account_tier") or "Exness Native"
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
                 login=r["account_id"],
@@ -727,7 +741,7 @@ async def attach_and_discover_accounts(
                 equity=float(r.get("equity", 0.0)),
                 leverage=int(r.get("leverage", 200)),
                 currency=r.get("currency", "USD"),
-                account_label=req.account_label or f"Exness Real ({r['account_id']})",
+                account_label=req.account_label or f"Exness Real ({mask_id(r['account_id'])})",
                 is_preferred=1,
                 verification_status="VERIFIED",
                 trade_mode=r.get("trade_mode", "REAL"),
@@ -736,12 +750,14 @@ async def attach_and_discover_accounts(
                 environment_confirmed_by=r.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
                 access_point=r.get("access_point", ""),
                 api_key=api_key,
+                account_tier=tier_val,
             )
             persisted_real.append({
                 "connection_id": cid,
                 "account_id": r["account_id"],
                 "account_id_masked": mask_id(r["account_id"]),
                 "environment": "REAL",
+                "account_tier": tier_val,
                 "balance": r.get("balance", 0.0),
                 "equity": r.get("equity", 0.0),
                 "margin_used": r.get("margin_used", 0.0),
@@ -752,14 +768,14 @@ async def attach_and_discover_accounts(
                 "access_point": r.get("access_point", ""),
             })
 
-        # Record failed accounts (never fabricate verified status)
+        # Record failed accounts (never infer Demo vs Real from ID pattern or fabricate verified status)
         for f in disc_res.get("failed_accounts", []):
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
                 login=f["account_id"],
                 password=api_secret,
                 server=gateway_host,
-                account_type="DEMO" if f["account_id"] == "149827361" else "REAL",
+                account_type="ENVIRONMENT UNVERIFIED",
             )
             cid = save_exness_connection(
                 conn=conn,
@@ -768,19 +784,23 @@ async def attach_and_discover_accounts(
                 server=gateway_host,
                 enc_credentials=enc,
                 adapter_mode="EXNESS_TRADER_API",
-                account_type="DEMO" if f["account_id"] == "149827361" else "REAL",
+                account_type="ENVIRONMENT UNVERIFIED",
                 balance=0.0,
                 equity=0.0,
                 verification_status="FAILED",
                 error_type=f.get("error_type", "AUTHENTICATION_FAILED"),
                 error_detail=f.get("error_detail", "Authentication failed."),
+                environment_confirmed_by="UNVERIFIED",
                 api_key=api_key,
+                account_tier="UNVERIFIED",
                 is_preferred=0,
             )
             persisted_failed.append({
                 "connection_id": cid,
                 "account_id": f["account_id"],
                 "account_id_masked": mask_id(f["account_id"]),
+                "environment": "ENVIRONMENT UNVERIFIED",
+                "account_tier": "UNVERIFIED",
                 "error_type": f.get("error_type"),
                 "error_detail": f.get("error_detail"),
                 "http_status": f.get("http_status"),

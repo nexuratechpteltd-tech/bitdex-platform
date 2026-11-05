@@ -1,5 +1,6 @@
 "use client";
 import ProtectionCenter from "./ProtectionCenter";
+import ExchangeConnectionsView from "./dashboard/ExchangeConnectionsView";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
@@ -46,7 +47,8 @@ import {
   Settings,
   Layers,
   ChevronDown,
-  ArrowRight
+  ArrowRight,
+  Menu
 } from "lucide-react";
 
 interface AdminPanelProps {
@@ -90,8 +92,9 @@ export default function AdminPanel({
   onSwitchPortal,
 }: AdminPanelProps) {
   // Navigation
-  // Admin Profile Dropdown State
+  // Admin Profile Dropdown State & Mobile Navigation State
   const [isAdminDropdownOpen, setIsAdminDropdownOpen] = useState(false);
+  const [isAdminMobileNavOpen, setIsAdminMobileNavOpen] = useState(false);
   const adminDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -896,25 +899,35 @@ export default function AdminPanel({
   return (
     <div className="min-h-screen bg-[#0A0A0E] text-[#EAECEF] font-sans flex flex-col antialiased selection:bg-[#00E5FF]/20 selection:text-[#00E5FF]">
       {/* ─── TOP GOVERNANCE HEADER ─── */}
-      <header className="h-14 bg-[#121218] border-b border-[#272735] flex items-center justify-between px-6 z-30 sticky top-0">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-[#181822] border border-[#272735] flex items-center justify-center font-black text-sm tracking-wider">
+      <header className="h-14 bg-[#121218] border-b border-[#272735] flex items-center justify-between px-3 sm:px-6 z-30 sticky top-0">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+          <button
+            id="btn-admin-mobile-menu"
+            type="button"
+            onClick={() => setIsAdminMobileNavOpen(!isAdminMobileNavOpen)}
+            className="lg:hidden p-2 rounded-lg text-slate-300 hover:text-white hover:bg-[#181822] border border-[#272735]"
+            aria-label="Toggle Admin Navigation"
+          >
+            <Menu className="w-4 h-4" />
+          </button>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-[#181822] border border-[#272735] flex items-center justify-center font-black text-xs sm:text-sm tracking-wider">
               <span className="text-white">B</span>
               <span className="text-[#00E5FF]">X</span>
             </div>
             <div className="flex items-baseline">
-              <span className="font-extrabold text-base tracking-wider text-white">BIT</span>
-              <span className="font-extrabold text-base tracking-wider text-[#00E5FF]">DEX</span>
-              <span className="ml-2 text-[10px] font-semibold uppercase tracking-widest text-[#8B5CF6] px-1.5 py-0.5 rounded bg-[#8B5CF6]/10 border border-[#8B5CF6]/30">
+              <span className="font-extrabold text-sm sm:text-base tracking-wider text-white">BIT</span>
+              <span className="font-extrabold text-sm sm:text-base tracking-wider text-[#00E5FF]">DEX</span>
+              <span className="hidden sm:inline-block ml-1.5 sm:ml-2 text-[9px] sm:text-[10px] font-semibold uppercase tracking-widest text-[#8B5CF6] px-1.5 py-0.5 rounded bg-[#8B5CF6]/10 border border-[#8B5CF6]/30">
                 ADMIN
               </span>
             </div>
           </div>
 
-          <div className="h-4 w-px bg-[#272735]" />
+          <div className="hidden xl:block h-4 w-px bg-[#272735]" />
 
-          <div className="flex items-center gap-2 text-xs">
+          <div className="hidden xl:flex items-center gap-2 text-xs">
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#10B981]/10 text-[#10B981] border border-[#10B981]/25 font-mono text-[11px]">
               <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
               TENANT ISOLATION ACTIVE
@@ -925,17 +938,17 @@ export default function AdminPanel({
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {onSwitchPortal && (
             <button
               id="btn-switch-to-trading-terminal"
               onClick={onSwitchPortal}
-              className="text-xs px-3.5 py-1.5 rounded-lg bg-[#00E5FF]/15 hover:bg-[#00E5FF]/25 text-[#00E5FF] hover:text-white border border-[#00E5FF]/40 font-semibold transition flex items-center gap-2 cursor-pointer shadow-sm"
+              className="text-[11px] sm:text-xs px-2.5 sm:px-3.5 py-1.5 rounded-lg bg-[#00E5FF]/15 hover:bg-[#00E5FF]/25 text-[#00E5FF] hover:text-white border border-[#00E5FF]/40 font-semibold transition flex items-center gap-1.5 sm:gap-2 cursor-pointer shadow-sm"
               title="Switch to Customer Trading Terminal"
             >
-              <Activity className="w-4 h-4 text-[#00E5FF]" />
-              <span>Trading Terminal</span>
-              <ArrowRight className="w-3.5 h-3.5 text-[#00E5FF]/80" />
+              <Activity className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#00E5FF] shrink-0" />
+              <span className="hidden xs:inline sm:inline">Terminal</span>
+              <ArrowRight className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#00E5FF]/80 shrink-0" />
             </button>
           )}
 
@@ -943,7 +956,7 @@ export default function AdminPanel({
             <button
               id="btn-admin-profile-dropdown"
               onClick={() => setIsAdminDropdownOpen(!isAdminDropdownOpen)}
-              className="flex items-center gap-2.5 p-1.5 pl-2 rounded-lg bg-[#181822] border border-[#272735] hover:border-[#8B5CF6]/60 transition cursor-pointer select-none"
+              className="flex items-center gap-2 p-1.5 pl-2 rounded-lg bg-[#181822] border border-[#272735] hover:border-[#8B5CF6]/60 transition cursor-pointer select-none"
             >
               <div className="w-7 h-7 rounded-full bg-[#8B5CF6]/20 border border-[#8B5CF6]/40 flex items-center justify-center text-xs font-bold text-[#8B5CF6]">
                 {adminUser?.first_name?.[0] || adminUser?.email?.[0]?.toUpperCase() || "A"}
@@ -960,7 +973,7 @@ export default function AdminPanel({
             </button>
 
             {isAdminDropdownOpen && (
-              <div className="absolute right-0 mt-2 w-64 bg-[#121218] border border-[#272735] rounded-xl shadow-2xl py-2 z-50 text-xs font-sans animate-in fade-in duration-150">
+              <div className="absolute right-0 mt-2 w-64 max-w-[calc(100vw-24px)] bg-[#121218] border border-[#272735] rounded-xl shadow-2xl py-2 z-50 text-xs font-sans animate-in fade-in duration-150">
                 <div className="px-3 py-2 border-b border-[#272735]">
                   <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-bold">
                     Authenticated Administrator
@@ -1066,10 +1079,126 @@ export default function AdminPanel({
         </div>
       </header>
 
+      {/* ─── MOBILE MODULE NAVIGATION BAR & DRAWER (<1024px) ─── */}
+      <div className="lg:hidden bg-[#121218] border-b border-[#272735] px-3 py-2 flex items-center gap-2 overflow-x-auto">
+        <button
+          onClick={() => setActiveModule("CUSTOMERS")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+            activeModule === "CUSTOMERS"
+              ? "bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/40"
+              : "bg-[#181822] text-slate-300 border border-[#272735]"
+          }`}
+        >
+          Customers ({customers.length})
+        </button>
+        <button
+          onClick={() => setActiveModule("EXCHANGES")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+            activeModule === "EXCHANGES"
+              ? "bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/40"
+              : "bg-[#181822] text-slate-300 border border-[#272735]"
+          }`}
+        >
+          Exchanges
+        </button>
+        <button
+          onClick={() => setActiveModule("AI_PRICING")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+            activeModule === "AI_PRICING"
+              ? "bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/40"
+              : "bg-[#181822] text-slate-300 border border-[#272735]"
+          }`}
+        >
+          AI &amp; Pricing
+        </button>
+        <button
+          onClick={() => setActiveModule("SUPPORT")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+            activeModule === "SUPPORT"
+              ? "bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/40"
+              : "bg-[#181822] text-slate-300 border border-[#272735]"
+          }`}
+        >
+          Support
+        </button>
+        <button
+          onClick={() => setActiveModule("AUDIT")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+            activeModule === "AUDIT"
+              ? "bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/40"
+              : "bg-[#181822] text-slate-300 border border-[#272735]"
+          }`}
+        >
+          Audit ({auditLogs.length})
+        </button>
+      </div>
+
+      {isAdminMobileNavOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 flex">
+          <div
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => setIsAdminMobileNavOpen(false)}
+          />
+          <aside className="relative w-72 max-w-[85vw] bg-[#121218] border-r border-[#272735] flex flex-col justify-between z-10 p-4">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between pb-3 border-b border-[#272735]">
+                <span className="text-xs font-bold uppercase tracking-wider text-white">
+                  Admin Navigation
+                </span>
+                <button
+                  onClick={() => setIsAdminMobileNavOpen(false)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              {[
+                { id: "CUSTOMERS", label: `Customers (${customers.length})`, icon: Users },
+                { id: "EXCHANGES", label: "Exchanges & Exness Connector", icon: Zap },
+                { id: "AI_PRICING", label: "AI Telemetry & Pricing", icon: Cpu },
+                { id: "SUPPORT", label: "Support Inbox", icon: MessageSquare },
+                { id: "AUDIT", label: `Audit Trail (${auditLogs.length})`, icon: ShieldCheck },
+              ].map((m) => {
+                const Icon = m.icon;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => {
+                      setActiveModule(m.id as any);
+                      setIsAdminMobileNavOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-xs font-medium transition ${
+                      activeModule === m.id
+                        ? "bg-[#00E5FF]/10 text-[#00E5FF] border border-[#00E5FF]/30"
+                        : "text-slate-300 hover:bg-[#181822]"
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span>{m.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {onSwitchPortal && (
+              <button
+                onClick={() => {
+                  setIsAdminMobileNavOpen(false);
+                  onSwitchPortal();
+                }}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/40 text-xs font-bold"
+              >
+                <Activity className="w-4 h-4" />
+                <span>Switch to Trading Terminal</span>
+              </button>
+            )}
+          </aside>
+        </div>
+      )}
+
       {/* ─── WORKSPACE LAYOUT (PERSISTENT LEFT NAV RAIL + MAIN VIEWPORT) ─── */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Nav Rail (240px wide) */}
-        <aside className="w-60 bg-[#121218] border-r border-[#272735] flex flex-col justify-between select-none shrink-0">
+        {/* Left Nav Rail (240px wide on desktop >= 1024px) */}
+        <aside className="hidden lg:flex w-60 bg-[#121218] border-r border-[#272735] flex-col justify-between select-none shrink-0">
           <div className="p-3 space-y-1">
             <div className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">
               Operational Modules
@@ -1199,7 +1328,7 @@ export default function AdminPanel({
         </aside>
 
         {/* ─── MAIN CONTENT VIEWPORT ─── */}
-        <main className="flex-1 bg-[#0A0A0E] overflow-y-auto p-6 relative">
+        <main className="flex-1 min-w-0 bg-[#0A0A0E] overflow-y-auto p-3 sm:p-6 relative">
           {/* Feedback banner */}
           {feedback && (
             <div
@@ -1299,7 +1428,7 @@ export default function AdminPanel({
 
               {/* Filters Bar */}
               <div className="p-3 rounded-xl bg-[#121218] border border-[#272735] flex flex-wrap items-center justify-between gap-3">
-                <div className="relative flex-1 min-w-[240px]">
+                <div className="relative flex-1 min-w-[180px] sm:min-w-[240px]">
                   <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
                   <input
                     type="text"
@@ -1310,7 +1439,7 @@ export default function AdminPanel({
                   />
                 </div>
 
-                <div className="flex items-center gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
                   <span className="text-slate-400 text-[11px]">Status:</span>
                   <select
                     value={statusFilter}
@@ -1894,9 +2023,12 @@ export default function AdminPanel({
                   Exchange Connections & Cryptographic Gateways
                 </h1>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Tenant-isolated architecture separating administrator master infrastructure from customer test accounts.
+                  Universal Exness Trader API Connector and tenant-isolated account registry shared across Customer Trading Terminal, Admin Trading Terminal, and Admin Portal.
                 </p>
               </div>
+
+              {/* Universal Exness Connector & Verified Account Registry */}
+              <ExchangeConnectionsView token={token} />
 
               {/* Section A: Platform Master Infrastructure */}
               <div className="rounded-xl bg-[#121218] border border-[#8B5CF6]/40 overflow-hidden">

@@ -2760,15 +2760,32 @@ async def get_hft_account_summary_route(account_id: Optional[str] = None, curren
 
 
 # ─── Section J: Connected Exchange & Account Selector ────────────────────────
-REAL_CONSENT_VERSION = "REAL-CONSENT-v1"
-REAL_CONSENT_TEXT = ("I understand that I am about to use a REAL trading account and that real financial "
-                     "losses are possible. I explicitly consent to proceeding.")
+REAL_CONSENT_VERSION = "REAL-CONSENT-v2"
+REAL_CONSENT_TEXT = (
+    "I voluntarily authorise BITDEX to use my selected REAL trading account for High-Frequency Trading. "
+    "I understand that trading involves financial risk and that losses may occur."
+)
 
 
 class RealTradingConsentRequest(BaseModel):
     account_id: str
     confirmed: bool
     consent_version: str = REAL_CONSENT_VERSION
+    step_up_password: Optional[str] = None
+
+
+def _ensure_real_consent_columns(conn) -> None:
+    """Ensures real_trading_consents table has auth_result and consent_status columns."""
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(real_trading_consents);").fetchall()]
+        if "auth_result" not in cols:
+            conn.execute("ALTER TABLE real_trading_consents ADD COLUMN auth_result TEXT DEFAULT 'STEP_UP_AUTHENTICATED';")
+        if "consent_status" not in cols:
+            conn.execute("ALTER TABLE real_trading_consents ADD COLUMN consent_status TEXT DEFAULT 'ACTIVE';")
+        if "broker_account_login" not in cols:
+            conn.execute("ALTER TABLE real_trading_consents ADD COLUMN broker_account_login TEXT DEFAULT '';")
+    except Exception:
+        pass
 
 
 def _mask_id(raw: str) -> str:
@@ -2777,12 +2794,15 @@ def _mask_id(raw: str) -> str:
 
 
 def _resolve_hft_account(conn, user_id: str, account_id: str):
-    """Return a normalized account dict owned by user_id, or None. Never crosses tenants."""
-    r = conn.execute("SELECT * FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1",
-                     (user_id, account_id)).fetchone()
+    """Return a normalized Exness HFT account dict owned by user_id, or None. Never crosses tenants."""
+    r = conn.execute(
+        "SELECT * FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'",
+        (user_id, account_id)
+    ).fetchone()
     if r:
         r = dict(r)
-        env = "REAL" if (r.get("account_type") or "").upper() == "REAL" else "DEMO"
+        raw_env = (r.get("account_type") or "").upper()
+        env = "REAL" if raw_env == "REAL" else ("DEMO" if raw_env == "DEMO" else "ENVIRONMENT UNVERIFIED")
         v_status = r.get("verification_status")
         if v_status:
             verified = (v_status == "VERIFIED")
@@ -2790,9 +2810,15 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
         else:
             verified = bool(r.get("last_reconciled_at"))
             status = "VERIFIED" if verified else "NOT TESTED"
+        tier_raw = r.get("account_tier") or ""
+        tier_display = tier_raw if (verified and tier_raw and tier_raw not in ("STANDARD", "UNVERIFIED")) else ("Exness Native" if verified else "UNVERIFIED")
         return {
-            "account_id": r["connection_id"], "source": "EXNESS", "exchange": "Exness",
-            "environment": env, "environment_label": "Real" if env == "REAL" else "Demo",
+            "account_id": r["connection_id"],
+            "source": "EXNESS",
+            "exchange": "Exness",
+            "environment": env,
+            "environment_label": "Real" if env == "REAL" else ("Demo" if env == "DEMO" else "Unverified"),
+            "account_tier": tier_display,
             "masked_id": _mask_id(r.get("account_login")),
             "account_login": str(r.get("account_login")),
             "connection_status": status,
@@ -2808,47 +2834,13 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
             "last_connected_at": r.get("last_reconciled_at"),
             "adapter_mode": r.get("adapter_mode"),
         }
-    r = conn.execute("SELECT * FROM user_exchange_connections WHERE user_id = ? AND account_id = ? AND is_active = 1",
-                     (user_id, account_id)).fetchone()
-    if not r:
-        return None
-    r = dict(r)
-    env = "REAL" if (r.get("environment") or "").upper() in ("LIVE", "REAL", "MAINNET") else "DEMO"
-    raw_status = (r.get("connection_status") or "").upper()
-    has_verified_ts = bool(r.get("last_verified_at"))
-    if not has_verified_ts:
-        status = "NOT TESTED"
-        connected = False
-    elif raw_status in ("VERIFIED", "VERIFIED_READ_ONLY", "CONNECTED"):
-        status = "VERIFIED"
-        connected = True
-    elif "ERROR" in raw_status or "FAIL" in raw_status:
-        status = "ERROR"
-        connected = False
-    else:
-        status = "DISCONNECTED"
-        connected = False
-    fa = conn.execute("SELECT * FROM futures_accounts WHERE user_id = ? AND exchange_connection_id = ? LIMIT 1",
-                      (user_id, account_id)).fetchone()
-    fa = dict(fa) if fa else None
-    return {
-        "account_id": r["account_id"], "source": "EXCHANGE",
-        "exchange": (r.get("exchange_name") or r.get("provider") or "Exchange").title(),
-        "environment": env, "environment_label": "Real" if env == "REAL" else "Testnet",
-        "product_type": r.get("product_type"),
-        "masked_id": _mask_id(r["account_id"]),
-        "connection_status": status, "connected": connected,
-        "currency": (fa or {}).get("margin_asset") or "USDT",
-        "available_balance": float(fa["available_balance"]) if fa and fa.get("updated_at") and connected else None,
-        "equity": round(float(fa["wallet_balance"]) + float(fa["unrealized_pnl"]), 2) if fa and fa.get("updated_at") and connected else None,
-        "last_connected_at": r.get("last_verified_at"),
-        "futures_account_id": (fa or {}).get("account_id"),
-    }
+    return None
 
 
 def _has_real_consent(conn, user_id: str, account_id: str) -> bool:
+    _ensure_real_consent_columns(conn)
     return bool(conn.execute(
-        "SELECT 1 FROM real_trading_consents WHERE user_id = ? AND account_id = ? AND consent_version = ? AND confirmed = 1 LIMIT 1",
+        "SELECT 1 FROM real_trading_consents WHERE user_id = ? AND account_id = ? AND consent_version = ? AND confirmed = 1 AND COALESCE(consent_status, 'ACTIVE') = 'ACTIVE' LIMIT 1",
         (user_id, account_id, REAL_CONSENT_VERSION)).fetchone())
 
 
@@ -2871,23 +2863,6 @@ def _scoped_rows(conn, user_id: str, acct: dict):
             o = dict(o)
             orders.append({"order_id": o["leg_id"], "symbol": o["symbol"], "side": o["order_side"], "type": o["order_type"],
                            "quantity": o["volume"], "price": o.get("fill_price") or o.get("requested_price"),
-                           "status": (o["status"] or "").upper(), "created_at": o["created_at"]})
-    elif acct.get("futures_account_id"):
-        fid = acct["futures_account_id"]
-        for p in conn.execute("SELECT * FROM futures_positions WHERE user_id = ? AND account_id = ? ORDER BY opened_at DESC LIMIT 200",
-                              (user_id, fid)).fetchall():
-            p = dict(p)
-            positions.append({"position_id": p["position_id"], "symbol": p["symbol"], "direction": p["position_side"],
-                              "size": p["quantity"], "entry_price": p["entry_price"], "mark_price": p.get("mark_price") or p["entry_price"],
-                              "unrealized_pnl": p.get("unrealized_pnl") or 0.0, "realized_pnl": p.get("realized_pnl") or 0.0,
-                              "isolated_margin": p.get("isolated_margin") or 0.0, "leverage": p.get("leverage") or 1,
-                              "status": (p["status"] or "").upper(), "stop_loss_price": None, "take_profit_price": None,
-                              "opened_at": p["opened_at"], "source": "FUTURES_ISOLATED"})
-        for o in conn.execute("SELECT * FROM futures_orders WHERE user_id = ? AND account_id = ? ORDER BY created_at DESC LIMIT 200",
-                              (user_id, fid)).fetchall():
-            o = dict(o)
-            orders.append({"order_id": o["order_id"], "symbol": o["symbol"], "side": o["side"], "type": o["order_type"],
-                           "quantity": o["quantity"], "price": o.get("avg_fill_price") or o.get("price"),
                            "status": (o["status"] or "").upper(), "created_at": o["created_at"]})
     return positions, orders
 
@@ -2953,24 +2928,43 @@ def _hft_scoped_summary(user_id, account_id):
 
 @customer_router.get("/customer/trading/hft/connected-accounts")
 async def get_hft_connected_accounts(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Task 3: Returns ONLY genuine, currently authenticated Exness Demo and Real accounts
+    for the HFT Account Selector dropdown.
+    Excludes all legacy Binance, Bitget, Coinbase, DETERMINISTIC_MOCK_DEMO, and unverified/failed entries.
+    """
     user_id = current_user["user_id"]
     conn = get_db_connection()
     try:
         ids = [r[0] for r in conn.execute(
-            "SELECT connection_id FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY account_type, is_preferred DESC", (user_id,))]
-        ids += [r[0] for r in conn.execute(
-            "SELECT account_id FROM user_exchange_connections WHERE user_id = ? AND is_active = 1 ORDER BY provider, environment", (user_id,))]
+            """
+            SELECT connection_id FROM exness_demo_connections
+            WHERE user_id = ? AND is_active = 1
+              AND verification_status = 'VERIFIED'
+              AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'
+              AND account_type IN ('DEMO', 'REAL')
+            ORDER BY account_type ASC, is_preferred DESC, updated_at DESC
+            """,
+            (user_id,),
+        )]
         accounts = []
         for i in ids:
             a = _resolve_hft_account(conn, user_id, i)
-            if not a:
+            if not a or not a.get("connected"):
                 continue
             a.pop("futures_account_id", None)
             a["display_label"] = f"{a['exchange']} — {a['environment_label']} Account — {a['masked_id']}"
             a["real_consent_recorded"] = _has_real_consent(conn, user_id, i) if a["environment"] == "REAL" else None
             accounts.append(a)
-        return {"status": "SUCCESS", "count": len(accounts), "accounts": accounts,
-                "live_trading_locked": True, "read_only_mode": True}
+        return {
+            "status": "SUCCESS",
+            "count": len(accounts),
+            "accounts": accounts,
+            "empty_state_message": "NO VERIFIED TRADING ACCOUNTS CONNECTED" if len(accounts) == 0 else None,
+            "live_trading_locked": True,
+            "emergency_lock_active": True,
+            "read_only_mode": True,
+        }
     finally:
         conn.close()
 
@@ -2978,28 +2972,122 @@ async def get_hft_connected_accounts(current_user: Dict[str, Any] = Depends(get_
 @customer_router.post("/customer/trading/hft/consent/real-trading")
 async def record_real_trading_consent(req: RealTradingConsentRequest, request: Request,
                                       current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Task 4: One-Time Real Account Authentication and Voluntary Consent.
+    Requires:
+    1. Step-up authentication (verifies user password or authenticated account email confirmation).
+    2. Explicit confirmation checkbox (confirmed = True).
+    3. Current consent version (REAL-CONSENT-v2).
+    Records User ID, Selected broker account ID, Environment (REAL), Consent text/version,
+    Timestamp, Authentication result, and Consent status (ACTIVE).
+    Keeps live_trading_locked = True, emergency_lock_active = True, read_only_mode = True.
+    """
+    from ..services.auth_manager import AuthManager
     user_id = current_user["user_id"]
     if not req.confirmed:
-        raise HTTPException(status_code=400, detail="Explicit confirmation is required.")
+        raise HTTPException(status_code=400, detail="Explicit voluntary consent checkbox confirmation is required.")
     if req.consent_version != REAL_CONSENT_VERSION:
         raise HTTPException(status_code=409, detail="Consent version outdated. Reload and review the current terms.")
+
+    step_up_input = (req.step_up_password or "").strip()
+    if not step_up_input:
+        raise HTTPException(
+            status_code=401,
+            detail="STEP_UP_AUTH_REQUIRED: Please enter your account password or verification passphrase to authorise REAL account HFT selection."
+        )
+
     conn = get_db_connection()
     try:
+        _ensure_real_consent_columns(conn)
         acct = _require_acct(conn, user_id, req.account_id)
         if acct["environment"] != "REAL":
-            raise HTTPException(status_code=400, detail="Consent applies to REAL accounts only.")
+            raise HTTPException(status_code=400, detail="Consent applies to REAL accounts only. DEMO accounts do not require real-money consent.")
+        if not acct.get("connected"):
+            raise HTTPException(status_code=400, detail="Cannot record Real-account consent for an unverified account.")
+
+        # Verify step-up authentication against user's stored password hash or authenticated session email
+        user_row = conn.execute("SELECT email, password_hash FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User account not found.")
+
+        stored_hash = user_row["password_hash"] or ""
+        user_email = (user_row["email"] or "").lower().strip()
+
+        password_ok = False
+        if stored_hash:
+            try:
+                password_ok = AuthManager.verify_password(step_up_input, stored_hash)
+            except Exception:
+                password_ok = False
+
+        # Also support exact email confirmation if user logged in via OTP/Social or passphrase check
+        email_confirmed = (step_up_input.lower() == user_email and len(user_email) > 3)
+        if not password_ok and not email_confirmed:
+            raise HTTPException(
+                status_code=401,
+                detail="STEP_UP_AUTH_FAILED: Invalid account password or verification credential."
+            )
+
+        auth_method_label = "PASSWORD_VERIFIED" if password_ok else "EMAIL_IDENTITY_VERIFIED"
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         cid = "CNS-" + secrets.token_hex(6).upper()
         ip = request.client.host if request.client else None
         with conn:
-            conn.execute("INSERT INTO real_trading_consents (consent_id,user_id,account_id,environment,consent_version,consent_text,confirmed,created_at,ip_address) VALUES (?,?,?,?,?,?,1,?,?)",
-                         (cid, user_id, acct["account_id"], "REAL", REAL_CONSENT_VERSION, REAL_CONSENT_TEXT, now, ip))
-            conn.execute("INSERT INTO audit_logs (log_id,actor_id,action,target_user_id,details_json,created_at) VALUES (?,?,?,?,?,?)",
-                         ("AUD-" + secrets.token_hex(6).upper(), user_id, "REAL_TRADING_CONSENT_CONFIRMED", user_id,
-                          json.dumps({"consent_id": cid, "account_id": acct["account_id"], "environment": "REAL",
-                                      "consent_version": REAL_CONSENT_VERSION}), now))
-        return {"status": "SUCCESS", "consent_id": cid, "account_id": acct["account_id"], "recorded_at": now,
-                "consent_version": REAL_CONSENT_VERSION,
-                "note": "Consent recorded. Live execution remains locked by platform safety controls."}
+            conn.execute(
+                """
+                INSERT INTO real_trading_consents (
+                    consent_id, user_id, account_id, broker_account_login, environment,
+                    consent_version, consent_text, confirmed, auth_result, consent_status,
+                    created_at, ip_address
+                ) VALUES (?, ?, ?, ?, 'REAL', ?, ?, 1, ?, 'ACTIVE', ?, ?)
+                """,
+                (
+                    cid,
+                    user_id,
+                    acct["account_id"],
+                    acct.get("account_login", ""),
+                    REAL_CONSENT_VERSION,
+                    REAL_CONSENT_TEXT,
+                    auth_method_label,
+                    now,
+                    ip,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO audit_logs (log_id,actor_id,action,target_user_id,details_json,created_at) VALUES (?,?,?,?,?,?)",
+                (
+                    "AUD-" + secrets.token_hex(6).upper(),
+                    user_id,
+                    "REAL_TRADING_CONSENT_CONFIRMED",
+                    user_id,
+                    json.dumps({
+                        "consent_id": cid,
+                        "account_id": acct["account_id"],
+                        "broker_account_login": acct.get("account_login", ""),
+                        "environment": "REAL",
+                        "consent_version": REAL_CONSENT_VERSION,
+                        "auth_result": auth_method_label,
+                        "consent_status": "ACTIVE",
+                    }),
+                    now,
+                ),
+            )
+        return {
+            "status": "SUCCESS",
+            "consent_id": cid,
+            "user_id": user_id,
+            "account_id": acct["account_id"],
+            "broker_account_login": acct.get("masked_id"),
+            "environment": "REAL",
+            "recorded_at": now,
+            "consent_version": REAL_CONSENT_VERSION,
+            "consent_text": REAL_CONSENT_TEXT,
+            "auth_result": auth_method_label,
+            "consent_status": "ACTIVE",
+            "live_trading_locked": True,
+            "emergency_lock_active": True,
+            "read_only_mode": True,
+            "note": "Voluntary Real-account consent recorded. Live execution remains locked by platform safety controls.",
+        }
     finally:
         conn.close()

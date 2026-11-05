@@ -269,6 +269,8 @@ export default function InstitutionalTradingDashboard({
   const [accountsError, setAccountsError] = useState<string | null>(null);
   const [consentModalOpen, setConsentModalOpen] = useState<boolean>(false);
   const [consentChecked, setConsentChecked] = useState<boolean>(false);
+  const [stepUpPassword, setStepUpPassword] = useState<string>("");
+  const [consentError, setConsentError] = useState<string | null>(null);
   const [consentBusy, setConsentBusy] = useState<boolean>(false);
   const [pendingAction, setPendingAction] = useState<null | "CONFIG" | "START">(null);
 
@@ -631,21 +633,29 @@ export default function InstitutionalTradingDashboard({
     if (typeof window !== "undefined") window.localStorage.setItem("bitdex_hft_account", selectedAccountId);
     setHftAccountSummary(null);
     setConsentChecked(false);
-  }, [selectedAccountId]);
+    setStepUpPassword("");
+    setConsentError(null);
+    const newlySelected = connectedAccounts.find((a) => a.account_id === selectedAccountId);
+    if (newlySelected && newlySelected.environment === "REAL" && !newlySelected.real_consent_recorded) {
+      setConsentModalOpen(true);
+    }
+  }, [selectedAccountId, connectedAccounts]);
 
   // Gate any configure/arm action on account selection, connectivity and REAL consent
   const guardAccountAction = (action: "CONFIG" | "START"): boolean => {
     if (!selectedAccount) {
-      setFeedback({ type: "error", message: "Select a connected exchange account before configuring or arming a session." });
+      setFeedback({ type: "error", message: "Select a connected Exness trading account before configuring or arming a session." });
       return false;
     }
     if (!selectedAccount.connected) {
-      setFeedback({ type: "error", message: `${selectedAccount.display_label} is not connected (${selectedAccount.connection_status}). Execution disabled.` });
+      setFeedback({ type: "error", message: `${selectedAccount.display_label} is not verified (${selectedAccount.connection_status}). Execution disabled.` });
       return false;
     }
     if (selectedAccount.environment === "REAL" && !selectedAccount.real_consent_recorded) {
       setPendingAction(action);
       setConsentChecked(false);
+      setStepUpPassword("");
+      setConsentError(null);
       setConsentModalOpen(true);
       return false;
     }
@@ -653,20 +663,36 @@ export default function InstitutionalTradingDashboard({
   };
 
   const submitRealConsent = async () => {
-    if (!selectedAccount || !consentChecked) return;
+    if (!selectedAccount || !consentChecked || !stepUpPassword.trim()) return;
     setConsentBusy(true);
+    setConsentError(null);
     try {
       const authToken = getAuthToken();
       const res = await fetch("/api/backend/saas/customer/trading/hft/consent/real-trading", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(authToken ? { Authorization: "Bearer " + authToken } : {}) },
-        body: JSON.stringify({ account_id: selectedAccount.account_id, confirmed: true, consent_version: "REAL-CONSENT-v1" }),
+        body: JSON.stringify({
+          account_id: selectedAccount.account_id,
+          confirmed: true,
+          consent_version: "REAL-CONSENT-v2",
+          step_up_password: stepUpPassword.trim(),
+        }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(typeof json.detail === "string" ? json.detail : "Consent could not be recorded.");
-      setConnectedAccounts((prev) => prev.map((a) => (a.account_id === selectedAccount.account_id ? { ...a, real_consent_recorded: true } : a)));
+      if (!res.ok) {
+        const msg = typeof json.detail === "string" ? json.detail : "Step-up authentication or consent recording failed.";
+        setConsentError(msg);
+        throw new Error(msg);
+      }
+      setConnectedAccounts((prev) =>
+        prev.map((a) => (a.account_id === selectedAccount.account_id ? { ...a, real_consent_recorded: true } : a))
+      );
       setConsentModalOpen(false);
-      setFeedback({ type: "info", message: "Real-account consent recorded. Live execution remains locked by platform safety controls." });
+      setStepUpPassword("");
+      setFeedback({
+        type: "info",
+        message: "Voluntary Real-account consent recorded (REAL-CONSENT-v2). Live execution remains locked by platform safety controls.",
+      });
       if (pendingAction === "CONFIG") setIsConfigModalOpen(true);
       setPendingAction(null);
       if (selectedPair) runValidation(selectedPair);
@@ -999,17 +1025,26 @@ export default function InstitutionalTradingDashboard({
           onChange={(e) => setSelectedAccountId(e.target.value)}
           className="w-full bg-[#0B0E11] border border-[#272735] rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#00E5FF]"
         >
-          <option value="">— Select a connected exchange account —</option>
+          <option value="">
+            {connectedAccounts.length === 0
+              ? "NO VERIFIED TRADING ACCOUNTS CONNECTED"
+              : "— Select a verified Exness trading account —"}
+          </option>
           {connectedAccounts.map((a) => (
             <option key={a.account_id} value={a.account_id}>
-              {a.display_label} · {a.connected ? "Connected" : a.connection_status}
+              {a.display_label} · {a.connected ? "VERIFIED" : a.connection_status}
               {typeof a.available_balance === "number" && !isNaN(a.available_balance) ? ` · ${a.available_balance.toFixed(2)} ${a.currency}` : ""}
             </option>
           ))}
         </select>
         {accountsError && <div className="text-xs text-[#F6465D]">{accountsError}</div>}
         {connectedAccounts.length === 0 && !accountsError && (
-          <div className="text-xs text-[#94A3B8]">No connected accounts. Connect an exchange account in Settings → Connected Accounts.</div>
+          <div className="p-3 rounded-xl bg-[#0B0E11] border border-[#272735] text-xs text-[#94A3B8] flex items-center justify-between gap-2 flex-wrap">
+            <span className="font-bold text-amber-400">NO VERIFIED TRADING ACCOUNTS CONNECTED</span>
+            <span className="text-[11px] text-[#64748B]">
+              Attach your Exness API credentials in Connected Accounts to enable HFT account selection.
+            </span>
+          </div>
         )}
         {selectedAccount && (
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-[11px]">
@@ -2250,29 +2285,94 @@ export default function InstitutionalTradingDashboard({
         </div>
       )}
       {consentModalOpen && selectedAccount && (
-        <div className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4" role="dialog" aria-modal="true" id="real-consent-modal">
-          <div className="w-full max-w-lg rounded-2xl bg-[#121218] border border-[#F6465D]/40 shadow-2xl p-6 space-y-4 font-mono">
-            <div className="flex items-center gap-2 text-[#F6465D]">
-              <AlertTriangle className="w-5 h-5" />
-              <h3 className="text-sm font-bold uppercase">Real Trading Account — Risk Acknowledgement</h3>
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true" id="real-consent-modal">
+          <div className="w-full max-w-lg rounded-2xl bg-[#121218] border border-[#F6465D]/40 shadow-2xl p-5 sm:p-6 space-y-4 font-mono max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between gap-2 border-b border-[#272735] pb-3">
+              <div className="flex items-center gap-2 text-[#F6465D]">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <h3 className="text-xs sm:text-sm font-bold uppercase">
+                  One-Time Real Account Authentication &amp; Voluntary Consent
+                </h3>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-rose-950/60 text-rose-400 border border-rose-500/30 font-bold">
+                REAL-CONSENT-v2
+              </span>
             </div>
-            <div className="text-xs text-white">{selectedAccount.display_label}</div>
+
+            <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735] flex items-center justify-between text-xs">
+              <span className="text-[#94A3B8]">Selected Real Account:</span>
+              <span className="font-bold text-white">{selectedAccount.display_label}</span>
+            </div>
+
+            {consentError && (
+              <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-500/40 text-xs text-rose-300 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>{consentError}</span>
+              </div>
+            )}
+
             <ul className="text-xs text-[#94A3B8] space-y-1.5 list-disc pl-5">
               <li>This account uses real money. You can lose part or all of the funds allocated.</li>
               <li>Leveraged positions can be liquidated, and losses can exceed your expectations.</li>
               <li>Trading fees, spreads, swaps and slippage apply and reduce returns.</li>
-              <li>No profit is guaranteed. Past or simulated results do not predict future results.</li>
-              <li>Live execution remains locked by platform safety controls; this consent does not unlock it.</li>
+              <li>Live execution remains locked by platform safety controls (<code>live_trading_locked = True</code>).</li>
             </ul>
-            <label className="flex items-start gap-2 text-xs text-white cursor-pointer">
-              <input type="checkbox" id="real-consent-checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} className="mt-0.5" />
-              <span>I understand that I am about to use a REAL trading account and that real financial losses are possible. I explicitly consent to proceeding.</span>
-            </label>
-            <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => { setConsentModalOpen(false); setPendingAction(null); }} className="px-4 py-2 rounded-lg bg-[#181822] border border-[#272735] text-xs text-[#94A3B8] hover:text-white cursor-pointer">Cancel</button>
-              <button type="button" id="real-consent-confirm" disabled={!consentChecked || consentBusy} onClick={submitRealConsent}
-                className={`px-4 py-2 rounded-lg text-xs font-bold ${consentChecked && !consentBusy ? "bg-[#F6465D] text-white cursor-pointer" : "bg-[#181822] text-[#64748B] cursor-not-allowed"}`}>
-                {consentBusy ? "Recording…" : "Confirm & Record Consent"}
+
+            {/* Step 1: Step-Up Authentication */}
+            <div className="space-y-1.5 pt-1">
+              <label htmlFor="real-consent-step-up-password" className="text-[11px] font-bold text-white uppercase block">
+                1. Step-Up Authentication (Account Password or Email Verification)
+              </label>
+              <input
+                type="password"
+                id="real-consent-step-up-password"
+                value={stepUpPassword}
+                onChange={(e) => setStepUpPassword(e.target.value)}
+                placeholder="Enter your BITDEX password to verify identity"
+                className="w-full px-3 py-2.5 rounded-lg bg-[#0A0A0E] border border-[#272735] text-xs text-white focus:outline-none focus:border-[#00E5FF]"
+              />
+            </div>
+
+            {/* Step 2: Explicit Voluntary Consent Checkbox */}
+            <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
+              <label className="flex items-start gap-2.5 text-xs text-white cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  id="real-consent-checkbox"
+                  checked={consentChecked}
+                  onChange={(e) => setConsentChecked(e.target.checked)}
+                  className="mt-0.5 shrink-0"
+                />
+                <span className="leading-relaxed">
+                  I voluntarily authorise BITDEX to use my selected REAL trading account for High-Frequency Trading. I understand that trading involves financial risk and that losses may occur.
+                </span>
+              </label>
+            </div>
+
+            {/* Step 3: Explicit Confirmation Button */}
+            <div className="flex flex-wrap justify-end gap-2.5 pt-2 border-t border-[#272735]">
+              <button
+                type="button"
+                onClick={() => {
+                  setConsentModalOpen(false);
+                  setPendingAction(null);
+                }}
+                className="px-4 py-2 rounded-lg bg-[#181822] border border-[#272735] text-xs text-[#94A3B8] hover:text-white cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                id="real-consent-confirm"
+                disabled={!consentChecked || !stepUpPassword.trim() || consentBusy}
+                onClick={submitRealConsent}
+                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+                  consentChecked && stepUpPassword.trim() && !consentBusy
+                    ? "bg-[#F6465D] hover:bg-[#F6465D]/90 text-white cursor-pointer shadow-lg shadow-[#F6465D]/20"
+                    : "bg-[#181822] text-[#64748B] cursor-not-allowed"
+                }`}
+              >
+                {consentBusy ? "Authenticating & Recording…" : "Authenticate & Confirm Real-Account Consent"}
               </button>
             </div>
           </div>
