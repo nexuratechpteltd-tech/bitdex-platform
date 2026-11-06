@@ -302,13 +302,33 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         bal_val = float(c["balance_usd"]) if (is_fully_verified and c.get("balance_usd") is not None) else None
         eq_val = float(c["equity_usd"]) if (is_fully_verified and c.get("equity_usd") is not None) else None
 
+        raw_platform = (c.get("platform") or "").upper().strip()
+        raw_stream = (c.get("stream_id") or "").lower().strip()
+        if raw_platform == "EXNESS_TERMINAL" or raw_stream.startswith("dx."):
+            platform_val = "EXNESS_TERMINAL"
+            platform_label = "Exness Terminal Only"
+            mt5_eligible = False
+        elif raw_platform == "MT5" or raw_stream.startswith("mt5.") or c.get("adapter_mode") == "EXNESS_MT5_GATEWAY":
+            platform_val = "MT5"
+            platform_label = "MT5"
+            mt5_eligible = True
+        else:
+            platform_val = "UNVERIFIED"
+            platform_label = "UNVERIFIED"
+            mt5_eligible = False
+
         return {
             "connection_id": c["connection_id"],
+            "provider": "Exness",
             "account_login": mask_id(c["account_login"]),
             "account_login_raw": str(c["account_login"]),
             "server_name": c["server_name"],
             "account_type": env_display,
             "account_tier": tier_display,
+            "platform": platform_val,
+            "platform_label": platform_label,
+            "mt5_eligible": mt5_eligible,
+            "stream_id": c.get("stream_id") or "",
             "adapter_mode": c.get("adapter_mode", "EXNESS_TRADER_API"),
             "account_label": c.get("account_label") or (f"Exness {env_display.title()} ({mask_id(c['account_login'])})" if is_fully_verified else f"Exness ({mask_id(c['account_login'])})"),
             "is_preferred": bool(c.get("is_preferred", 0)),
@@ -334,13 +354,22 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
             "data_source": "Exness REST/WS Gateway" if c.get("adapter_mode") == "EXNESS_TRADER_API" else "Windows MT5 IPC Bridge",
         }
 
-    formatted_all = [format_conn(c) for c in all_conns if c]
+    # Deduplicate formatted_all by account_login_raw (preserving verified/latest entry per account)
+    seen_logins = set()
+    formatted_all = []
+    for c in [format_conn(r) for r in all_conns if r]:
+        raw_login = c["account_login_raw"]
+        if raw_login not in seen_logins:
+            seen_logins.add(raw_login)
+            formatted_all.append(c)
+
     verified_all = [c for c in formatted_all if c.get("is_verified") is True and c.get("account_type") in ("DEMO", "REAL")]
     exness_demos = [c for c in verified_all if c["account_type"] == "DEMO"]
     exness_reals = [c for c in verified_all if c["account_type"] == "REAL"]
     unverified_conns = [c for c in formatted_all if not c.get("is_verified") and c.get("connection_state") in ("ENVIRONMENT_UNVERIFIED", "BROKER_AUTHENTICATED", "CREDENTIALS_SAVED", "NODE_CONNECTED", "AUTHENTICATING")]
     failed_conns = [c for c in formatted_all if c.get("connection_state") == "AUTH_FAILED"]
     has_any_verified = len(verified_all) > 0
+    has_saved_credentials = any(bool(r.get("api_key")) for r in all_conns)
 
     # Overall header state machine status
     if has_any_verified:
@@ -360,6 +389,8 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         "status": "SUCCESS",
         "broker": "Exness",
         "overall_state": overall_state,
+        "connection_state": overall_state,
+        "has_saved_credentials": has_saved_credentials,
         "environments_supported": ["DEMO", "REAL"],
         "live_trading_locked": True,
         "emergency_lock_active": True,
@@ -375,8 +406,8 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         "all_connections": formatted_all,
         "verified_accounts": verified_all,
         "unverified_accounts": unverified_conns,
-        "demo_connections": [c for c in exness_demos if c.get("adapter_mode") != "EXNESS_TRADER_API"],
-        "real_connections": [c for c in exness_reals if c.get("adapter_mode") != "EXNESS_TRADER_API"],
+        "demo_connections": [c for c in exness_demos if c.get("mt5_eligible") is True],
+        "real_connections": [c for c in exness_reals if c.get("mt5_eligible") is True],
         "trader_connections": [c for c in verified_all if c.get("adapter_mode") == "EXNESS_TRADER_API"],
         "exness_demo_accounts": exness_demos,
         "exness_real_accounts": exness_reals,
@@ -731,6 +762,9 @@ async def attach_and_discover_accounts(
         for d in disc_res.get("demo_accounts", []):
             env_val = "DEMO"
             tier_val = d.get("account_tier") or "Exness Native"
+            plat_val = d.get("platform") or "EXNESS_TERMINAL"
+            mt5_elig = int(bool(d.get("mt5_eligible", False)))
+            stream_val = d.get("stream_id") or ""
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
                 login=d["account_id"],
@@ -760,12 +794,17 @@ async def attach_and_discover_accounts(
                 access_point=d.get("access_point", ""),
                 api_key=api_key,
                 account_tier=tier_val,
+                platform=plat_val,
+                mt5_eligible=mt5_elig,
+                stream_id=stream_val,
             )
             persisted_demo.append({
                 "connection_id": cid,
                 "account_id": d["account_id"],
                 "account_id_masked": mask_id(d["account_id"]),
                 "environment": env_val,
+                "platform": plat_val,
+                "mt5_eligible": bool(mt5_elig),
                 "account_tier": tier_val,
                 "balance": d.get("balance"),
                 "equity": d.get("equity"),
@@ -781,6 +820,9 @@ async def attach_and_discover_accounts(
         # Save verified REAL accounts (strictly REAL + balance retrieved)
         for r in disc_res.get("real_accounts", []):
             tier_val = r.get("account_tier") or "Exness Native"
+            plat_val = r.get("platform") or "EXNESS_TERMINAL"
+            mt5_elig = int(bool(r.get("mt5_eligible", False)))
+            stream_val = r.get("stream_id") or ""
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
                 login=r["account_id"],
@@ -810,12 +852,17 @@ async def attach_and_discover_accounts(
                 access_point=r.get("access_point", ""),
                 api_key=api_key,
                 account_tier=tier_val,
+                platform=plat_val,
+                mt5_eligible=mt5_elig,
+                stream_id=stream_val,
             )
             persisted_real.append({
                 "connection_id": cid,
                 "account_id": r["account_id"],
                 "account_id_masked": mask_id(r["account_id"]),
                 "environment": "REAL",
+                "platform": plat_val,
+                "mt5_eligible": bool(mt5_elig),
                 "account_tier": tier_val,
                 "balance": r.get("balance"),
                 "equity": r.get("equity"),
@@ -833,6 +880,9 @@ async def attach_and_discover_accounts(
             env_val = u.get("environment") or "ENVIRONMENT UNVERIFIED"
             state_val = u.get("verification_state") or "ENVIRONMENT_UNVERIFIED"
             tier_val = u.get("account_tier") or "Exness Native"
+            plat_val = u.get("platform") or "UNVERIFIED"
+            mt5_elig = int(bool(u.get("mt5_eligible", False)))
+            stream_val = u.get("stream_id") or ""
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
                 login=u["account_id"],
@@ -862,12 +912,17 @@ async def attach_and_discover_accounts(
                 access_point=u.get("access_point", ""),
                 api_key=api_key,
                 account_tier=tier_val,
+                platform=plat_val,
+                mt5_eligible=mt5_elig,
+                stream_id=stream_val,
             )
             persisted_unverified.append({
                 "connection_id": cid,
                 "account_id": u["account_id"],
                 "account_id_masked": mask_id(u["account_id"]),
                 "environment": env_val,
+                "platform": plat_val,
+                "mt5_eligible": bool(mt5_elig),
                 "account_tier": tier_val,
                 "balance": u.get("balance"),
                 "equity": u.get("equity"),
@@ -902,6 +957,9 @@ async def attach_and_discover_accounts(
                 environment_confirmed_by="UNVERIFIED",
                 api_key=api_key,
                 account_tier="UNVERIFIED",
+                platform="UNVERIFIED",
+                mt5_eligible=0,
+                stream_id="",
                 is_preferred=0,
             )
             persisted_failed.append({
@@ -909,6 +967,8 @@ async def attach_and_discover_accounts(
                 "account_id": f["account_id"],
                 "account_id_masked": mask_id(f["account_id"]),
                 "environment": "ENVIRONMENT UNVERIFIED",
+                "platform": "UNVERIFIED",
+                "mt5_eligible": False,
                 "account_tier": "UNVERIFIED",
                 "error_type": f.get("error_type"),
                 "error_detail": f.get("error_detail"),
@@ -990,11 +1050,15 @@ async def resync_exness_account(
             env_val = auth_res.get("environment", "ENVIRONMENT UNVERIFIED")
             tier_val = auth_res.get("account_tier", "Exness Native")
             state_val = auth_res.get("verification_state", "ACCOUNT_DATA_VERIFIED")
+            plat_val = auth_res.get("platform", "EXNESS_TERMINAL")
+            mt5_elig = int(bool(auth_res.get("mt5_eligible", False)))
+            stream_val = auth_res.get("stream_id", "")
             with conn:
                 conn.execute(
                     """
                     UPDATE exness_demo_connections
-                    SET account_type = ?, account_tier = ?, currency = ?, leverage = ?,
+                    SET account_type = ?, account_tier = ?, platform = ?, mt5_eligible = ?, stream_id = ?,
+                        currency = ?, leverage = ?,
                         balance_usd = ?, equity_usd = ?, margin_used = ?, margin_free = ?,
                         verification_status = ?, environment_confirmed_by = ?, access_point = ?,
                         trade_mode = ?, error_type = '', error_detail = '',
@@ -1004,6 +1068,9 @@ async def resync_exness_account(
                     (
                         env_val,
                         tier_val,
+                        plat_val,
+                        mt5_elig,
+                        stream_val,
                         auth_res.get("currency", "USD"),
                         auth_res.get("leverage", 200),
                         auth_res.get("balance"),
@@ -1022,7 +1089,7 @@ async def resync_exness_account(
                 )
             return {
                 "status": "SUCCESS",
-                "message": f"Account {login} resynchronized and verified ({env_val} / {tier_val}).",
+                "message": f"Account {login} resynchronized and verified ({env_val} / {tier_val} / {plat_val}).",
                 "account": auth_res,
             }
         else:
@@ -1031,7 +1098,8 @@ async def resync_exness_account(
                 conn.execute(
                     """
                     UPDATE exness_demo_connections
-                    SET verification_status = ?, balance_usd = NULL, equity_usd = NULL,
+                    SET verification_status = ?, platform = 'UNVERIFIED', mt5_eligible = 0,
+                        balance_usd = NULL, equity_usd = NULL,
                         error_type = ?, error_detail = ?, updated_at = ?
                     WHERE connection_id = ? AND user_id = ?
                     """,
@@ -1054,6 +1122,214 @@ async def resync_exness_account(
             )
     finally:
         conn.close()
+
+
+class DiscoverSavedAccountsRequest(BaseModel):
+    account_ids: List[str] = Field(..., min_length=1, description="List of Exness account IDs to discover using stored credentials")
+
+
+@router.post("/sync-all")
+async def sync_all_exness_accounts(user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Task 3: Sync All Accounts — Re-authenticates and refreshes telemetry for all active saved Exness accounts
+    belonging to the user, recording actual provider responses and errors per account.
+    """
+    user_id = user["user_id"]
+    conn = get_db_connection()
+    results = []
+    verified_count = 0
+    failed_count = 0
+
+    try:
+        rows = get_all_user_exness_connections(conn, user_id)
+        if not rows:
+            return {
+                "status": "SUCCESS",
+                "message": "No saved Exness accounts to synchronize.",
+                "total_synced": 0,
+                "verified_count": 0,
+                "failed_count": 0,
+                "results": [],
+            }
+
+        # Deduplicate rows by account_login
+        seen = set()
+        unique_rows = []
+        for r in rows:
+            if r["account_login"] not in seen:
+                seen.add(r["account_login"])
+                unique_rows.append(r)
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        for row_dict in unique_rows:
+            cid = row_dict["connection_id"]
+            login = row_dict["account_login"]
+            server = row_dict["server_name"]
+            enc_str = row_dict.get("encrypted_credentials")
+            if not enc_str or enc_str == "{}":
+                failed_count += 1
+                results.append({"account_id": login, "status": "FAILED", "error_detail": "Missing stored credentials."})
+                continue
+
+            try:
+                creds = ExnessCredentialVault.decrypt_credentials(
+                    user_id=user_id,
+                    login=login,
+                    server=server,
+                    enc_payload=json.loads(enc_str),
+                )
+                api_secret = creds.get("password", "")
+                api_key = row_dict.get("api_key") or login
+                adapter = ExnessTraderAPIAdapter(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    account_id=login,
+                    discovery_base_url=server,
+                )
+                auth_res = await adapter.authenticate_account(login, manual_env=row_dict.get("account_type"))
+
+                if auth_res.get("verified"):
+                    verified_count += 1
+                    env_val = auth_res.get("environment", "ENVIRONMENT UNVERIFIED")
+                    tier_val = auth_res.get("account_tier", "Exness Native")
+                    state_val = auth_res.get("verification_state", "ACCOUNT_DATA_VERIFIED")
+                    plat_val = auth_res.get("platform", "EXNESS_TERMINAL")
+                    mt5_elig = int(bool(auth_res.get("mt5_eligible", False)))
+                    stream_val = auth_res.get("stream_id", "")
+                    with conn:
+                        conn.execute(
+                            """
+                            UPDATE exness_demo_connections
+                            SET account_type = ?, account_tier = ?, platform = ?, mt5_eligible = ?, stream_id = ?,
+                                currency = ?, leverage = ?,
+                                balance_usd = ?, equity_usd = ?, margin_used = ?, margin_free = ?,
+                                verification_status = ?, environment_confirmed_by = ?, access_point = ?,
+                                trade_mode = ?, error_type = '', error_detail = '',
+                                last_reconciled_at = ?, updated_at = ?
+                            WHERE connection_id = ? AND user_id = ?
+                            """,
+                            (
+                                env_val,
+                                tier_val,
+                                plat_val,
+                                mt5_elig,
+                                stream_val,
+                                auth_res.get("currency", "USD"),
+                                auth_res.get("leverage", 200),
+                                auth_res.get("balance"),
+                                auth_res.get("equity"),
+                                auth_res.get("margin_used"),
+                                auth_res.get("margin_free"),
+                                state_val,
+                                auth_res.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
+                                auth_res.get("access_point", ""),
+                                auth_res.get("trade_mode", "ENABLED"),
+                                now,
+                                now,
+                                cid,
+                                user_id,
+                            ),
+                        )
+                    results.append({
+                        "connection_id": cid,
+                        "account_id": login,
+                        "account_id_masked": mask_id(login),
+                        "status": "VERIFIED",
+                        "environment": env_val,
+                        "platform": plat_val,
+                        "mt5_eligible": bool(mt5_elig),
+                        "balance": auth_res.get("balance"),
+                        "equity": auth_res.get("equity"),
+                    })
+                else:
+                    failed_count += 1
+                    state_val = auth_res.get("verification_state") or "AUTH_FAILED"
+                    with conn:
+                        conn.execute(
+                            """
+                            UPDATE exness_demo_connections
+                            SET verification_status = ?, platform = 'UNVERIFIED', mt5_eligible = 0,
+                                balance_usd = NULL, equity_usd = NULL,
+                                error_type = ?, error_detail = ?, updated_at = ?
+                            WHERE connection_id = ? AND user_id = ?
+                            """,
+                            (
+                                state_val,
+                                auth_res.get("error_type", "AUTHENTICATION_FAILED"),
+                                auth_res.get("error_detail", "Authentication rejected."),
+                                now,
+                                cid,
+                                user_id,
+                            ),
+                        )
+                    results.append({
+                        "connection_id": cid,
+                        "account_id": login,
+                        "account_id_masked": mask_id(login),
+                        "status": "AUTH_FAILED",
+                        "error_type": auth_res.get("error_type"),
+                        "error_detail": auth_res.get("error_detail"),
+                    })
+            except Exception as sync_err:
+                failed_count += 1
+                results.append({"account_id": login, "status": "FAILED", "error_detail": str(sync_err)})
+
+        return {
+            "status": "SUCCESS",
+            "message": f"Sync All complete: {verified_count} verified, {failed_count} failed/inaccessible.",
+            "total_synced": len(unique_rows),
+            "verified_count": verified_count,
+            "failed_count": failed_count,
+            "results": results,
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/discover-accounts")
+async def discover_saved_exness_accounts(
+    req: DiscoverSavedAccountsRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Task 3: Discover Accounts — Probes one or more candidate Exness Account IDs using the user's
+    already-saved Exness API Key & Ed25519 signing key without requiring the user to re-enter secrets.
+    """
+    user_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        rows = get_all_user_exness_connections(conn, user_id)
+        cred_row = next((r for r in rows if r.get("api_key") and r.get("encrypted_credentials") and r.get("encrypted_credentials") != "{}"), None)
+        if not cred_row:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "FAILED",
+                    "error_type": "NO_SAVED_CREDENTIALS",
+                    "error_detail": "No saved Exness API credentials found. Please click 'Connect Exness API' to attach your API Key and Ed25519 Private Signing Key first.",
+                },
+            )
+
+        creds = ExnessCredentialVault.decrypt_credentials(
+            user_id=user_id,
+            login=cred_row["account_login"],
+            server=cred_row["server_name"],
+            enc_payload=json.loads(cred_row["encrypted_credentials"]),
+        )
+        api_key = cred_row["api_key"]
+        api_secret = creds.get("password", "")
+        gateway_host = cred_row.get("server_name") or "https://api.exness.com"
+    finally:
+        conn.close()
+
+    attach_req = ExnessAttachDiscoverRequest(
+        api_key=api_key,
+        api_secret=api_secret,
+        gateway_host=gateway_host,
+        account_ids=req.account_ids,
+    )
+    return await attach_and_discover_accounts(attach_req, user)
 
 @router.post("/disconnect")
 async def disconnect_account(

@@ -636,11 +636,46 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         disc = await self.discover_access_point(target_account_id=clean_id)
         if disc.get("status") != "DISCOVERED":
             err_type = disc.get("error_type") or "ACCESS_POINT_DISCOVERY_FAILED"
+            gw_base = (self.discovery_base_url or "https://api.exness.com").rstrip("/")
+            diag_parts = [f"Stage 1 (GET /v1/trading/access-point?account_id={clean_id}): HTTP {disc.get('http_status')} {disc.get('exness_error') or err_type}"]
+
+            # Diagnostic probe on Payments Balance endpoint to check if account ID is rejected as invalid_parameters (MT5 vs Exness Terminal) or unauthorized
+            bal_probe_status = None
+            bal_probe_err = None
+            try:
+                bal_path_diag = f"/v1/accounts/{clean_id}/balance"
+                bal_headers_diag = self.sign_request("GET", bal_path_diag, idempotency_key="")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    bres_diag = await client.get(f"{gw_base}{bal_path_diag}", headers=bal_headers_diag)
+                    bal_probe_status = bres_diag.status_code
+                    try:
+                        bj = bres_diag.json()
+                        bal_probe_err = bj.get("error_message") or bj.get("description")
+                    except Exception:
+                        bal_probe_err = None
+                    diag_parts.append(f"Stage 3 (GET /v1/accounts/{clean_id}/balance): HTTP {bal_probe_status} {bal_probe_err or ''}".strip())
+            except Exception:
+                pass
+
+            # Classify platform eligibility / Trader API scoping limitation transparently
+            if bal_probe_status == 400 and bal_probe_err == "REQUEST_INVALID_PARAMETERS":
+                limitation_note = (
+                    f"Account {clean_id} is not accessible via this Exness Trader API key ({'; '.join(diag_parts)}). "
+                    f"Note: Exness Trader REST API only supports Exness Terminal accounts explicitly authorized for the API key; "
+                    f"MetaTrader 5 (MT5) accounts require the Windows MT5 Gateway, and additional Exness Terminal accounts require explicit API key scope authorization in Exness Personal Area."
+                )
+            else:
+                limitation_note = f"{disc.get('detail') or 'Gateway Access Point discovery failed.'} ({'; '.join(diag_parts)})"
+
             return {
                 "account_id": clean_id,
                 "verified": False,
+                "broker_authenticated": False,
+                "verification_state": "AUTH_FAILED",
+                "platform": "UNVERIFIED",
+                "mt5_eligible": False,
                 "error_type": err_type,
-                "error_detail": disc.get("detail") or "Gateway Access Point discovery failed.",
+                "error_detail": limitation_note,
                 "http_status": disc.get("http_status"),
                 "exness_code": disc.get("exness_code"),
                 "gateway_host": self.discovery_base_url,
@@ -683,6 +718,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                     return {
                         "account_id": clean_id,
                         "verified": False,
+                        "broker_authenticated": False,
+                        "verification_state": "AUTH_FAILED",
+                        "platform": "UNVERIFIED",
+                        "mt5_eligible": False,
                         "error_type": error_type,
                         "http_status": res.status_code,
                         "exness_code": exn_code,
@@ -693,6 +732,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                     return {
                         "account_id": clean_id,
                         "verified": False,
+                        "broker_authenticated": False,
+                        "verification_state": "AUTH_FAILED",
+                        "platform": "UNVERIFIED",
+                        "mt5_eligible": False,
                         "error_type": "ACCOUNT_NOT_FOUND",
                         "http_status": 404,
                         "error_detail": f"Account {clean_id} not found on Exness cluster (HTTP 404).",
@@ -702,6 +745,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                     return {
                         "account_id": clean_id,
                         "verified": False,
+                        "broker_authenticated": False,
+                        "verification_state": "AUTH_FAILED",
+                        "platform": "UNVERIFIED",
+                        "mt5_eligible": False,
                         "error_type": "ACCOUNT_DISABLED",
                         "http_status": 423,
                         "error_detail": f"Account {clean_id} is disabled or locked by Exness (HTTP 423).",
@@ -711,6 +758,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                     return {
                         "account_id": clean_id,
                         "verified": False,
+                        "broker_authenticated": False,
+                        "verification_state": "AUTH_FAILED",
+                        "platform": "UNVERIFIED",
+                        "mt5_eligible": False,
                         "error_type": "ACCOUNT_DATA_RETRIEVAL_FAILED",
                         "http_status": res.status_code,
                         "error_detail": f"Configuration query failed (HTTP {res.status_code}): {res.text[:120]}",
@@ -720,6 +771,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             return {
                 "account_id": clean_id,
                 "verified": False,
+                "broker_authenticated": False,
+                "verification_state": "AUTH_FAILED",
+                "platform": "UNVERIFIED",
+                "mt5_eligible": False,
                 "error_type": "TLS_FAILURE",
                 "error_detail": f"Connection to Access Point '{target_ap}' timed out.",
                 "access_point": target_ap,
@@ -728,16 +783,19 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             return {
                 "account_id": clean_id,
                 "verified": False,
+                "broker_authenticated": False,
+                "verification_state": "AUTH_FAILED",
+                "platform": "UNVERIFIED",
+                "mt5_eligible": False,
                 "error_type": "ACCESS_POINT_DISCOVERY_FAILED",
                 "error_detail": f"Access Point communication error: {str(e)}",
                 "access_point": target_ap,
             }
 
-        # Step 3: Authoritative Balance Reading via Payments API on Gateway Host:
-        # GET https://api.exness.com/v1/accounts/{id}/balance -> {"currency": "USD", "amount": "0"}
-        # (with fallback to Access Point if supported)
-        bal_path = f"/v1/accounts/{clean_id}/balance"
-        gw_base = (self.discovery_base_url or "https://api.exness.com").rstrip("/")
+        # Step 2b: Authoritative Real-Time Trading State Snapshot on Access Point:
+        # GET https://{access_point}/v1/trading/accounts/{id}/snapshot
+        # Schema: {"account_state":{"balance":"0","equity":"0","used_margin":"0","leverage":"2000"},"orders":[],"positions":[]}
+        snap_path = f"/v1/trading/accounts/{clean_id}/snapshot"
         balance: Optional[float] = None
         equity: Optional[float] = None
         margin_used: Optional[float] = None
@@ -745,6 +803,43 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         balance_currency: Optional[str] = None
         balance_retrieved = False
         equity_retrieved = False
+        open_positions_count = 0
+        open_orders_count = 0
+        snap_leverage: Optional[int] = None
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                snap_headers = self.sign_request("GET", snap_path, idempotency_key="")
+                sres = await client.get(f"{target_ap}{snap_path}", headers=snap_headers)
+                if sres.status_code == 200:
+                    sdata = sres.json()
+                    astate = sdata.get("account_state") if isinstance(sdata.get("account_state"), dict) else {}
+                    if astate.get("balance") is not None:
+                        balance = float(astate["balance"])
+                        balance_retrieved = True
+                    if astate.get("equity") is not None:
+                        equity = float(astate["equity"])
+                        equity_retrieved = True
+                    if astate.get("used_margin") is not None:
+                        margin_used = float(astate["used_margin"])
+                    if equity is not None and margin_used is not None:
+                        margin_free = round(equity - margin_used, 2)
+                    if astate.get("leverage") is not None:
+                        try:
+                            snap_leverage = int(str(astate["leverage"]).strip())
+                        except Exception:
+                            pass
+                    if isinstance(sdata.get("positions"), list):
+                        open_positions_count = len(sdata["positions"])
+                    if isinstance(sdata.get("orders"), list):
+                        open_orders_count = len(sdata["orders"])
+        except Exception as snap_err:
+            logger.debug(f"Snapshot query error for {clean_id}: {snap_err}")
+
+        # Step 3: Authoritative Balance Reading via Payments API on Gateway Host:
+        # GET https://api.exness.com/v1/accounts/{id}/balance -> {"currency": "USD", "amount": "0"}
+        bal_path = f"/v1/accounts/{clean_id}/balance"
+        gw_base = (self.discovery_base_url or "https://api.exness.com").rstrip("/")
 
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
@@ -756,35 +851,34 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 if bres.status_code == 200:
                     bdata = bres.json()
                     raw_bal = bdata.get("amount", bdata.get("balance", bdata.get("wallet_balance")))
-                    if raw_bal is not None:
+                    if raw_bal is not None and not balance_retrieved:
                         balance = float(raw_bal)
                         balance_retrieved = True
                     raw_eq = bdata.get("equity")
-                    if raw_eq is not None:
+                    if raw_eq is not None and not equity_retrieved:
                         equity = float(raw_eq)
                         equity_retrieved = True
-                    elif balance is not None:
-                        # If Payments API returns wallet/account amount and there are no open positions, equity equals balance
+                    elif balance is not None and not equity_retrieved:
                         equity = balance
                         equity_retrieved = True
-                    if bdata.get("margin") is not None or bdata.get("used_margin") is not None:
+                    if margin_used is None and (bdata.get("margin") is not None or bdata.get("used_margin") is not None):
                         margin_used = float(bdata.get("margin", bdata.get("used_margin", 0.0)))
-                    if bdata.get("free_margin") is not None or bdata.get("available_margin") is not None:
+                    if margin_free is None and (bdata.get("free_margin") is not None or bdata.get("available_margin") is not None):
                         margin_free = float(bdata.get("free_margin", bdata.get("available_margin", 0.0)))
                     if bdata.get("currency"):
                         balance_currency = str(bdata.get("currency")).upper()
                 else:
-                    if acct_data.get("balance") is not None or acct_data.get("amount") is not None:
+                    if not balance_retrieved and (acct_data.get("balance") is not None or acct_data.get("amount") is not None):
                         balance = float(acct_data.get("balance", acct_data.get("amount")))
                         balance_retrieved = True
-                    if acct_data.get("equity") is not None:
+                    if not equity_retrieved and acct_data.get("equity") is not None:
                         equity = float(acct_data.get("equity"))
                         equity_retrieved = True
         except Exception:
-            if acct_data.get("balance") is not None or acct_data.get("amount") is not None:
+            if not balance_retrieved and (acct_data.get("balance") is not None or acct_data.get("amount") is not None):
                 balance = float(acct_data.get("balance", acct_data.get("amount")))
                 balance_retrieved = True
-            if acct_data.get("equity") is not None:
+            if not equity_retrieved and acct_data.get("equity") is not None:
                 equity = float(acct_data.get("equity"))
                 equity_retrieved = True
 
@@ -810,6 +904,18 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             env = "ENVIRONMENT UNVERIFIED"
             env_confirmed = "UNVERIFIED"
 
+        # Step 5b: Authoritative Platform & MT5 Eligibility Classification (Task 4)
+        # stream_id starting with "dx." (e.g. "dx.2.real.std") identifies Exness Terminal engine (NOT MT5!)
+        if stream_id.startswith("dx."):
+            platform = "EXNESS_TERMINAL"
+            mt5_eligible = False
+        elif stream_id.startswith("mt5."):
+            platform = "MT5"
+            mt5_eligible = True
+        else:
+            platform = "EXNESS_TERMINAL"
+            mt5_eligible = False
+
         # Step 6: Account Tier Classification strictly from provider fields (account_name / account_type / tier)
         raw_tier = str(
             acct_data.get("account_name")
@@ -830,7 +936,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             or balance_currency
             or "DATA UNAVAILABLE"
         ).upper()
-        raw_lev = settings_obj.get("leverage") or acct_data.get("leverage") or 200
+        raw_lev = snap_leverage or settings_obj.get("leverage") or acct_data.get("leverage") or 200
         try:
             acct_leverage = int(str(raw_lev).strip())
         except Exception:
@@ -861,6 +967,8 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "verification_state": verification_state,
             "environment": env,
             "environment_confirmed_by": env_confirmed,
+            "platform": platform,
+            "mt5_eligible": mt5_eligible,
             "trade_mode": settings_trade_mode,
             "stream_id": str(acct_data.get("stream_id") or ""),
             "account_tier": account_tier,
@@ -873,7 +981,8 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "equity_retrieved": equity_retrieved,
             "margin_used": margin_used,
             "margin_free": margin_free,
-            "open_positions_count": 0,
+            "open_positions_count": open_positions_count,
+            "open_orders_count": open_orders_count,
             "access_point": target_ap,
             "account_status": acct_status_raw,
             "last_verified_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

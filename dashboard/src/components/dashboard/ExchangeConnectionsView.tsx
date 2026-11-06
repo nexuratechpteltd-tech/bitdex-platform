@@ -39,6 +39,9 @@ export default function ExchangeConnectionsView({
   const [gatewayHost, setGatewayHost] = useState("https://api.exness.com");
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDiscoverModalOpen, setIsDiscoverModalOpen] = useState(false);
+  const [discoverInputIds, setDiscoverInputIds] = useState("");
+  const [isDiscovering, setIsDiscovering] = useState(false);
   const [resyncingId, setResyncingId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<{
     type: "success" | "error" | "info";
@@ -78,11 +81,33 @@ export default function ExchangeConnectionsView({
     fetchStatus();
   }, [token]);
 
-  const handleSync = async () => {
+  const handleSyncAll = async () => {
     setIsSyncing(true);
-    await fetchStatus();
-    if (onRefresh) await onRefresh();
-    setTimeout(() => setIsSyncing(false), 600);
+    setStatusMsg(null);
+    const authToken = getAuthToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    };
+    try {
+      const res = await fetch("/api/v1/hft/exness/sync-all", {
+        method: "POST",
+        headers,
+      });
+      const data = await res.json().catch(() => ({}));
+      await fetchStatus();
+      if (onRefresh) await onRefresh();
+      if (res.ok) {
+        setStatusMsg({
+          type: "info",
+          text: data.message || "Synchronized all saved Exness accounts.",
+        });
+      }
+    } catch (err: any) {
+      console.error("Sync all error:", err);
+    } finally {
+      setTimeout(() => setIsSyncing(false), 500);
+    }
   };
 
   const handleOpenConnect = () => {
@@ -92,6 +117,65 @@ export default function ExchangeConnectionsView({
     setCandidateAccountIds("");
     setGatewayHost("https://api.exness.com");
     setIsModalOpen(true);
+  };
+
+  const handleOpenDiscover = () => {
+    setStatusMsg(null);
+    setDiscoverInputIds("16000629657, 460310009, 478461031, 17000660016, 473001359");
+    setIsDiscoverModalOpen(true);
+  };
+
+  const handleDiscoverSavedAccounts = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsDiscovering(true);
+    setStatusMsg(null);
+    const authToken = getAuthToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    };
+    try {
+      const rawIds = discoverInputIds
+        .split(/[,;\s]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (rawIds.length === 0) {
+        throw new Error("Please enter at least one Exness Account ID to discover.");
+      }
+      const res = await fetch("/api/v1/hft/exness/discover-accounts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ account_ids: rawIds }),
+      });
+      const data = await res.json();
+      await fetchStatus();
+      if (onRefresh) await onRefresh();
+
+      if (!res.ok) {
+        throw new Error(
+          data.detail?.error_detail ||
+            (typeof data.detail === "string" ? data.detail : "Account discovery failed.")
+        );
+      }
+
+      setStatusMsg({
+        type: data.total_verified > 0 ? "success" : "error",
+        text: `Discovery Probed ${rawIds.length} Account(s): ${data.total_verified || 0} Verified, ${data.total_failed || 0} Inaccessible via Trader API`,
+        details:
+          "Verified accounts are added to the active registry below; inaccessible or MT5-only accounts are recorded with their exact Exness provider response.",
+      });
+      setTimeout(() => {
+        setIsDiscoverModalOpen(false);
+      }, 1400);
+    } catch (err: any) {
+      setStatusMsg({
+        type: "error",
+        text: "Account Discovery Error",
+        details: err.message,
+      });
+    } finally {
+      setIsDiscovering(false);
+    }
   };
 
   const handleDiscoverAndAttach = async (e: React.FormEvent) => {
@@ -205,6 +289,10 @@ export default function ExchangeConnectionsView({
           details: errorDetail,
         });
       } else {
+        setStatusMsg({
+          type: "success",
+          text: data.message || "Account resynchronized and verified.",
+        });
         await fetchStatus();
         if (onRefresh) onRefresh();
       }
@@ -279,7 +367,7 @@ export default function ExchangeConnectionsView({
   const unverifiedAccounts: any[] = statusData?.unverified_accounts || [];
   const failedAccounts: any[] = statusData?.failed_accounts || [];
   const connectionState: string =
-    isSubmitting || resyncingId
+    isSubmitting || isDiscovering || resyncingId
       ? "AUTHENTICATING"
       : statusData?.connection_state ||
         (verifiedAccounts.length > 0
@@ -345,6 +433,47 @@ export default function ExchangeConnectionsView({
     }
   };
 
+  const renderPlatformBadge = (c: any) => {
+    const plat = (c.platform || "").toUpperCase();
+    const stream = (c.stream_id || "").toLowerCase();
+    if (plat === "EXNESS_TERMINAL" || stream.startsWith("dx.")) {
+      return (
+        <div className="space-y-0.5">
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950/60 text-purple-300 border border-purple-500/30 inline-block">
+            EXNESS TERMINAL ONLY
+          </span>
+          <span className="block text-[9px] text-[#64748B]">
+            MT5 Ineligible ({c.stream_id || "dx"})
+          </span>
+        </div>
+      );
+    }
+    if (plat === "MT5" || stream.startsWith("mt5.") || c.mt5_eligible) {
+      return (
+        <div className="space-y-0.5">
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 inline-block">
+            MT5 ELIGIBLE
+          </span>
+          <span className="block text-[9px] text-[#64748B]">MetaTrader 5</span>
+        </div>
+      );
+    }
+    return (
+      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
+        UNVERIFIED
+      </span>
+    );
+  };
+
+  const formatTimestamp = (ts?: string | null) => {
+    if (!ts) return "NEVER";
+    try {
+      return ts.replace("T", " ").replace("Z", " UTC");
+    } catch {
+      return ts;
+    }
+  };
+
   return (
     <div className="space-y-6 font-mono text-xs">
       {/* ─── HEADER & UNIVERSAL CONNECTOR BAR ─────────────────── */}
@@ -353,30 +482,40 @@ export default function ExchangeConnectionsView({
           <div className="flex items-center gap-2 flex-wrap">
             <ShieldCheck className="w-5 h-5 text-[#38BDF8] shrink-0" />
             <h1 className="text-sm sm:text-base font-bold text-[#F1F5F9] uppercase tracking-wider">
-              Universal Exness Trader API Connector
+              Universal Exness Multi-Account Registry
             </h1>
             {renderStateBadge(connectionState)}
           </div>
           <p className="text-[11px] sm:text-xs text-[#94A3B8]">
-            Two-Stage Access Point Discovery &bull; Ed25519 Payload Signing &bull; Automatic Demo &amp; Real Classification
+            Two-Stage Access Point Discovery &bull; Ed25519 Payload Signing &bull; Exness Terminal vs MT5 Eligibility
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
           <button
-            onClick={handleSync}
+            type="button"
+            onClick={handleSyncAll}
             disabled={isSyncing}
             className="px-3 py-2 rounded-xl bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] text-[#F1F5F9] transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 flex-1 sm:flex-initial"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin text-[#38BDF8]" : ""}`} />
-            <span>Sync</span>
+            <span>Sync All Accounts</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleOpenDiscover}
+            className="px-3 py-2 rounded-xl bg-[#151C28] hover:bg-[#1E2736] border border-[#38BDF8]/40 text-[#38BDF8] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer flex-1 sm:flex-initial"
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>Discover Accounts</span>
           </button>
 
           <a
             href="https://my.exness.com/pa"
             target="_blank"
             rel="noopener noreferrer"
-            className="px-3 py-2 rounded-xl bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] text-[#38BDF8] transition-all flex items-center justify-center gap-1.5 flex-1 sm:flex-initial"
+            className="px-3 py-2 rounded-xl bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] text-[#94A3B8] hover:text-[#38BDF8] transition-all flex items-center justify-center gap-1.5 flex-1 sm:flex-initial"
           >
             <ExternalLink className="w-3.5 h-3.5" />
             <span>Personal Area</span>
@@ -392,6 +531,42 @@ export default function ExchangeConnectionsView({
           </button>
         </div>
       </div>
+
+      {/* Inline Status Feedback Banner */}
+      {statusMsg && !isModalOpen && !isDiscoverModalOpen && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs flex items-start justify-between gap-3 ${
+            statusMsg.type === "success"
+              ? "bg-emerald-950/30 text-emerald-300 border-emerald-500/40"
+              : statusMsg.type === "info"
+              ? "bg-sky-950/30 text-sky-300 border-sky-500/40"
+              : "bg-rose-950/30 text-rose-300 border-rose-500/40"
+          }`}
+        >
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 font-bold">
+              {statusMsg.type === "success" || statusMsg.type === "info" ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+              )}
+              <span>{statusMsg.text}</span>
+            </div>
+            {statusMsg.details && (
+              <p className="text-[11px] opacity-90 pl-6 leading-relaxed break-words">
+                {statusMsg.details}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setStatusMsg(null)}
+            className="p-1 text-[#94A3B8] hover:text-white cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* ─── SUMMARY KPI TILES ─────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -423,17 +598,17 @@ export default function ExchangeConnectionsView({
         </div>
       </div>
 
-      {/* ─── TASK 1E: UNIFIED VERIFIED EXNESS ACCOUNTS TABLE ───────── */}
+      {/* ─── TASK 3: MULTI-ACCOUNT REGISTRY TABLE (VERIFIED ACCOUNTS) ─── */}
       <div className="rounded-2xl bg-[#0E131B] border border-[#1E2736] overflow-hidden shadow-lg">
         <div className="p-4 bg-[#151C28]/60 border-b border-[#1E2736] flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Radio className="w-4 h-4 text-[#38BDF8]" />
             <h2 className="font-bold text-[#F1F5F9] uppercase tracking-wider text-xs">
-              Verified Exness Trading Accounts
+              Verified Exness Trading Accounts Registry
             </h2>
           </div>
           <span className="text-[10px] text-[#64748B]">
-            {verifiedAccounts.length} Verified Account(s)
+            {verifiedAccounts.length} Verified Account(s) &bull; Deduplicated by Account ID
           </span>
         </div>
 
@@ -443,7 +618,7 @@ export default function ExchangeConnectionsView({
               NO VERIFIED TRADING ACCOUNTS CONNECTED
             </p>
             <p className="text-[11px] text-[#64748B] max-w-lg mx-auto">
-              Click <strong>Connect Exness API</strong> and supply your active Exness API Key, Ed25519 Private Signing Key, and Trading Account ID(s) to authenticate. Only accounts passing both provider authentication and authoritative environment/data verification are listed here.
+              Click <strong>Connect Exness API</strong> or <strong>Discover Accounts</strong> to authenticate your Exness Trading Account ID(s). Only accounts passing both provider authentication and authoritative environment/data verification are listed here.
             </p>
           </div>
         ) : (
@@ -451,14 +626,17 @@ export default function ExchangeConnectionsView({
             <table className="w-full text-left border-collapse bitdex-responsive-table-cards">
               <thead>
                 <tr className="border-b border-[#1E2736] text-[10px] uppercase text-[#64748B] bg-[#080B10]/50">
-                  <th className="py-3 px-4 font-bold">Account</th>
-                  <th className="py-3 px-4 font-bold">Environment</th>
-                  <th className="py-3 px-4 font-bold">Account type</th>
-                  <th className="py-3 px-4 font-bold">Currency</th>
-                  <th className="py-3 px-4 font-bold text-right">Balance</th>
-                  <th className="py-3 px-4 font-bold text-right">Equity</th>
-                  <th className="py-3 px-4 font-bold">Status</th>
-                  <th className="py-3 px-4 font-bold text-right">Actions</th>
+                  <th className="py-3 px-3.5 font-bold">Provider</th>
+                  <th className="py-3 px-3.5 font-bold">Account ID</th>
+                  <th className="py-3 px-3.5 font-bold">Environment</th>
+                  <th className="py-3 px-3.5 font-bold">Platform</th>
+                  <th className="py-3 px-3.5 font-bold">Account Type</th>
+                  <th className="py-3 px-3.5 font-bold">Currency</th>
+                  <th className="py-3 px-3.5 font-bold text-right">Balance</th>
+                  <th className="py-3 px-3.5 font-bold text-right">Equity</th>
+                  <th className="py-3 px-3.5 font-bold">Last Sync</th>
+                  <th className="py-3 px-3.5 font-bold">Status</th>
+                  <th className="py-3 px-3.5 font-bold text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1E2736] text-xs">
@@ -468,15 +646,18 @@ export default function ExchangeConnectionsView({
                   const tier = c.account_tier || "Exness Native";
                   const rowState = isResyncing
                     ? "AUTHENTICATING"
-                    : c.verification_state || c.verification_status || "ACCOUNT_DATA_VERIFIED";
+                    : c.connection_state || c.verification_status || "ACCOUNT_DATA_VERIFIED";
 
                   return (
                     <tr
                       key={c.connection_id}
                       className="hover:bg-[#151C28]/40 transition-colors"
                     >
-                      <td data-label="Account" className="py-3.5 px-4 font-bold text-white">
-                        <div className="flex items-center gap-2">
+                      <td data-label="Provider" className="py-3.5 px-3.5 font-bold text-[#38BDF8]">
+                        {c.provider || "Exness"}
+                      </td>
+                      <td data-label="Account ID" className="py-3.5 px-3.5 font-bold text-white">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span>{c.account_login}</span>
                           {c.is_preferred && (
                             <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#F59E0B]/15 text-[#F59E0B] border border-[#F59E0B]/30 flex items-center gap-1">
@@ -486,7 +667,7 @@ export default function ExchangeConnectionsView({
                           )}
                         </div>
                       </td>
-                      <td data-label="Environment" className="py-3.5 px-4">
+                      <td data-label="Environment" className="py-3.5 px-3.5">
                         <span
                           className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
                             env === "REAL"
@@ -499,26 +680,32 @@ export default function ExchangeConnectionsView({
                           {env}
                         </span>
                       </td>
-                      <td data-label="Account type" className="py-3.5 px-4 text-[#94A3B8]">
+                      <td data-label="Platform" className="py-3.5 px-3.5">
+                        {renderPlatformBadge(c)}
+                      </td>
+                      <td data-label="Account Type" className="py-3.5 px-3.5 text-[#F1F5F9]">
                         {tier}
                       </td>
-                      <td data-label="Currency" className="py-3.5 px-4 font-bold text-[#F1F5F9]">
+                      <td data-label="Currency" className="py-3.5 px-3.5 font-bold text-[#F1F5F9]">
                         {c.currency || "USD"}
                       </td>
-                      <td data-label="Balance" className="py-3.5 px-4 text-right font-bold text-white tabular-nums">
+                      <td data-label="Balance" className="py-3.5 px-3.5 text-right font-bold text-white tabular-nums">
                         {c.balance_usd !== null && c.balance_usd !== undefined
                           ? Number(c.balance_usd).toFixed(2)
                           : c.balance_display || "DATA UNAVAILABLE"}
                       </td>
-                      <td data-label="Equity" className="py-3.5 px-4 text-right text-[#38BDF8] font-bold tabular-nums">
+                      <td data-label="Equity" className="py-3.5 px-3.5 text-right text-[#38BDF8] font-bold tabular-nums">
                         {c.equity_usd !== null && c.equity_usd !== undefined
                           ? Number(c.equity_usd).toFixed(2)
                           : c.equity_display || "DATA UNAVAILABLE"}
                       </td>
-                      <td data-label="Status" className="py-3.5 px-4">
+                      <td data-label="Last Sync" className="py-3.5 px-3.5 text-[10px] text-[#94A3B8] tabular-nums">
+                        {formatTimestamp(c.last_reconciled_at)}
+                      </td>
+                      <td data-label="Status" className="py-3.5 px-3.5">
                         {renderStateBadge(rowState)}
                       </td>
-                      <td data-label="Actions" className="py-3.5 px-4 text-right">
+                      <td data-label="Actions" className="py-3.5 px-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             type="button"
@@ -583,10 +770,11 @@ export default function ExchangeConnectionsView({
                 >
                   <div className="space-y-1 flex-1 min-w-[220px]">
                     <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-[#38BDF8]">Exness</span>
                       <span className="font-bold text-white">
                         Account: {u.account_login || u.account_id}
                       </span>
-                      {renderStateBadge(isResyncing ? "AUTHENTICATING" : u.verification_state || u.verification_status || "ENVIRONMENT_UNVERIFIED")}
+                      {renderStateBadge(isResyncing ? "AUTHENTICATING" : u.connection_state || u.verification_status || "ENVIRONMENT_UNVERIFIED")}
                       <span className="text-[#94A3B8]">
                         Balance: <strong className="text-white">{u.balance_usd !== null && u.balance_usd !== undefined ? Number(u.balance_usd).toFixed(2) : "DATA UNAVAILABLE"}</strong>
                       </span>
@@ -625,39 +813,46 @@ export default function ExchangeConnectionsView({
         </div>
       )}
 
-      {/* ─── FAILED / SAVED AUTHENTICATION DIAGNOSTICS ────────── */}
+      {/* ─── FAILED / INACCESSIBLE ACCOUNT DIAGNOSTICS (PER-ACCOUNT REGISTRY) ── */}
       {failedAccounts.length > 0 && (
         <div className="p-4 rounded-2xl bg-rose-950/20 border border-rose-500/30 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-2 text-rose-300 font-bold">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>
-                Failed / Unauthenticated Credentials ({failedAccounts.length})
+                Inaccessible / Unauthenticated Accounts via Trader API ({failedAccounts.length})
               </span>
             </div>
             <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-500/30">
-              EXCLUDED FROM ACTIVE TRADING SELECTORS
+              EXCLUDED FROM VERIFIED ACCOUNTS &amp; MT5 SELECTORS
             </span>
           </div>
           <div className="space-y-2 text-[11px] text-[#94A3B8]">
-            {failedAccounts.slice(0, 6).map((f: any, idx: number) => {
+            {failedAccounts.map((f: any, idx: number) => {
               const isResyncing = resyncingId === f.connection_id;
               return (
                 <div
                   key={f.connection_id || idx}
                   className="p-3 rounded-xl bg-[#0E131B] border border-[#1E2736] flex flex-wrap items-center justify-between gap-3"
                 >
-                  <div className="space-y-1 flex-1 min-w-[220px]">
+                  <div className="space-y-1.5 flex-1 min-w-[220px]">
                     <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-[#38BDF8]">Exness</span>
                       <span className="font-bold text-white">
                         Account: {f.account_login || f.account_id_masked || f.account_id}
                       </span>
-                      {renderStateBadge(isResyncing ? "AUTHENTICATING" : f.verification_state || f.verification_status || "AUTH_FAILED")}
+                      {renderStateBadge(isResyncing ? "AUTHENTICATING" : f.connection_state || f.verification_status || "AUTH_FAILED")}
                       <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
                         ENVIRONMENT_UNVERIFIED
                       </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                        PLATFORM: UNVERIFIED
+                      </span>
                       <span className="text-[#94A3B8]">
-                        Balance / Equity: <strong className="text-rose-300">DATA UNAVAILABLE</strong>
+                        Balance: <strong className="text-rose-300">DATA UNAVAILABLE</strong>
+                      </span>
+                      <span className="text-[#94A3B8]">
+                        Equity: <strong className="text-rose-300">DATA UNAVAILABLE</strong>
                       </span>
                     </div>
                     <p className="text-xs text-rose-200/90 leading-relaxed break-words">
@@ -701,6 +896,104 @@ export default function ExchangeConnectionsView({
           SERVER-SIDE VAULT ISOLATION
         </span>
       </div>
+
+      {/* ─── DISCOVER ACCOUNTS MODAL (USES SAVED CREDENTIALS) ──────── */}
+      {isDiscoverModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#080B10]/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="relative w-full max-w-lg bg-[#0E131B] border border-[#1E2736] rounded-2xl shadow-2xl overflow-hidden font-mono text-xs flex flex-col">
+            <div className="px-5 py-4 border-b border-[#1E2736] flex items-center justify-between bg-[#151C28]/60">
+              <div className="flex items-center gap-2.5">
+                <Radio className="w-5 h-5 text-[#38BDF8]" />
+                <div>
+                  <h3 className="font-bold text-[#F1F5F9]">
+                    Discover Additional Exness Accounts
+                  </h3>
+                  <span className="text-[10px] text-[#64748B] block">
+                    Probes Account IDs Against Your Saved Exness API Key
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDiscoverModalOpen(false)}
+                className="p-1.5 rounded-lg text-[#64748B] hover:text-[#F1F5F9] hover:bg-[#1E2736] transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleDiscoverSavedAccounts} className="p-5 space-y-4">
+              {statusMsg && (
+                <div
+                  className={`p-3.5 rounded-xl border text-xs space-y-1 ${
+                    statusMsg.type === "success"
+                      ? "bg-emerald-950/30 text-emerald-300 border-emerald-500/40"
+                      : "bg-rose-950/30 text-rose-300 border-rose-500/40"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 font-bold">
+                    {statusMsg.type === "success" ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                    )}
+                    <span>{statusMsg.text}</span>
+                  </div>
+                  {statusMsg.details && (
+                    <p className="text-[11px] opacity-90 pl-6 leading-relaxed break-words">
+                      {statusMsg.details}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label className="text-[10px] uppercase text-[#94A3B8] block font-bold">
+                  Candidate Exness Account ID(s) (Comma-Separated)
+                </label>
+                <input
+                  type="text"
+                  value={discoverInputIds}
+                  onChange={(e) => setDiscoverInputIds(e.target.value)}
+                  placeholder="16000629657, 460310009, 478461031, 17000660016, 473001359"
+                  required
+                  className="w-full px-3 py-2.5 rounded-lg bg-[#151C28] border border-[#1E2736] text-[#F1F5F9] focus:outline-none focus:border-[#38BDF8]"
+                />
+                <p className="text-[10px] text-[#64748B] leading-relaxed">
+                  Note: The Exness Trader REST API does not expose a zero-input account enumeration endpoint; each account ID is probed independently via <code className="text-[#38BDF8]">GET /v1/trading/access-point?account_id=&#123;id&#125;</code> using your stored encrypted API key.
+                </p>
+              </div>
+
+              <div className="pt-3 flex items-center justify-end gap-2.5 border-t border-[#1E2736]">
+                <button
+                  type="button"
+                  onClick={() => setIsDiscoverModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-[#151C28] hover:bg-[#1E2736] text-[#94A3B8] transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isDiscovering}
+                  className="px-5 py-2 rounded-xl bg-[#38BDF8] text-[#080B10] font-bold hover:bg-[#38BDF8]/90 transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                >
+                  {isDiscovering ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Probing Accounts...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Radio className="w-3.5 h-3.5" />
+                      <span>Probe &amp; Discover Accounts</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* ─── TASK 1A: SIMPLIFIED UNIVERSAL EXNESS CONNECTION MODAL ──── */}
       {isModalOpen && (

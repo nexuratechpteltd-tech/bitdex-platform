@@ -135,11 +135,11 @@ websockets>=12.0
    ```
    No public inbound ports (`8095`, `8443`) are exposed to `0.0.0.0/0`.
 3. **Authorising Passwordless SSH Key on Windows Server 2025 (`149.33.34.123`)**:
-   To allow the Linux staging host (`169.58.218.168`) to execute remote provisioning over SSH without passwords, run the following once in an elevated PowerShell session on `149.33.34.123`:
+   To allow the Linux staging host (`169.58.218.168`) to execute remote provisioning over SSH without passwords, run the following once in an elevated PowerShell session on `149.33.34.123` (using the exact Ed25519 public key corresponding to `/root/.ssh/id_ed25519` on `169.58.218.168`):
    ```powershell
-   $pubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJn9Vbt2yTSG/N3+a9hTs+dPrR4ebB3b393p0T213aR0 root@ubuntu-2404-noble-amd64-base"
+   $pubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINO345btiocq8PAeZefcvyAQVpMi1EFkfELf//NX8yin antigravity-migration"
    $authFile = "C:\ProgramData\ssh\administrators_authorized_keys"
-   Add-Content -Path $authFile -Value $pubKey -Encoding Ascii
+   Set-Content -Path $authFile -Value $pubKey -Encoding Ascii
    icacls.exe $authFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F"
    Restart-Service sshd
    ```

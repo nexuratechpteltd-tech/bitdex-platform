@@ -225,6 +225,9 @@ def apply_exness_migrations(conn: sqlite3.Connection) -> None:
             ("access_point", "TEXT DEFAULT ''"),
             ("api_key", "TEXT DEFAULT ''"),
             ("account_tier", "TEXT DEFAULT 'Exness Native'"),
+            ("platform", "TEXT DEFAULT 'UNVERIFIED'"),
+            ("mt5_eligible", "INTEGER DEFAULT 0"),
+            ("stream_id", "TEXT DEFAULT ''"),
         ]
         for c_name, c_type in new_cols_defs:
             if c_name not in columns:
@@ -363,8 +366,14 @@ def save_exness_connection(
     access_point: str = "",
     api_key: str = "",
     account_tier: str = "Exness Native",
+    platform: str = "UNVERIFIED",
+    mt5_eligible: int = 0,
+    stream_id: str = "",
 ) -> str:
-    """Creates or updates an Exness connection with explicit tenant isolation, preference, and verification tracking."""
+    """
+    Creates or updates an Exness connection with explicit tenant isolation, preference, and verification tracking.
+    Prevents duplicate account records by deduplicating on (user_id, account_login).
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     acct_type = (account_type or "DEMO").upper()
     reconciled_at = now if verification_status in ("VERIFIED", "ACCOUNT_DATA_VERIFIED") else None
@@ -376,28 +385,38 @@ def save_exness_connection(
                 (user_id, acct_type),
             )
 
-        existing = conn.execute(
-            "SELECT connection_id, last_reconciled_at FROM exness_demo_connections WHERE user_id = ? AND account_login = ? AND server_name = ?",
-            (user_id, login, server),
-        ).fetchone()
+        # Deduplicate strictly by (user_id, account_login) regardless of server_name variations
+        existing_rows = conn.execute(
+            "SELECT connection_id, last_reconciled_at FROM exness_demo_connections WHERE user_id = ? AND account_login = ? ORDER BY is_active DESC, updated_at DESC",
+            (user_id, login),
+        ).fetchall()
 
-        if existing:
-            conn_id = existing["connection_id"]
-            final_reconciled = reconciled_at or existing["last_reconciled_at"]
+        if existing_rows:
+            conn_id = existing_rows[0]["connection_id"]
+            final_reconciled = reconciled_at or existing_rows[0]["last_reconciled_at"]
+            # Deactivate any older duplicate rows for the same (user_id, account_login)
+            if len(existing_rows) > 1:
+                for dup in existing_rows[1:]:
+                    conn.execute(
+                        "UPDATE exness_demo_connections SET is_active = 0, is_preferred = 0, updated_at = ? WHERE connection_id = ?",
+                        (now, dup["connection_id"]),
+                    )
             conn.execute(
                 """
                 UPDATE exness_demo_connections
-                SET account_type = ?, adapter_mode = ?, encrypted_credentials = ?,
+                SET server_name = ?, account_type = ?, adapter_mode = ?, encrypted_credentials = ?,
                     is_active = 1, balance_usd = ?, equity_usd = ?, leverage = ?,
                     currency = ?, account_label = COALESCE(NULLIF(?, ''), account_label),
                     is_preferred = ?, updated_at = ?,
                     verification_status = ?, error_type = ?, error_detail = ?,
                     trade_mode = ?, margin_used = ?, margin_free = ?,
                     environment_confirmed_by = ?, access_point = ?, api_key = ?,
-                    account_tier = ?, last_reconciled_at = ?
+                    account_tier = ?, platform = ?, mt5_eligible = ?, stream_id = ?,
+                    last_reconciled_at = ?
                 WHERE connection_id = ? AND user_id = ?
                 """,
                 (
+                    server,
                     acct_type,
                     adapter_mode,
                     json.dumps(enc_credentials),
@@ -418,6 +437,9 @@ def save_exness_connection(
                     access_point,
                     api_key,
                     account_tier,
+                    platform,
+                    int(bool(mt5_eligible)),
+                    stream_id,
                     final_reconciled,
                     conn_id,
                     user_id,
@@ -433,8 +455,9 @@ def save_exness_connection(
                     equity_usd, leverage, currency, account_label, is_preferred,
                     verification_status, error_type, error_detail, trade_mode,
                     margin_used, margin_free, environment_confirmed_by, access_point,
-                    api_key, account_tier, last_reconciled_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    api_key, account_tier, platform, mt5_eligible, stream_id,
+                    last_reconciled_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conn_id,
@@ -460,6 +483,9 @@ def save_exness_connection(
                     access_point,
                     api_key,
                     account_tier,
+                    platform,
+                    int(bool(mt5_eligible)),
+                    stream_id,
                     reconciled_at,
                     now,
                     now,
