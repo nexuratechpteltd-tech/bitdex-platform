@@ -1071,6 +1071,71 @@ async def get_my_connections(current_user: Dict[str, Any] = Depends(get_current_
                     logger.debug(f"Could not load balances for {d.get('account_id')}: {ex}")
 
             connections.append(d)
+
+        # Also include active Exness connections from exness_demo_connections with distinct Task 3 states
+        exn_rows = conn.execute("""
+            SELECT connection_id, user_id, account_login, server_name, account_type,
+                   adapter_mode, is_active, balance_usd, equity_usd, leverage, currency,
+                   last_reconciled_at, created_at, updated_at, is_preferred, account_label,
+                   verification_status, error_type, error_detail, trade_mode,
+                   environment_confirmed_by, access_point, account_tier
+            FROM exness_demo_connections
+            WHERE user_id = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'
+            ORDER BY is_preferred DESC, updated_at DESC
+        """, (user_id,)).fetchall()
+        for er in exn_rows:
+            ed = dict(er)
+            raw_v = (ed.get("verification_status") or "").upper().strip()
+            env_raw = (ed.get("account_type") or "ENVIRONMENT UNVERIFIED").upper().strip()
+            has_env = env_raw in ("DEMO", "REAL")
+            has_bal = ed.get("balance_usd") is not None
+
+            if raw_v in ("FAILED", "ERROR", "AUTH_FAILED"):
+                c_state = "AUTH_FAILED"
+            elif raw_v in ("NOT_TESTED", "CREDENTIALS_SAVED", ""):
+                c_state = "CREDENTIALS_SAVED"
+            elif raw_v == "NODE_CONNECTED":
+                c_state = "NODE_CONNECTED"
+            elif raw_v == "AUTHENTICATING":
+                c_state = "AUTHENTICATING"
+            elif raw_v in ("ENVIRONMENT_UNVERIFIED",) or not has_env:
+                c_state = "ENVIRONMENT_UNVERIFIED"
+            elif raw_v in ("VERIFIED", "ACCOUNT_DATA_VERIFIED") and has_env and has_bal:
+                c_state = "ACCOUNT_DATA_VERIFIED"
+            elif raw_v in ("VERIFIED", "ACCOUNT_DATA_VERIFIED", "BROKER_AUTHENTICATED") and has_env:
+                c_state = "BROKER_AUTHENTICATED"
+            else:
+                c_state = "ENVIRONMENT_UNVERIFIED"
+
+            is_verified = (c_state == "ACCOUNT_DATA_VERIFIED") and has_env
+            bal_val = float(ed["balance_usd"]) if (is_verified and ed.get("balance_usd") is not None) else None
+            connections.append({
+                "account_id": ed["connection_id"],
+                "connection_id": ed["connection_id"],
+                "user_id": user_id,
+                "provider": "EXNESS",
+                "exchange": "EXNESS",
+                "exchange_name": "Exness",
+                "adapter_id": ed.get("adapter_mode") or "EXNESS_TRADER_API",
+                "label": ed.get("account_label") or f"Exness ({_mask_id(ed['account_login'])})",
+                "environment": env_raw if has_env else "ENVIRONMENT UNVERIFIED",
+                "account_tier": ed.get("account_tier") if is_verified else "UNVERIFIED",
+                "product_type": "CFD",
+                "status": "CONNECTED" if is_verified else c_state,
+                "connection_status": c_state,
+                "verification_status": "VERIFIED" if is_verified else c_state,
+                "is_verified": is_verified,
+                "is_active": 1,
+                "balance_usd": bal_val,
+                "account_data": {
+                    "asset_balances": [{"asset": ed.get("currency", "USD"), "total": bal_val}] if bal_val is not None else [],
+                    "total_usd": bal_val,
+                },
+                "sanitized_error": ed.get("error_detail") or "",
+                "created_at": ed.get("created_at"),
+                "last_verified_at": ed.get("last_reconciled_at"),
+            })
+
         return {
             "status": "SUCCESS",
             "user_id": user_id,
@@ -2803,15 +2868,13 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
         r = dict(r)
         raw_env = (r.get("account_type") or "").upper()
         env = "REAL" if raw_env == "REAL" else ("DEMO" if raw_env == "DEMO" else "ENVIRONMENT UNVERIFIED")
-        v_status = r.get("verification_status")
-        if v_status:
-            verified = (v_status == "VERIFIED")
-            status = v_status
-        else:
-            verified = bool(r.get("last_reconciled_at"))
-            status = "VERIFIED" if verified else "NOT TESTED"
-        tier_raw = r.get("account_tier") or ""
-        tier_display = tier_raw if (verified and tier_raw and tier_raw not in ("STANDARD", "UNVERIFIED")) else ("Exness Native" if verified else "UNVERIFIED")
+        v_status = (r.get("verification_status") or "").upper().strip()
+        has_env = env in ("DEMO", "REAL")
+        has_bal = r.get("balance_usd") is not None
+        verified = v_status in ("VERIFIED", "ACCOUNT_DATA_VERIFIED") and has_env and has_bal
+        status = "ACCOUNT_DATA_VERIFIED" if verified else (v_status or "CREDENTIALS_SAVED")
+        tier_raw = (r.get("account_tier") or "").strip()
+        tier_display = tier_raw if (verified and tier_raw and tier_raw.upper() not in ("UNVERIFIED", "")) else ("Exness Native" if verified else "UNVERIFIED")
         return {
             "account_id": r["connection_id"],
             "source": "EXNESS",
@@ -2821,13 +2884,14 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
             "account_tier": tier_display,
             "masked_id": _mask_id(r.get("account_login")),
             "account_login": str(r.get("account_login")),
-            "connection_status": status,
+            "connection_status": "VERIFIED" if verified else status,
+            "connection_state": status,
             "connected": verified,
-            "currency": r.get("currency") or "USD",
+            "currency": r.get("currency") if verified and r.get("currency") else "DATA UNAVAILABLE",
             "available_balance": float(r["balance_usd"]) if verified and r.get("balance_usd") is not None else None,
             "equity": float(r["equity_usd"]) if verified and r.get("equity_usd") is not None else None,
-            "margin_used": float(r.get("margin_used") or 0.0),
-            "margin_free": float(r.get("margin_free") or 0.0),
+            "margin_used": float(r["margin_used"]) if verified and r.get("margin_used") is not None else None,
+            "margin_free": float(r["margin_free"]) if verified and r.get("margin_free") is not None else None,
             "trade_mode": r.get("trade_mode") or env,
             "error_type": r.get("error_type") or "",
             "error_detail": r.get("error_detail") or "",
@@ -2915,9 +2979,9 @@ def _hft_scoped_summary(user_id, account_id):
             "account_environment": a["environment"], "masked_id": a["masked_id"],
             "connection_status": a["connection_status"], "connected": a["connected"],
             "currency": a["currency"], "balance_retrieved": a["available_balance"] is not None,
-            "wallet_balance_usd": a["equity"] or 0.0, "available_balance_usd": a["available_balance"] or 0.0,
-            "unrealized_pnl_usd": 0.0, "margin_balance_usd": a["available_balance"] or 0.0,
-            "equity_usd": a["equity"] or 0.0, "margin_type": "ISOLATED", "default_leverage": 3,
+            "wallet_balance_usd": a["equity"], "available_balance_usd": a["available_balance"],
+            "unrealized_pnl_usd": 0.0, "margin_balance_usd": a["available_balance"],
+            "equity_usd": a["equity"], "margin_type": "ISOLATED", "default_leverage": 3,
             "max_leverage_limit": 5, "kill_switch_active": False, "engine_b_enabled": False,
             "real_consent_recorded": _has_real_consent(conn, user_id, a["account_id"]) if a["environment"] == "REAL" else None,
             "last_connected_at": a["last_connected_at"],
@@ -2940,9 +3004,10 @@ async def get_hft_connected_accounts(current_user: Dict[str, Any] = Depends(get_
             """
             SELECT connection_id FROM exness_demo_connections
             WHERE user_id = ? AND is_active = 1
-              AND verification_status = 'VERIFIED'
+              AND verification_status IN ('VERIFIED', 'ACCOUNT_DATA_VERIFIED')
               AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'
               AND account_type IN ('DEMO', 'REAL')
+              AND balance_usd IS NOT NULL
             ORDER BY account_type ASC, is_preferred DESC, updated_at DESC
             """,
             (user_id,),

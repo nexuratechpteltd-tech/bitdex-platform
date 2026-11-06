@@ -262,12 +262,46 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
     def format_conn(c):
         if not c:
             return None
-        v_status = c.get("verification_status") or ("VERIFIED" if c.get("last_reconciled_at") else "NOT_TESTED")
-        is_verified = (v_status == "VERIFIED")
-        env_raw = c.get("account_type") or "ENVIRONMENT UNVERIFIED"
-        env_display = env_raw if is_verified and env_raw in ("DEMO", "REAL") else "ENVIRONMENT UNVERIFIED"
-        tier_raw = c.get("account_tier") or ""
-        tier_display = tier_raw if (is_verified and tier_raw and tier_raw not in ("STANDARD", "UNVERIFIED")) else ("Exness Native" if is_verified else "UNVERIFIED")
+        raw_v = (c.get("verification_status") or "").upper().strip()
+        env_raw = (c.get("account_type") or "ENVIRONMENT UNVERIFIED").upper().strip()
+        has_env = env_raw in ("DEMO", "REAL")
+        has_bal = c.get("balance_usd") is not None
+
+        # Map legacy / database statuses to distinct Task 3 state machine states:
+        # CREDENTIALS_SAVED | NODE_CONNECTED | AUTHENTICATING | AUTH_FAILED |
+        # BROKER_AUTHENTICATED | ACCOUNT_DATA_VERIFIED | ENVIRONMENT_UNVERIFIED
+        if raw_v in ("FAILED", "ERROR", "AUTH_FAILED"):
+            state = "AUTH_FAILED"
+        elif raw_v in ("NOT_TESTED", "CREDENTIALS_SAVED", ""):
+            state = "CREDENTIALS_SAVED"
+        elif raw_v == "NODE_CONNECTED":
+            state = "NODE_CONNECTED"
+        elif raw_v == "AUTHENTICATING":
+            state = "AUTHENTICATING"
+        elif raw_v in ("ENVIRONMENT_UNVERIFIED",) or not has_env:
+            state = "ENVIRONMENT_UNVERIFIED"
+        elif raw_v in ("VERIFIED", "ACCOUNT_DATA_VERIFIED") and has_env and has_bal:
+            state = "ACCOUNT_DATA_VERIFIED"
+        elif raw_v in ("VERIFIED", "ACCOUNT_DATA_VERIFIED", "BROKER_AUTHENTICATED") and has_env:
+            state = "BROKER_AUTHENTICATED"
+        else:
+            state = "ENVIRONMENT_UNVERIFIED"
+
+        is_fully_verified = (state == "ACCOUNT_DATA_VERIFIED") and has_env
+        is_broker_authed = state in ("ACCOUNT_DATA_VERIFIED", "BROKER_AUTHENTICATED") and has_env
+        env_display = env_raw if has_env else "ENVIRONMENT UNVERIFIED"
+
+        tier_raw = (c.get("account_tier") or "").strip()
+        if is_broker_authed and tier_raw and tier_raw.upper() not in ("UNVERIFIED", ""):
+            tier_display = tier_raw
+        elif is_broker_authed:
+            tier_display = "Exness Native"
+        else:
+            tier_display = "UNVERIFIED"
+
+        bal_val = float(c["balance_usd"]) if (is_fully_verified and c.get("balance_usd") is not None) else None
+        eq_val = float(c["equity_usd"]) if (is_fully_verified and c.get("equity_usd") is not None) else None
+
         return {
             "connection_id": c["connection_id"],
             "account_login": mask_id(c["account_login"]),
@@ -276,34 +310,56 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
             "account_type": env_display,
             "account_tier": tier_display,
             "adapter_mode": c.get("adapter_mode", "EXNESS_TRADER_API"),
-            "account_label": c.get("account_label") or (f"Exness {env_display.title()} ({mask_id(c['account_login'])})" if is_verified else f"Exness Unverified ({mask_id(c['account_login'])})"),
+            "account_label": c.get("account_label") or (f"Exness {env_display.title()} ({mask_id(c['account_login'])})" if is_fully_verified else f"Exness ({mask_id(c['account_login'])})"),
             "is_preferred": bool(c.get("is_preferred", 0)),
-            "balance_usd": c["balance_usd"] if is_verified else None,
-            "equity_usd": c["equity_usd"] if is_verified else None,
-            "margin_used": c.get("margin_used", 0.0) if is_verified else None,
-            "margin_free": c.get("margin_free", 0.0) if is_verified else None,
+            "balance_usd": bal_val,
+            "equity_usd": eq_val,
+            "balance_display": f"{bal_val:.2f}" if bal_val is not None else "DATA UNAVAILABLE",
+            "equity_display": f"{eq_val:.2f}" if eq_val is not None else "DATA UNAVAILABLE",
+            "margin_used": c.get("margin_used") if is_fully_verified else None,
+            "margin_free": c.get("margin_free") if is_fully_verified else None,
             "trade_mode": c.get("trade_mode") or env_display,
-            "verification_status": v_status,
+            "verification_status": "VERIFIED" if is_fully_verified else state,
+            "connection_state": state,
+            "is_verified": is_fully_verified,
+            "broker_authenticated": is_broker_authed,
             "error_type": c.get("error_type") or "",
             "error_detail": c.get("error_detail") or "",
-            "environment_confirmed_by": c.get("environment_confirmed_by") or ("PROVIDER_VERIFIED" if is_verified else "UNVERIFIED"),
+            "environment_confirmed_by": c.get("environment_confirmed_by") or ("PROVIDER_VERIFIED" if has_env else "UNVERIFIED"),
             "access_point": c.get("access_point") or "",
-            "currency": c.get("currency", "USD") if is_verified else "—",
+            "currency": c.get("currency", "USD") if (is_broker_authed and c.get("currency") and c.get("currency") != "DATA UNAVAILABLE") else "DATA UNAVAILABLE",
+            "leverage": c.get("leverage", 200) if is_broker_authed else None,
             "is_active": bool(c.get("is_active", 1)),
             "last_reconciled_at": c["last_reconciled_at"],
             "data_source": "Exness REST/WS Gateway" if c.get("adapter_mode") == "EXNESS_TRADER_API" else "Windows MT5 IPC Bridge",
         }
 
     formatted_all = [format_conn(c) for c in all_conns if c]
-    verified_all = [c for c in formatted_all if c.get("verification_status") == "VERIFIED"]
+    verified_all = [c for c in formatted_all if c.get("is_verified") is True and c.get("account_type") in ("DEMO", "REAL")]
     exness_demos = [c for c in verified_all if c["account_type"] == "DEMO"]
     exness_reals = [c for c in verified_all if c["account_type"] == "REAL"]
-    failed_conns = [c for c in formatted_all if c.get("verification_status") in ("FAILED", "ERROR", "NOT_TESTED")]
+    unverified_conns = [c for c in formatted_all if not c.get("is_verified") and c.get("connection_state") in ("ENVIRONMENT_UNVERIFIED", "BROKER_AUTHENTICATED", "CREDENTIALS_SAVED", "NODE_CONNECTED", "AUTHENTICATING")]
+    failed_conns = [c for c in formatted_all if c.get("connection_state") == "AUTH_FAILED"]
     has_any_verified = len(verified_all) > 0
+
+    # Overall header state machine status
+    if has_any_verified:
+        overall_state = "ACCOUNT_DATA_VERIFIED"
+    elif any(c.get("connection_state") == "BROKER_AUTHENTICATED" for c in formatted_all):
+        overall_state = "BROKER_AUTHENTICATED"
+    elif any(c.get("connection_state") == "ENVIRONMENT_UNVERIFIED" for c in formatted_all):
+        overall_state = "ENVIRONMENT_UNVERIFIED"
+    elif any(c.get("connection_state") == "AUTH_FAILED" for c in formatted_all):
+        overall_state = "AUTH_FAILED"
+    elif any(c.get("connection_state") == "CREDENTIALS_SAVED" for c in formatted_all):
+        overall_state = "CREDENTIALS_SAVED"
+    else:
+        overall_state = "NOT_CONNECTED"
 
     return {
         "status": "SUCCESS",
         "broker": "Exness",
+        "overall_state": overall_state,
         "environments_supported": ["DEMO", "REAL"],
         "live_trading_locked": True,
         "emergency_lock_active": True,
@@ -318,6 +374,7 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         "active_trader_connection": verified_all[0] if verified_all else None,
         "all_connections": formatted_all,
         "verified_accounts": verified_all,
+        "unverified_accounts": unverified_conns,
         "demo_connections": [c for c in exness_demos if c.get("adapter_mode") != "EXNESS_TRADER_API"],
         "real_connections": [c for c in exness_reals if c.get("adapter_mode") != "EXNESS_TRADER_API"],
         "trader_connections": [c for c in verified_all if c.get("adapter_mode") == "EXNESS_TRADER_API"],
@@ -666,12 +723,13 @@ async def attach_and_discover_accounts(
     conn = get_db_connection()
     persisted_demo = []
     persisted_real = []
+    persisted_unverified = []
     persisted_failed = []
 
     try:
-        # Save verified DEMO accounts (or ENVIRONMENT UNVERIFIED if provider did not specify)
+        # Save verified DEMO accounts (strictly DEMO + balance retrieved)
         for d in disc_res.get("demo_accounts", []):
-            env_val = d.get("environment") or "ENVIRONMENT UNVERIFIED"
+            env_val = "DEMO"
             tier_val = d.get("account_tier") or "Exness Native"
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
@@ -688,16 +746,16 @@ async def attach_and_discover_accounts(
                 enc_credentials=enc,
                 adapter_mode="EXNESS_TRADER_API",
                 account_type=env_val,
-                balance=float(d.get("balance", 0.0)),
-                equity=float(d.get("equity", 0.0)),
+                balance=d.get("balance"),
+                equity=d.get("equity"),
                 leverage=int(d.get("leverage", 200)),
                 currency=d.get("currency", "USD"),
-                account_label=req.account_label or f"Exness {env_val.title()} ({mask_id(d['account_id'])})",
+                account_label=req.account_label or f"Exness Demo ({mask_id(d['account_id'])})",
                 is_preferred=1,
-                verification_status="VERIFIED",
-                trade_mode=d.get("trade_mode", env_val),
-                margin_used=float(d.get("margin_used", 0.0)),
-                margin_free=float(d.get("margin_free", 0.0)),
+                verification_status="ACCOUNT_DATA_VERIFIED",
+                trade_mode=d.get("trade_mode", "ENABLED"),
+                margin_used=d.get("margin_used"),
+                margin_free=d.get("margin_free"),
                 environment_confirmed_by=d.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
                 access_point=d.get("access_point", ""),
                 api_key=api_key,
@@ -709,17 +767,18 @@ async def attach_and_discover_accounts(
                 "account_id_masked": mask_id(d["account_id"]),
                 "environment": env_val,
                 "account_tier": tier_val,
-                "balance": d.get("balance", 0.0),
-                "equity": d.get("equity", 0.0),
-                "margin_used": d.get("margin_used", 0.0),
-                "margin_free": d.get("margin_free", 0.0),
+                "balance": d.get("balance"),
+                "equity": d.get("equity"),
+                "margin_used": d.get("margin_used"),
+                "margin_free": d.get("margin_free"),
                 "currency": d.get("currency", "USD"),
                 "verification_status": "VERIFIED",
-                "trade_mode": d.get("trade_mode", env_val),
+                "connection_state": "ACCOUNT_DATA_VERIFIED",
+                "trade_mode": d.get("trade_mode", "ENABLED"),
                 "access_point": d.get("access_point", ""),
             })
 
-        # Save verified REAL accounts
+        # Save verified REAL accounts (strictly REAL + balance retrieved)
         for r in disc_res.get("real_accounts", []):
             tier_val = r.get("account_tier") or "Exness Native"
             enc = ExnessCredentialVault.encrypt_credentials(
@@ -737,16 +796,16 @@ async def attach_and_discover_accounts(
                 enc_credentials=enc,
                 adapter_mode="EXNESS_TRADER_API",
                 account_type="REAL",
-                balance=float(r.get("balance", 0.0)),
-                equity=float(r.get("equity", 0.0)),
+                balance=r.get("balance"),
+                equity=r.get("equity"),
                 leverage=int(r.get("leverage", 200)),
                 currency=r.get("currency", "USD"),
                 account_label=req.account_label or f"Exness Real ({mask_id(r['account_id'])})",
                 is_preferred=1,
-                verification_status="VERIFIED",
-                trade_mode=r.get("trade_mode", "REAL"),
-                margin_used=float(r.get("margin_used", 0.0)),
-                margin_free=float(r.get("margin_free", 0.0)),
+                verification_status="ACCOUNT_DATA_VERIFIED",
+                trade_mode=r.get("trade_mode", "ENABLED"),
+                margin_used=r.get("margin_used"),
+                margin_free=r.get("margin_free"),
                 environment_confirmed_by=r.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
                 access_point=r.get("access_point", ""),
                 api_key=api_key,
@@ -758,17 +817,67 @@ async def attach_and_discover_accounts(
                 "account_id_masked": mask_id(r["account_id"]),
                 "environment": "REAL",
                 "account_tier": tier_val,
-                "balance": r.get("balance", 0.0),
-                "equity": r.get("equity", 0.0),
-                "margin_used": r.get("margin_used", 0.0),
-                "margin_free": r.get("margin_free", 0.0),
+                "balance": r.get("balance"),
+                "equity": r.get("equity"),
+                "margin_used": r.get("margin_used"),
+                "margin_free": r.get("margin_free"),
                 "currency": r.get("currency", "USD"),
                 "verification_status": "VERIFIED",
-                "trade_mode": r.get("trade_mode", "REAL"),
+                "connection_state": "ACCOUNT_DATA_VERIFIED",
+                "trade_mode": r.get("trade_mode", "ENABLED"),
                 "access_point": r.get("access_point", ""),
             })
 
-        # Record failed accounts (never infer Demo vs Real from ID pattern or fabricate verified status)
+        # Save unverified / partially authenticated accounts (e.g. ENVIRONMENT_UNVERIFIED or BROKER_AUTHENTICATED without balance)
+        for u in disc_res.get("unverified_accounts", []):
+            env_val = u.get("environment") or "ENVIRONMENT UNVERIFIED"
+            state_val = u.get("verification_state") or "ENVIRONMENT_UNVERIFIED"
+            tier_val = u.get("account_tier") or "Exness Native"
+            enc = ExnessCredentialVault.encrypt_credentials(
+                user_id=user_id,
+                login=u["account_id"],
+                password=api_secret,
+                server=gateway_host,
+                account_type=env_val,
+            )
+            cid = save_exness_connection(
+                conn=conn,
+                user_id=user_id,
+                login=u["account_id"],
+                server=gateway_host,
+                enc_credentials=enc,
+                adapter_mode="EXNESS_TRADER_API",
+                account_type=env_val,
+                balance=u.get("balance"),
+                equity=u.get("equity"),
+                leverage=int(u.get("leverage", 200)),
+                currency=u.get("currency", "DATA UNAVAILABLE"),
+                account_label=req.account_label or f"Exness Unverified ({mask_id(u['account_id'])})",
+                is_preferred=0,
+                verification_status=state_val,
+                trade_mode=u.get("trade_mode", env_val),
+                margin_used=u.get("margin_used"),
+                margin_free=u.get("margin_free"),
+                environment_confirmed_by=u.get("environment_confirmed_by", "UNVERIFIED"),
+                access_point=u.get("access_point", ""),
+                api_key=api_key,
+                account_tier=tier_val,
+            )
+            persisted_unverified.append({
+                "connection_id": cid,
+                "account_id": u["account_id"],
+                "account_id_masked": mask_id(u["account_id"]),
+                "environment": env_val,
+                "account_tier": tier_val,
+                "balance": u.get("balance"),
+                "equity": u.get("equity"),
+                "currency": u.get("currency", "DATA UNAVAILABLE"),
+                "verification_status": state_val,
+                "connection_state": state_val,
+                "access_point": u.get("access_point", ""),
+            })
+
+        # Record failed accounts (never infer Demo vs Real from ID pattern or fabricate verified status or 0.00 balance)
         for f in disc_res.get("failed_accounts", []):
             enc = ExnessCredentialVault.encrypt_credentials(
                 user_id=user_id,
@@ -785,9 +894,9 @@ async def attach_and_discover_accounts(
                 enc_credentials=enc,
                 adapter_mode="EXNESS_TRADER_API",
                 account_type="ENVIRONMENT UNVERIFIED",
-                balance=0.0,
-                equity=0.0,
-                verification_status="FAILED",
+                balance=None,
+                equity=None,
+                verification_status="AUTH_FAILED",
                 error_type=f.get("error_type", "AUTHENTICATION_FAILED"),
                 error_detail=f.get("error_detail", "Authentication failed."),
                 environment_confirmed_by="UNVERIFIED",
@@ -805,7 +914,8 @@ async def attach_and_discover_accounts(
                 "error_detail": f.get("error_detail"),
                 "http_status": f.get("http_status"),
                 "exness_code": f.get("exness_code"),
-                "verification_status": "FAILED",
+                "verification_status": "AUTH_FAILED",
+                "connection_state": "AUTH_FAILED",
             })
 
     finally:
@@ -821,8 +931,10 @@ async def attach_and_discover_accounts(
         "enumeration_detail": disc_res.get("enumeration_detail"),
         "exness_demo_accounts": persisted_demo,
         "exness_real_accounts": persisted_real,
+        "unverified_accounts": persisted_unverified,
         "failed_accounts": persisted_failed,
         "total_verified": total_verified,
+        "total_unverified": len(persisted_unverified),
         "total_failed": len(persisted_failed),
         "gateway_host": gateway_host,
     }
@@ -875,20 +987,33 @@ async def resync_exness_account(
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         if auth_res.get("verified"):
+            env_val = auth_res.get("environment", "ENVIRONMENT UNVERIFIED")
+            tier_val = auth_res.get("account_tier", "Exness Native")
+            state_val = auth_res.get("verification_state", "ACCOUNT_DATA_VERIFIED")
             with conn:
                 conn.execute(
                     """
                     UPDATE exness_demo_connections
-                    SET balance_usd = ?, equity_usd = ?, margin_used = ?, margin_free = ?,
-                        verification_status = 'VERIFIED', error_type = '', error_detail = '',
+                    SET account_type = ?, account_tier = ?, currency = ?, leverage = ?,
+                        balance_usd = ?, equity_usd = ?, margin_used = ?, margin_free = ?,
+                        verification_status = ?, environment_confirmed_by = ?, access_point = ?,
+                        trade_mode = ?, error_type = '', error_detail = '',
                         last_reconciled_at = ?, updated_at = ?
                     WHERE connection_id = ? AND user_id = ?
                     """,
                     (
-                        auth_res.get("balance", 0.0),
-                        auth_res.get("equity", 0.0),
-                        auth_res.get("margin_used", 0.0),
-                        auth_res.get("margin_free", 0.0),
+                        env_val,
+                        tier_val,
+                        auth_res.get("currency", "USD"),
+                        auth_res.get("leverage", 200),
+                        auth_res.get("balance"),
+                        auth_res.get("equity"),
+                        auth_res.get("margin_used"),
+                        auth_res.get("margin_free"),
+                        state_val,
+                        auth_res.get("environment_confirmed_by", "PROVIDER_VERIFIED"),
+                        auth_res.get("access_point", ""),
+                        auth_res.get("trade_mode", "ENABLED"),
                         now,
                         now,
                         connection_id,
@@ -897,18 +1022,21 @@ async def resync_exness_account(
                 )
             return {
                 "status": "SUCCESS",
-                "message": f"Account {login} resynchronized and verified.",
+                "message": f"Account {login} resynchronized and verified ({env_val} / {tier_val}).",
                 "account": auth_res,
             }
         else:
+            state_val = auth_res.get("verification_state") or "AUTH_FAILED"
             with conn:
                 conn.execute(
                     """
                     UPDATE exness_demo_connections
-                    SET verification_status = 'FAILED', error_type = ?, error_detail = ?, updated_at = ?
+                    SET verification_status = ?, balance_usd = NULL, equity_usd = NULL,
+                        error_type = ?, error_detail = ?, updated_at = ?
                     WHERE connection_id = ? AND user_id = ?
                     """,
                     (
+                        state_val,
                         auth_res.get("error_type", "AUTHENTICATION_FAILED"),
                         auth_res.get("error_detail", "Authentication rejected."),
                         now,

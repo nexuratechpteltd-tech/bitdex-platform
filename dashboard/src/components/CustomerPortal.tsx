@@ -893,6 +893,20 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
     }, 1200);
   };
 
+  const fetchConnections = async () => {
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const connRes = await fetch(getApiUrl("/saas/customer/connections"), { headers });
+      if (connRes.ok) {
+        const cData = await connRes.json();
+        setConnections(cData.connections || []);
+      }
+      fetchBalances();
+    } catch (err: any) {
+      console.error("Failed to load connections", err);
+    }
+  };
+
   const fetchCustomerData = async () => {
     setIsLoading(true);
     try {
@@ -908,11 +922,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
       }
 
       // 2. Fetch Connections
-      const connRes = await fetch(getApiUrl("/saas/customer/connections"), { headers });
-      if (connRes.ok) {
-        const cData = await connRes.json();
-        setConnections(cData.connections || []);
-      }
+      await fetchConnections();
 
       // 3. Fetch Ledger
       const ledRes = await fetch(getApiUrl("/saas/customer/billing/ledger?limit=30"), { headers });
@@ -921,9 +931,8 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
         setLedger(lData.ledger || []);
       }
 
-      // 4. Fetch Wallets & Balances
+      // 4. Fetch Wallets
       fetchWallets();
-      fetchBalances();
     } catch (err: any) {
       console.error("Failed to load customer data", err);
     } finally {
@@ -1505,6 +1514,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
         onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
         isMobileDrawerOpen={isMobileDrawerOpen}
         onCloseMobileDrawer={() => setIsMobileDrawerOpen(false)}
+        exnessConnected={Boolean(connections.find(c => ((c.provider || "").toUpperCase() === "EXNESS" || (c.exchange || "").toUpperCase() === "EXNESS") && c.is_verified === true && c.is_active))}
         userEmail={profile?.email || user?.email}
         userRole={user?.role}
         onSignOut={onSignOut}
@@ -1541,18 +1551,77 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {/* Right: Broker Pill, Environment Badge & User Menu */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Exness Connection Pill (Truthful Status based on verified accounts) */}
-            {connections && connections.some((c: any) => c.verification_status === "VERIFIED" && c.exchange === "EXNESS") ? (
-              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 text-xs font-mono font-bold">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
-                <span>EXNESS: CONNECTED</span>
-              </div>
-            ) : (
-              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#EF4444]/15 text-[#EF4444] border border-[#EF4444]/30 text-xs font-mono font-bold">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#EF4444]" />
-                <span>EXNESS: NOT CONNECTED</span>
-              </div>
-            )}
+            {/* Exness Connection Pill (Truthful Status based on state machine) */}
+            {(() => {
+              const exnessConns = (connections || []).filter(
+                (c: any) =>
+                  (c.provider || "").toUpperCase() === "EXNESS" ||
+                  (c.exchange || "").toUpperCase() === "EXNESS" ||
+                  (c.exchange_name || "").toUpperCase() === "EXNESS"
+              );
+              const verifiedExness = exnessConns.filter(
+                (c: any) =>
+                  c.is_verified === true &&
+                  (c.connection_status === "ACCOUNT_DATA_VERIFIED" || c.verification_status === "ACCOUNT_DATA_VERIFIED" || c.verification_status === "VERIFIED") &&
+                  (c.environment === "DEMO" || c.environment === "REAL" || c.environment === "LIVE")
+              );
+              const envUnverifiedExness = exnessConns.filter(
+                (c: any) =>
+                  c.connection_status === "ENVIRONMENT_UNVERIFIED" ||
+                  c.verification_status === "ENVIRONMENT_UNVERIFIED" ||
+                  c.connection_status === "BROKER_AUTHENTICATED"
+              );
+              const authFailedExness = exnessConns.filter(
+                (c: any) =>
+                  c.connection_status === "AUTH_FAILED" ||
+                  c.verification_status === "AUTH_FAILED" ||
+                  c.verification_status === "VERIFICATION_FAILED"
+              );
+              const savedExness = exnessConns.filter(
+                (c: any) =>
+                  c.connection_status === "CREDENTIALS_SAVED" ||
+                  c.verification_status === "CREDENTIALS_SAVED"
+              );
+
+              if (verifiedExness.length > 0) {
+                return (
+                  <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 text-xs font-mono font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
+                    <span>EXNESS: ACCOUNT_DATA_VERIFIED ({verifiedExness.length})</span>
+                  </div>
+                );
+              }
+              if (envUnverifiedExness.length > 0) {
+                return (
+                  <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#F59E0B]/15 text-[#F59E0B] border border-[#F59E0B]/30 text-xs font-mono font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#F59E0B]" />
+                    <span>EXNESS: {envUnverifiedExness[0].connection_status || "ENVIRONMENT_UNVERIFIED"}</span>
+                  </div>
+                );
+              }
+              if (authFailedExness.length > 0) {
+                return (
+                  <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#EF4444]/15 text-[#EF4444] border border-[#EF4444]/30 text-xs font-mono font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#EF4444]" />
+                    <span>EXNESS: AUTH_FAILED</span>
+                  </div>
+                );
+              }
+              if (savedExness.length > 0) {
+                return (
+                  <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#64748B]/20 text-[#94A3B8] border border-[#64748B]/40 text-xs font-mono font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#94A3B8]" />
+                    <span>EXNESS: CREDENTIALS_SAVED</span>
+                  </div>
+                );
+              }
+              return (
+                <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#EF4444]/15 text-[#EF4444] border border-[#EF4444]/30 text-xs font-mono font-bold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#EF4444]" />
+                  <span>EXNESS: NOT CONNECTED</span>
+                </div>
+              );
+            })()}
 
             {/* Duplicate top-right Admin Portal button removed (preserved in sidebar and profile dropdown) */}
 
@@ -1662,7 +1731,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               equity={balancesData?.total_usd ?? 0.0}
               unrealizedPnl={0.0}
               realizedPnl={0.0}
-              exnessConnected={Boolean(connections.find(c => (c.provider === "EXNESS" || c.exchange === "EXNESS") && (c.status === "CONNECTED" || c.status === "ACTIVE") && c.is_active))}
+              exnessConnected={Boolean(connections.find(c => ((c.provider || "").toUpperCase() === "EXNESS" || (c.exchange || "").toUpperCase() === "EXNESS") && c.is_verified === true && c.is_active))}
               tickerItems={tickerItems || []}
               onNavigate={navigateTo}
               onSelectPair={(p) => {
@@ -1706,7 +1775,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {currentNav === "CONNECTIONS" && (
             <ExchangeConnectionsView
-              exnessConnected={Boolean(connections.find(c => (c.provider === "EXNESS" || c.exchange === "EXNESS") && (c.status === "CONNECTED" || c.status === "ACTIVE") && c.is_active))}
+              exnessConnected={Boolean(connections.find(c => ((c.provider || "").toUpperCase() === "EXNESS" || (c.exchange || "").toUpperCase() === "EXNESS") && c.is_verified === true && c.is_active))}
               onRefresh={() => fetchConnections()}
               token={token}
             />
@@ -1725,7 +1794,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
               realizedPnl={0.0}
               unrealizedPnl={0.0}
               accounts={balancesData?.exchange_accounts || []}
-              isConnected={Boolean(connections.find(c => (c.provider === "EXNESS" || c.exchange === "EXNESS") && (c.status === "CONNECTED" || c.status === "ACTIVE") && c.is_active))}
+              isConnected={Boolean(connections.find(c => ((c.provider || "").toUpperCase() === "EXNESS" || (c.exchange || "").toUpperCase() === "EXNESS") && c.is_verified === true && c.is_active))}
               onRefresh={() => fetchBalances(true)}
             />
           )}

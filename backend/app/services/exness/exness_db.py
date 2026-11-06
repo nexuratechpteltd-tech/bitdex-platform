@@ -347,8 +347,8 @@ def save_exness_connection(
     enc_credentials: Dict[str, Any],
     adapter_mode: str = "DETERMINISTIC_MOCK_DEMO",
     account_type: str = "DEMO",
-    balance: float = 0.0,
-    equity: float = 0.0,
+    balance: Optional[float] = None,
+    equity: Optional[float] = None,
     leverage: int = 200,
     currency: str = "USD",
     account_label: str = "",
@@ -357,8 +357,8 @@ def save_exness_connection(
     error_type: str = "",
     error_detail: str = "",
     trade_mode: str = "",
-    margin_used: float = 0.0,
-    margin_free: float = 0.0,
+    margin_used: Optional[float] = None,
+    margin_free: Optional[float] = None,
     environment_confirmed_by: str = "",
     access_point: str = "",
     api_key: str = "",
@@ -367,7 +367,7 @@ def save_exness_connection(
     """Creates or updates an Exness connection with explicit tenant isolation, preference, and verification tracking."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     acct_type = (account_type or "DEMO").upper()
-    reconciled_at = now if verification_status == "VERIFIED" else None
+    reconciled_at = now if verification_status in ("VERIFIED", "ACCOUNT_DATA_VERIFIED") else None
 
     with conn:
         if is_preferred:

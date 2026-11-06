@@ -100,12 +100,13 @@ if (-not $AuthToken) {
     Write-Host "[✓] Configured provided EXNESS_GATEWAY_AUTH_TOKEN in Machine environment." -ForegroundColor Green
 }
 
-# Configure IP & Port settings
+# Configure IP & Port settings (Bind exclusively to private WireGuard tunnel and localhost)
+$BindHost = "10.88.0.2"
 [Environment]::SetEnvironmentVariable("EXNESS_GATEWAY_PORT", $GatewayPort, "Machine")
-[Environment]::SetEnvironmentVariable("EXNESS_GATEWAY_HOST", "0.0.0.0", "Machine")
-[Environment]::SetEnvironmentVariable("ALLOWED_CLIENT_IPS", "127.0.0.1,::1,$StagingIP,$TunnelIP", "Machine")
+[Environment]::SetEnvironmentVariable("EXNESS_GATEWAY_HOST", $BindHost, "Machine")
+[Environment]::SetEnvironmentVariable("ALLOWED_CLIENT_IPS", "127.0.0.1,::1,$TunnelIP,10.88.0.2", "Machine")
 
-# 6. Configure Windows Firewall Inbound Rules
+# 6. Configure Windows Firewall Inbound Rules (Restrict strictly to WireGuard private tunnel)
 Write-Host "[*] Configuring Windows Firewall rule for Port $GatewayPort..." -ForegroundColor Yellow
 $firewallRuleName = "BITDEX_MT5_GATEWAY_INGRESS"
 Remove-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue
@@ -115,14 +116,40 @@ New-NetFirewallRule -DisplayName $firewallRuleName `
     -LocalPort $GatewayPort `
     -Protocol TCP `
     -Action Allow `
-    -RemoteAddress "$StagingIP,$TunnelIP,127.0.0.1" `
-    -Description "Allows authorized Linux staging backend and WireGuard tunnel to reach BITDEX MT5 Gateway"
+    -RemoteAddress "$TunnelIP,127.0.0.1" `
+    -Description "Allows authorized Linux staging backend over private WireGuard tunnel (10.88.0.1) to reach BITDEX MT5 Gateway"
 
-Write-Host "[✓] Windows Firewall rule '$firewallRuleName' created. Access restricted strictly to $StagingIP and $TunnelIP." -ForegroundColor Green
+Write-Host "[✓] Windows Firewall rule '$firewallRuleName' created. Access restricted strictly to private WireGuard tunnel ($TunnelIP)." -ForegroundColor Green
 
-# 7. Self-Test & Diagnostic
-Write-Host "[*] Starting test instance of gateway on port $GatewayPort..." -ForegroundColor Yellow
+# 7. Register Persistent Windows Service (BitdexMT5Gateway) with Automatic Startup & Failure Recovery
+$serviceName = "BitdexMT5Gateway"
 $serverPy = Join-Path $scriptDir "mt5_gateway_server.py"
+$pythonExe = (Get-Command python).Source
+$nssmExe = Join-Path $scriptDir "nssm.exe"
+
+if (Test-Path $nssmExe) {
+    Write-Host "[*] Registering persistent Windows service '$serviceName' via NSSM..." -ForegroundColor Yellow
+    & $nssmExe stop $serviceName 2>$null
+    & $nssmExe remove $serviceName confirm 2>$null
+    & $nssmExe install $serviceName $pythonExe "`"$serverPy`""
+    & $nssmExe set $serviceName AppDirectory $scriptDir
+    & $nssmExe set $serviceName Start SERVICE_AUTO_START
+    & $nssmExe set $serviceName AppExit Default Restart
+    & $nssmExe set $serviceName AppRestartDelay 5000
+    & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+    & $nssmExe start $serviceName
+    Write-Host "[✓] Windows service '$serviceName' registered and started (SERVICE_AUTO_START + Failure Recovery)." -ForegroundColor Green
+} else {
+    Write-Host "[*] Registering persistent startup scheduled task / service wrapper for '$serviceName'..." -ForegroundColor Yellow
+    $action = New-ScheduledTaskAction -Execute $pythonExe -Argument "`"$serverPy`"" -WorkingDirectory $scriptDir
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $serviceName -Action $action -Trigger $trigger -Settings $settings -User "SYSTEM" -RunLevel Highest -Force | Out-Null
+    Write-Host "[✓] Persistent startup task '$serviceName' registered with automatic restart on failure." -ForegroundColor Green
+}
+
+# 8. Self-Test & Diagnostic
+Write-Host "[*] Starting test verification of gateway on port $GatewayPort..." -ForegroundColor Yellow
 $env:EXNESS_GATEWAY_AUTH_TOKEN = $AuthToken
 $env:EXNESS_GATEWAY_PORT = $GatewayPort
 $env:EXNESS_GATEWAY_HOST = "127.0.0.1"
@@ -147,7 +174,8 @@ try {
 Write-Host "================================================================================" -ForegroundColor Cyan
 Write-Host "WINDOWS MT5 GATEWAY CONFIGURATION COMPLETE" -ForegroundColor Cyan
 Write-Host "Auth Token: $($AuthToken.Substring(0, 8))...$($AuthToken.Substring($AuthToken.Length - 4)) [MASKED FOR SECURITY]" -ForegroundColor Yellow
-Write-Host "Configured Port: $GatewayPort" -ForegroundColor Yellow
-Write-Host "Staging Allowlist: $StagingIP, $TunnelIP" -ForegroundColor Yellow
-Write-Host "To run in background: Use install_service_nssm.bat" -ForegroundColor Cyan
+Write-Host "Configured Bind Host: $BindHost : $GatewayPort" -ForegroundColor Yellow
+Write-Host "Private Tunnel Allowlist: $TunnelIP, 127.0.0.1" -ForegroundColor Yellow
+Write-Host "Service Persistence: $serviceName (Auto-Start + Failure Recovery Enabled)" -ForegroundColor Cyan
 Write-Host "================================================================================" -ForegroundColor Cyan
+

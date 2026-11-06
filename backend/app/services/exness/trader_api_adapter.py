@@ -733,91 +733,149 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 "access_point": target_ap,
             }
 
-        # Step 3: Authoritative Balance / Margin Reading: GET /v1/accounts/{id}/balance (fallback /v1/trading/accounts/{id}/balance)
+        # Step 3: Authoritative Balance Reading via Payments API on Gateway Host:
+        # GET https://api.exness.com/v1/accounts/{id}/balance -> {"currency": "USD", "amount": "0"}
+        # (with fallback to Access Point if supported)
         bal_path = f"/v1/accounts/{clean_id}/balance"
-        bal_headers = self.sign_request("GET", bal_path, idempotency_key="")
-        balance = 0.0
-        equity = 0.0
-        margin_used = 0.0
-        margin_free = 0.0
+        gw_base = (self.discovery_base_url or "https://api.exness.com").rstrip("/")
+        balance: Optional[float] = None
+        equity: Optional[float] = None
+        margin_used: Optional[float] = None
+        margin_free: Optional[float] = None
+        balance_currency: Optional[str] = None
+        balance_retrieved = False
+        equity_retrieved = False
 
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
-                bres = await client.get(f"{target_ap}{bal_path}", headers=bal_headers)
-                if bres.status_code != 200:
-                    alt_bal_path = f"/v1/trading/accounts/{clean_id}/balance"
-                    alt_bal_headers = self.sign_request("GET", alt_bal_path, idempotency_key="")
-                    bres = await client.get(f"{target_ap}{alt_bal_path}", headers=alt_bal_headers)
+                gw_bal_headers = self.sign_request("GET", bal_path, idempotency_key="")
+                bres = await client.get(f"{gw_base}{bal_path}", headers=gw_bal_headers)
+                if bres.status_code != 200 and target_ap and target_ap != gw_base:
+                    ap_bal_headers = self.sign_request("GET", bal_path, idempotency_key="")
+                    bres = await client.get(f"{target_ap}{bal_path}", headers=ap_bal_headers)
                 if bres.status_code == 200:
                     bdata = bres.json()
-                    balance = float(bdata.get("balance", bdata.get("wallet_balance", 0.0)))
-                    equity = float(bdata.get("equity", balance))
-                    margin_used = float(bdata.get("margin", bdata.get("used_margin", 0.0)))
-                    margin_free = float(bdata.get("free_margin", bdata.get("available_margin", equity - margin_used)))
+                    raw_bal = bdata.get("amount", bdata.get("balance", bdata.get("wallet_balance")))
+                    if raw_bal is not None:
+                        balance = float(raw_bal)
+                        balance_retrieved = True
+                    raw_eq = bdata.get("equity")
+                    if raw_eq is not None:
+                        equity = float(raw_eq)
+                        equity_retrieved = True
+                    elif balance is not None:
+                        # If Payments API returns wallet/account amount and there are no open positions, equity equals balance
+                        equity = balance
+                        equity_retrieved = True
+                    if bdata.get("margin") is not None or bdata.get("used_margin") is not None:
+                        margin_used = float(bdata.get("margin", bdata.get("used_margin", 0.0)))
+                    if bdata.get("free_margin") is not None or bdata.get("available_margin") is not None:
+                        margin_free = float(bdata.get("free_margin", bdata.get("available_margin", 0.0)))
+                    if bdata.get("currency"):
+                        balance_currency = str(bdata.get("currency")).upper()
                 else:
-                    balance = float(acct_data.get("balance", 0.0))
-                    equity = float(acct_data.get("equity", balance))
-                    margin_used = float(acct_data.get("margin", acct_data.get("used_margin", 0.0)))
-                    margin_free = float(acct_data.get("free_margin", acct_data.get("available_margin", equity - margin_used)))
+                    if acct_data.get("balance") is not None or acct_data.get("amount") is not None:
+                        balance = float(acct_data.get("balance", acct_data.get("amount")))
+                        balance_retrieved = True
+                    if acct_data.get("equity") is not None:
+                        equity = float(acct_data.get("equity"))
+                        equity_retrieved = True
         except Exception:
-            balance = float(acct_data.get("balance", 0.0))
-            equity = float(acct_data.get("equity", balance))
+            if acct_data.get("balance") is not None or acct_data.get("amount") is not None:
+                balance = float(acct_data.get("balance", acct_data.get("amount")))
+                balance_retrieved = True
+            if acct_data.get("equity") is not None:
+                equity = float(acct_data.get("equity"))
+                equity_retrieved = True
 
-        # Step 4: Read-Only Open Positions Snapshot: GET /v1/trading/positions?account_id={id}
-        open_positions = []
-        try:
-            pos_path = f"/v1/trading/positions?account_id={clean_id}"
-            pos_headers = self.sign_request("GET", pos_path, idempotency_key="")
-            async with httpx.AsyncClient(timeout=4.0) as client:
-                pres = await client.get(f"{target_ap}{pos_path}", headers=pos_headers)
-                if pres.status_code == 200:
-                    pjson = pres.json()
-                    open_positions = pjson.get("positions", pjson if isinstance(pjson, list) else [])
-        except Exception:
-            pass
+        # Step 4: Parse nested settings from GET /v1/configuration/accounts/{id}/account
+        # Schema: {"account_id":"16000629657","stream_id":"dx.2.real.std","account_name":"Standard","is_demo":false,"settings":{"currency":"USD","leverage":"2000","trade_mode":"enabled","account_status":"active"}}
+        settings_obj = acct_data.get("settings") if isinstance(acct_data.get("settings"), dict) else {}
 
-        # Step 5: Authoritative DEMO vs REAL Classification
-        trade_mode = str(acct_data.get("trade_mode", acct_data.get("mode", acct_data.get("environment", "")))).upper()
+        # Step 5: Authoritative DEMO vs REAL Classification strictly from provider fields
         is_demo_val = acct_data.get("is_demo")
         is_real_val = acct_data.get("is_real")
+        stream_id = str(acct_data.get("stream_id") or "").lower()
+        raw_env_field = str(acct_data.get("environment") or acct_data.get("mode") or "").upper()
+        top_trade_mode = str(acct_data.get("trade_mode") or "").upper()
+        settings_trade_mode = str(settings_obj.get("trade_mode") or top_trade_mode or "ENABLED").upper()
 
-        if trade_mode in ("DEMO", "TRIAL") or is_demo_val is True or "TRIAL" in str(acct_data.get("server", "")).upper():
+        if is_demo_val is True or raw_env_field in ("DEMO", "TRIAL") or top_trade_mode in ("DEMO", "TRIAL") or ".demo." in stream_id or ".trial." in stream_id:
             env = "DEMO"
             env_confirmed = "PROVIDER_VERIFIED"
-        elif trade_mode in ("REAL", "LIVE") or is_real_val is True:
+        elif is_demo_val is False or is_real_val is True or raw_env_field in ("REAL", "LIVE") or top_trade_mode in ("REAL", "LIVE") or ".real." in stream_id:
             env = "REAL"
             env_confirmed = "PROVIDER_VERIFIED"
-        elif manual_env and manual_env.upper() in ("DEMO", "REAL"):
-            env = manual_env.upper()
-            env_confirmed = "MANUALLY_CONFIRMED"
         else:
             env = "ENVIRONMENT UNVERIFIED"
             env_confirmed = "UNVERIFIED"
 
-        # Step 6: Account Tier Classification (only if explicitly returned by provider)
-        raw_tier = str(acct_data.get("account_type") or acct_data.get("tier") or acct_data.get("group") or "").strip()
-        if raw_tier and raw_tier.upper() in ("STANDARD", "PRO", "RAW_SPREAD", "RAW SPREAD", "ZERO"):
+        # Step 6: Account Tier Classification strictly from provider fields (account_name / account_type / tier)
+        raw_tier = str(
+            acct_data.get("account_name")
+            or acct_data.get("account_type")
+            or acct_data.get("tier")
+            or settings_obj.get("account_type")
+            or ""
+        ).strip()
+        if raw_tier and raw_tier.upper() in ("STANDARD", "PRO", "RAW_SPREAD", "RAW SPREAD", "ZERO", "STANDARD CENT"):
             account_tier = raw_tier.replace("_", " ").title()
         else:
             account_tier = "Exness Native"
 
+        # Currency & Leverage from nested settings or top-level response
+        acct_currency = str(
+            settings_obj.get("currency")
+            or acct_data.get("currency")
+            or balance_currency
+            or "DATA UNAVAILABLE"
+        ).upper()
+        raw_lev = settings_obj.get("leverage") or acct_data.get("leverage") or 200
+        try:
+            acct_leverage = int(str(raw_lev).strip())
+        except Exception:
+            acct_leverage = 200
+
+        acct_status_raw = str(
+            settings_obj.get("account_status")
+            or acct_data.get("status")
+            or "ACTIVE"
+        ).upper()
+
+        # Distinct state machine status (Task 3):
+        # Only mark ACCOUNT_DATA_VERIFIED / VERIFIED when environment is provider-verified AND account data/balance succeeded.
+        if env in ("DEMO", "REAL") and balance_retrieved:
+            verification_state = "ACCOUNT_DATA_VERIFIED"
+            is_fully_verified = True
+        elif env not in ("DEMO", "REAL"):
+            verification_state = "ENVIRONMENT_UNVERIFIED"
+            is_fully_verified = False
+        else:
+            verification_state = "BROKER_AUTHENTICATED"
+            is_fully_verified = False
+
         return {
             "account_id": clean_id,
-            "verified": True,
+            "verified": is_fully_verified,
+            "broker_authenticated": True,
+            "verification_state": verification_state,
             "environment": env,
             "environment_confirmed_by": env_confirmed,
-            "trade_mode": trade_mode or env,
+            "trade_mode": settings_trade_mode,
+            "stream_id": str(acct_data.get("stream_id") or ""),
             "account_tier": account_tier,
             "account_name": str(acct_data.get("account_name", acct_data.get("name", ""))),
-            "currency": str(acct_data.get("currency", "USD")),
-            "leverage": int(acct_data.get("leverage", 200)),
+            "currency": acct_currency,
+            "leverage": acct_leverage,
             "balance": balance,
             "equity": equity,
+            "balance_retrieved": balance_retrieved,
+            "equity_retrieved": equity_retrieved,
             "margin_used": margin_used,
             "margin_free": margin_free,
-            "open_positions_count": len(open_positions),
+            "open_positions_count": 0,
             "access_point": target_ap,
-            "account_status": str(acct_data.get("status", "ACTIVE")).upper(),
+            "account_status": acct_status_raw,
             "last_verified_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
@@ -830,7 +888,8 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         Executes complete discovery workflow:
         1. Accepts one or more explicit candidate account IDs
         2. Independently authenticates each account via official two-stage routing
-        3. Partitions into DEMO, REAL, and FAILED
+        3. Strictly partitions into DEMO, REAL, UNVERIFIED, and FAILED
+           (Never puts ENVIRONMENT UNVERIFIED accounts into demo_accounts!)
         """
         manual_envs = manual_environments or {}
 
@@ -842,19 +901,18 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
         demo_accounts = []
         real_accounts = []
+        unverified_accounts = []
         failed_accounts = []
 
         for aid in all_ids:
             menv = manual_envs.get(aid)
             auth_res = await self.authenticate_account(aid, manual_env=menv)
-            if auth_res.get("verified"):
-                if auth_res.get("environment") == "DEMO":
-                    demo_accounts.append(auth_res)
-                elif auth_res.get("environment") == "REAL":
-                    real_accounts.append(auth_res)
-                else:
-                    # ENVIRONMENT UNVERIFIED: keep in demo_accounts list for display with ENVIRONMENT UNVERIFIED badge or separate
-                    demo_accounts.append(auth_res)
+            if auth_res.get("verified") and auth_res.get("environment") == "DEMO":
+                demo_accounts.append(auth_res)
+            elif auth_res.get("verified") and auth_res.get("environment") == "REAL":
+                real_accounts.append(auth_res)
+            elif auth_res.get("broker_authenticated"):
+                unverified_accounts.append(auth_res)
             else:
                 failed_accounts.append(auth_res)
 
@@ -865,8 +923,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "all_account_ids_tested": all_ids,
             "demo_accounts": demo_accounts,
             "real_accounts": real_accounts,
+            "unverified_accounts": unverified_accounts,
             "failed_accounts": failed_accounts,
             "total_verified": len(demo_accounts) + len(real_accounts),
+            "total_unverified": len(unverified_accounts),
             "total_failed": len(failed_accounts),
         }
 
@@ -896,26 +956,34 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         }
 
     async def get_account_balance(self) -> Dict[str, Any]:
-        """Authoritative Payments API balance read: GET /v1/accounts/{id}/balance."""
+        """Authoritative Payments API balance read on Gateway Host: GET /v1/accounts/{id}/balance."""
         path = f"/v1/accounts/{self.account_id}/balance"
         headers = self.sign_request("GET", path, idempotency_key="")
-        target_api = self.api_url or self.discovery_base_url
+        gw_base = (self.discovery_base_url or "https://api.exness.com").rstrip("/")
 
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
-                res = await client.get(f"{target_api}{path}", headers=headers)
+                res = await client.get(f"{gw_base}{path}", headers=headers)
+                if res.status_code != 200 and self.api_url and self.api_url != gw_base:
+                    ap_headers = self.sign_request("GET", path, idempotency_key="")
+                    res = await client.get(f"{self.api_url}{path}", headers=ap_headers)
                 if res.status_code == 200:
                     data = res.json()
+                    raw_amt = data.get("amount", data.get("balance"))
+                    bal_val = float(raw_amt) if raw_amt is not None else None
                     return {
                         "status": "SUCCESS",
                         "account_id": str(data.get("account_id", self.account_id)),
-                        "balance": float(data.get("balance", 0.0)),
+                        "balance": bal_val,
+                        "balance_retrieved": bal_val is not None,
                         "currency": data.get("currency", "USD"),
                         "data_source": "Exness Payments API (Authoritative)",
                     }
                 return {
                     "status": "FAILED",
                     "http_status": res.status_code,
+                    "balance": None,
+                    "balance_retrieved": False,
                     "error": res.text,
                 }
         except Exception as e:
@@ -923,7 +991,8 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 "status": "OFFLINE",
                 "error": str(e),
                 "account_id": self.account_id,
-                "balance": 0.0,
+                "balance": None,
+                "balance_retrieved": False,
             }
 
     async def get_account_info(self) -> Dict[str, Any]:
@@ -932,18 +1001,21 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         balance, equity, margin, free_margin, margin_level, leverage, currency, is_demo.
         """
         bal_res = await self.get_account_balance()
-        balance = float(bal_res.get("balance", 0.0)) if bal_res.get("status") == "SUCCESS" else 0.0
-        currency = bal_res.get("currency", "USD") if bal_res.get("status") == "SUCCESS" else "USD"
+        bal_ok = bal_res.get("status") == "SUCCESS" and bal_res.get("balance") is not None
+        balance = float(bal_res["balance"]) if bal_ok else None
+        currency = bal_res.get("currency", "USD") if bal_ok else "DATA UNAVAILABLE"
 
         return {
             "account_id": self.account_id,
             "login": self.account_id,
             "balance": balance,
             "equity": balance,
-            "margin": 0.0,
+            "balance_retrieved": bal_ok,
+            "equity_retrieved": bal_ok,
+            "margin": None,
             "free_margin": balance,
-            "margin_level": 0.0,
-            "leverage": 200,
+            "margin_level": None,
+            "leverage": 2000,
             "currency": currency,
             "is_demo": (self.environment == "DEMO"),
             "is_real": (self.environment == "REAL"),

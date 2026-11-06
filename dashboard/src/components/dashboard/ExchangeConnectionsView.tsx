@@ -276,18 +276,86 @@ export default function ExchangeConnectionsView({
   const verifiedAccounts: any[] = statusData?.verified_accounts || [];
   const demoAccounts: any[] = statusData?.exness_demo_accounts || [];
   const realAccounts: any[] = statusData?.exness_real_accounts || [];
+  const unverifiedAccounts: any[] = statusData?.unverified_accounts || [];
   const failedAccounts: any[] = statusData?.failed_accounts || [];
+  const connectionState: string =
+    isSubmitting || resyncingId
+      ? "AUTHENTICATING"
+      : statusData?.connection_state ||
+        (verifiedAccounts.length > 0
+          ? "ACCOUNT_DATA_VERIFIED"
+          : unverifiedAccounts.length > 0
+          ? "ENVIRONMENT_UNVERIFIED"
+          : failedAccounts.length > 0
+          ? "AUTH_FAILED"
+          : "NOT_CONNECTED");
+
+  const renderStateBadge = (state: string) => {
+    switch (state) {
+      case "ACCOUNT_DATA_VERIFIED":
+      case "VERIFIED":
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950/60 text-emerald-400 border border-emerald-500/30">
+            ACCOUNT_DATA_VERIFIED
+          </span>
+        );
+      case "BROKER_AUTHENTICATED":
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-950/60 text-cyan-400 border border-cyan-500/30">
+            BROKER_AUTHENTICATED
+          </span>
+        );
+      case "ENVIRONMENT_UNVERIFIED":
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950/60 text-amber-400 border border-amber-500/30">
+            ENVIRONMENT_UNVERIFIED
+          </span>
+        );
+      case "AUTHENTICATING":
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-950/60 text-sky-400 border border-sky-500/30 animate-pulse">
+            AUTHENTICATING
+          </span>
+        );
+      case "NODE_CONNECTED":
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-950/60 text-indigo-400 border border-indigo-500/30">
+            NODE_CONNECTED
+          </span>
+        );
+      case "CREDENTIALS_SAVED":
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-600">
+            CREDENTIALS_SAVED
+          </span>
+        );
+      case "AUTH_FAILED":
+      case "AUTHENTICATION_FAILED":
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950/60 text-rose-400 border border-rose-500/30">
+            AUTH_FAILED
+          </span>
+        );
+      default:
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
+            {state || "NOT_CONNECTED"}
+          </span>
+        );
+    }
+  };
 
   return (
     <div className="space-y-6 font-mono text-xs">
       {/* ─── HEADER & UNIVERSAL CONNECTOR BAR ─────────────────── */}
       <div className="p-4 sm:p-5 rounded-2xl bg-[#0E131B] border border-[#1E2736] flex flex-wrap items-center justify-between gap-4 shadow-xl">
         <div className="space-y-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <ShieldCheck className="w-5 h-5 text-[#38BDF8] shrink-0" />
             <h1 className="text-sm sm:text-base font-bold text-[#F1F5F9] uppercase tracking-wider">
               Universal Exness Trader API Connector
             </h1>
+            {renderStateBadge(connectionState)}
           </div>
           <p className="text-[11px] sm:text-xs text-[#94A3B8]">
             Two-Stage Access Point Discovery &bull; Ed25519 Payload Signing &bull; Automatic Demo &amp; Real Classification
@@ -332,7 +400,7 @@ export default function ExchangeConnectionsView({
           <span className="text-xl font-bold text-white tabular-nums">
             {verifiedAccounts.length}
           </span>
-          <span className="text-[10px] text-[#94A3B8] block mt-0.5">Authenticated Sessions</span>
+          <span className="text-[10px] text-[#94A3B8] block mt-0.5">ACCOUNT_DATA_VERIFIED</span>
         </div>
         <div className="p-4 rounded-xl bg-[#0E131B] border border-[#1E2736]">
           <span className="text-[10px] text-[#64748B] block uppercase font-bold">Verified Demo:</span>
@@ -375,7 +443,7 @@ export default function ExchangeConnectionsView({
               NO VERIFIED TRADING ACCOUNTS CONNECTED
             </p>
             <p className="text-[11px] text-[#64748B] max-w-lg mx-auto">
-              Click <strong>Connect Exness API</strong> and supply your active Exness API Key, Ed25519 Private Signing Key, and Trading Account ID(s) to authenticate. Unverified accounts are never displayed as connected trading accounts.
+              Click <strong>Connect Exness API</strong> and supply your active Exness API Key, Ed25519 Private Signing Key, and Trading Account ID(s) to authenticate. Only accounts passing both provider authentication and authoritative environment/data verification are listed here.
             </p>
           </div>
         ) : (
@@ -396,8 +464,11 @@ export default function ExchangeConnectionsView({
               <tbody className="divide-y divide-[#1E2736] text-xs">
                 {verifiedAccounts.map((c: any) => {
                   const isResyncing = resyncingId === c.connection_id;
-                  const env = c.account_type || "ENVIRONMENT UNVERIFIED";
+                  const env = c.account_type || "ENVIRONMENT_UNVERIFIED";
                   const tier = c.account_tier || "Exness Native";
+                  const rowState = isResyncing
+                    ? "AUTHENTICATING"
+                    : c.verification_state || c.verification_status || "ACCOUNT_DATA_VERIFIED";
 
                   return (
                     <tr
@@ -437,17 +508,15 @@ export default function ExchangeConnectionsView({
                       <td data-label="Balance" className="py-3.5 px-4 text-right font-bold text-white tabular-nums">
                         {c.balance_usd !== null && c.balance_usd !== undefined
                           ? Number(c.balance_usd).toFixed(2)
-                          : "—"}
+                          : c.balance_display || "DATA UNAVAILABLE"}
                       </td>
                       <td data-label="Equity" className="py-3.5 px-4 text-right text-[#38BDF8] font-bold tabular-nums">
                         {c.equity_usd !== null && c.equity_usd !== undefined
                           ? Number(c.equity_usd).toFixed(2)
-                          : "—"}
+                          : c.equity_display || "DATA UNAVAILABLE"}
                       </td>
                       <td data-label="Status" className="py-3.5 px-4">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950/60 text-emerald-400 border border-emerald-500/30">
-                          VERIFIED
-                        </span>
+                        {renderStateBadge(rowState)}
                       </td>
                       <td data-label="Actions" className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
@@ -490,14 +559,80 @@ export default function ExchangeConnectionsView({
         )}
       </div>
 
-      {/* ─── FAILED / UNVERIFIED AUTHENTICATION DIAGNOSTICS ────────── */}
+      {/* ─── UNVERIFIED ENVIRONMENT / PARTIAL DATA DIAGNOSTICS ─────── */}
+      {unverifiedAccounts.length > 0 && (
+        <div className="p-4 rounded-2xl bg-amber-950/20 border border-amber-500/30 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-amber-300 font-bold">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                Environment Unverified / Incomplete Telemetry ({unverifiedAccounts.length})
+              </span>
+            </div>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-500/30">
+              EXCLUDED FROM VERIFIED ACCOUNTS &amp; TRADING SELECTORS
+            </span>
+          </div>
+          <div className="space-y-2 text-[11px] text-[#94A3B8]">
+            {unverifiedAccounts.map((u: any, idx: number) => {
+              const isResyncing = resyncingId === u.connection_id;
+              return (
+                <div
+                  key={u.connection_id || idx}
+                  className="p-3 rounded-xl bg-[#0E131B] border border-[#1E2736] flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div className="space-y-1 flex-1 min-w-[220px]">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-white">
+                        Account: {u.account_login || u.account_id}
+                      </span>
+                      {renderStateBadge(isResyncing ? "AUTHENTICATING" : u.verification_state || u.verification_status || "ENVIRONMENT_UNVERIFIED")}
+                      <span className="text-[#94A3B8]">
+                        Balance: <strong className="text-white">{u.balance_usd !== null && u.balance_usd !== undefined ? Number(u.balance_usd).toFixed(2) : "DATA UNAVAILABLE"}</strong>
+                      </span>
+                      <span className="text-[#94A3B8]">
+                        Equity: <strong className="text-white">{u.equity_usd !== null && u.equity_usd !== undefined ? Number(u.equity_usd).toFixed(2) : "DATA UNAVAILABLE"}</strong>
+                      </span>
+                    </div>
+                    {u.error_detail && (
+                      <p className="text-xs text-amber-200/90 leading-relaxed break-words">
+                        {u.error_detail}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleResync(u.connection_id)}
+                      disabled={isResyncing}
+                      className="px-2.5 py-1 rounded-lg bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] text-[#38BDF8] text-[10px] transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isResyncing ? "animate-spin" : ""}`} />
+                      <span>Resync</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDisconnect(u.connection_id)}
+                      className="px-2.5 py-1 rounded-lg bg-[#151C28] hover:bg-rose-950/40 text-[#94A3B8] hover:text-rose-300 border border-[#1E2736] text-[10px] transition-colors cursor-pointer"
+                    >
+                      Remove Entry
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ─── FAILED / SAVED AUTHENTICATION DIAGNOSTICS ────────── */}
       {failedAccounts.length > 0 && (
         <div className="p-4 rounded-2xl bg-rose-950/20 border border-rose-500/30 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-2 text-rose-300 font-bold">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>
-                Unverified / Failed Authentication Attempts ({failedAccounts.length})
+                Failed / Unauthenticated Credentials ({failedAccounts.length})
               </span>
             </div>
             <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-500/30">
@@ -505,38 +640,51 @@ export default function ExchangeConnectionsView({
             </span>
           </div>
           <div className="space-y-2 text-[11px] text-[#94A3B8]">
-            {failedAccounts.slice(0, 4).map((f: any, idx: number) => (
-              <div
-                key={f.connection_id || idx}
-                className="p-3 rounded-xl bg-[#0E131B] border border-[#1E2736] flex flex-wrap items-center justify-between gap-3"
-              >
-                <div className="space-y-1 flex-1 min-w-[220px]">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-bold text-white">
-                      Account: {f.account_login || f.account_id_masked || f.account_id}
-                    </span>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
-                      ENVIRONMENT UNVERIFIED
-                    </span>
-                    <span className="text-rose-400 font-mono font-bold">
-                      {f.error_type || "AUTHENTICATION_FAILED"}
-                    </span>
+            {failedAccounts.slice(0, 6).map((f: any, idx: number) => {
+              const isResyncing = resyncingId === f.connection_id;
+              return (
+                <div
+                  key={f.connection_id || idx}
+                  className="p-3 rounded-xl bg-[#0E131B] border border-[#1E2736] flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div className="space-y-1 flex-1 min-w-[220px]">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-white">
+                        Account: {f.account_login || f.account_id_masked || f.account_id}
+                      </span>
+                      {renderStateBadge(isResyncing ? "AUTHENTICATING" : f.verification_state || f.verification_status || "AUTH_FAILED")}
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                        ENVIRONMENT_UNVERIFIED
+                      </span>
+                      <span className="text-[#94A3B8]">
+                        Balance / Equity: <strong className="text-rose-300">DATA UNAVAILABLE</strong>
+                      </span>
+                    </div>
+                    <p className="text-xs text-rose-200/90 leading-relaxed break-words">
+                      {f.error_detail}
+                    </p>
                   </div>
-                  <p className="text-xs text-rose-200/90 leading-relaxed break-words">
-                    {f.error_detail}
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleResync(f.connection_id)}
+                      disabled={isResyncing}
+                      className="px-2.5 py-1 rounded-lg bg-[#151C28] hover:bg-[#1E2736] border border-[#1E2736] text-[#38BDF8] text-[10px] transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isResyncing ? "animate-spin" : ""}`} />
+                      <span>Resync</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDisconnect(f.connection_id)}
+                      className="px-2.5 py-1 rounded-lg bg-[#151C28] hover:bg-rose-950/40 text-[#94A3B8] hover:text-rose-300 border border-[#1E2736] text-[10px] transition-colors cursor-pointer"
+                    >
+                      Remove Entry
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleDisconnect(f.connection_id)}
-                    className="px-2.5 py-1 rounded-lg bg-[#151C28] hover:bg-rose-950/40 text-[#94A3B8] hover:text-rose-300 border border-[#1E2736] text-[10px] transition-colors cursor-pointer"
-                  >
-                    Remove Entry
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

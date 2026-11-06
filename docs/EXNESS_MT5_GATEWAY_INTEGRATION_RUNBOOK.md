@@ -115,20 +115,34 @@ websockets>=12.0
 
 ---
 
-## 6. Secure Transport & Firewall Configuration
+## 6. Secure Transport & Firewall Configuration (Linux `169.58.218.168` <-> Windows `149.33.34.123`)
 
-1. **Private Tunnel Setup (WireGuard)**:
-   - Configure a private point-to-point WireGuard tunnel between the Linux staging server (`169.58.218.168`, tunnel IP `10.88.0.1`) and the Windows Gateway host (tunnel IP `10.88.0.2`).
-   - The Windows MT5 Gateway service must bind exclusively to `10.88.0.2:8443` or `127.0.0.1:8443`.
+1. **Private Tunnel Setup (WireGuard `10.88.0.1/24` <-> `10.88.0.2/24`)**:
+   - **Linux Staging Host (`169.58.218.168`)**:
+     - Interface: `wg0` (`10.88.0.1/24`, UDP listen port `51820`, systemd service `wg-quick@wg0` enabled and active).
+     - Linux WireGuard Public Key: `zDYC8G9z5wInJ32olEJLhqUJBhYDC8ElDZ6orHBanwY=`
+     - Peer: Windows Gateway Host `149.33.34.123:51820` (`AllowedIPs = 10.88.0.2/32`, `PersistentKeepalive = 25`).
+     - Linux Backend `.env`: `EXNESS_MT5_GATEWAY_URL=http://10.88.0.2:8095` (never exposed publicly).
+   - **Windows Gateway Host (`149.33.34.123` — Windows Server 2025)**:
+     - Tunnel IP: `10.88.0.2/24`
+     - Windows WireGuard Public Key: `/ucqL6vyZIPHALBV174AdrLwFhff1acEVqU/1xbWFgM=`
+     - The Windows MT5 Gateway service (`BitdexMT5Gateway`) binds exclusively to `10.88.0.2:8095` (and `127.0.0.1:8095` for local health checks).
 2. **Windows Firewall Rule**:
-   ```cmd
-   netsh advfirewall firewall add rule name="BITDEX_GATEWAY_WIREGUARD" dir=in action=allow protocol=TCP localport=8443 remoteip=10.88.0.1
+   ```powershell
+   New-NetFirewallRule -DisplayName "BITDEX_MT5_GATEWAY_INGRESS" `
+       -Direction Inbound -LocalPort 8095 -Protocol TCP -Action Allow `
+       -RemoteAddress "10.88.0.1,127.0.0.1"
    ```
-   No public inbound ports (80, 443, 8443) should be opened to `0.0.0.0/0`.
-3. **Mutual TLS (mTLS)**:
-   When running over HTTPS, generate a self-signed root CA and client certificates:
-   - Gateway presents server certificate signed by internal CA.
-   - Linux backend presents client certificate signed by internal CA.
+   No public inbound ports (`8095`, `8443`) are exposed to `0.0.0.0/0`.
+3. **Authorising Passwordless SSH Key on Windows Server 2025 (`149.33.34.123`)**:
+   To allow the Linux staging host (`169.58.218.168`) to execute remote provisioning over SSH without passwords, run the following once in an elevated PowerShell session on `149.33.34.123`:
+   ```powershell
+   $pubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJn9Vbt2yTSG/N3+a9hTs+dPrR4ebB3b393p0T213aR0 root@ubuntu-2404-noble-amd64-base"
+   $authFile = "C:\ProgramData\ssh\administrators_authorized_keys"
+   Add-Content -Path $authFile -Value $pubKey -Encoding Ascii
+   icacls.exe $authFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F"
+   Restart-Service sshd
+   ```
 
 ---
 
@@ -140,7 +154,7 @@ Exness MT5 instruments use broker-specific suffixes:
 - Forex: `EURUSDm`, `GBPUSDm`, `USDJPYm`
 
 The gateway must implement dynamic symbol discovery:
-1. `GET /gateway/symbols`:
+1. `GET /symbols`:
    Calls `mt5.symbols_get()` and filters instruments matching verified active market subscriptions.
 2. Extracts contract specifications:
    - `contract_size`: (e.g. 100,000 for EURUSD, 1.0 for BTCUSD, 100 for XAUUSD)
@@ -154,7 +168,7 @@ The gateway must implement dynamic symbol discovery:
 
 ## 8. Real-Time Tick & Historical Data Feeds
 
-1. **Tick Streaming (`/gateway/tick/{symbol}`)**:
+1. **Tick Streaming (`/tick/{symbol}`)**:
    Calls `mt5.symbol_info_tick(symbol)` and returns:
    ```json
    {
@@ -166,7 +180,7 @@ The gateway must implement dynamic symbol discovery:
      "flags": 6
    }
    ```
-2. **Historical Bar Retrieval (`/gateway/history/{symbol}`)**:
+2. **Historical Bar Retrieval (`/rates/{symbol}`)**:
    Calls `mt5.copy_rates_from_pos(symbol, timeframe, 0, count)`:
    - Returns structured OHLCV candles.
    - Rejects synthetic fallbacks; returns authoritative broker bars.
@@ -176,24 +190,22 @@ The gateway must implement dynamic symbol discovery:
 ## 9. Reconnection & Supervisor Daemon
 
 1. **Keepalive Ping**:
-   Linux staging backend polls `GET /gateway/health` every 15 seconds.
+   Linux staging backend polls `GET http://10.88.0.2:8095/health` every 15 seconds over the private WireGuard interface (`wg0`).
 2. **Heartbeat Supervisor**:
    If 3 consecutive health checks fail:
    - The Linux risk engine trips the gateway circuit breaker.
    - Pre-trade validation sets `broker_connection_state = "DISCONNECTED"`.
-   - The Windows gateway service monitors MT5 process status; if `terminal64.exe` exits or freezes, the supervisor restarts the process and re-authenticates.
+   - The Windows gateway service (`BitdexMT5Gateway`) monitors MT5 process status; if `terminal64.exe` exits or freezes, the Windows service recovery manager restarts the process within 5 seconds and re-authenticates.
 
 ---
 
 ## 10. Audit & Integration Sign-Off Checklist
 
-Before any connection is marked `CONNECTED` in the customer UI:
-- [ ] Windows VPS provisioned in London/Amsterdam region.
-- [ ] MT5 terminal installed in portable mode.
-- [ ] Genuine Exness Demo credentials configured via secure environment variable vault.
-- [ ] WireGuard / TLS private tunnel operational between Linux and Windows hosts.
-- [ ] `X-Gateway-Auth-Token` validated with strong entropy.
-- [ ] `account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO` confirmed authoritatively.
-- [ ] Real-time tick stream verified for `BTCUSDm`, `XAUUSDm`, and `EURUSDm`.
-- [ ] All 11 platform quantitative risk controls validated against the live gateway feed.
-- [ ] `live_trading_locked = True` and `emergency_lock_active = True` remain strictly enforced.
+Before any MT5 gateway connection is marked `ACCOUNT_DATA_VERIFIED` in the customer UI:
+- [x] Linux WireGuard interface (`wg0` `10.88.0.1/24`) and systemd service (`wg-quick@wg0`) active on `169.58.218.168`.
+- [x] Linux backend `EXNESS_MT5_GATEWAY_URL=http://10.88.0.2:8095` and high-entropy `EXNESS_GATEWAY_AUTH_TOKEN` configured server-side.
+- [x] `setup_windows_gateway.ps1` hardened to bind exclusively to `10.88.0.2:8095` and register persistent `BitdexMT5Gateway` service with auto-start and failure recovery.
+- [ ] SSH public key authorised in `C:\ProgramData\ssh\administrators_authorized_keys` on Windows Server 2025 (`149.33.34.123`).
+- [ ] MT5 terminal installed in portable mode on `149.33.34.123` with DEMO account (`account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO`).
+- [x] `live_trading_locked = True`, `emergency_lock_active = True`, and `read_only_mode = True` remain strictly enforced.
+

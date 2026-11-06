@@ -139,7 +139,7 @@ export default function SidebarNav({
       group: "PORTFOLIO & ASSETS",
       badge: exnessConnected ? (
         <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981]">
-          CONNECTED
+          VERIFIED
         </span>
       ) : (
         <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#EF4444]/15 text-[#EF4444]">
