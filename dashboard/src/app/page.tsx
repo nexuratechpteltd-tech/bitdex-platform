@@ -129,18 +129,24 @@ export default function TauricPortal() {
           if (res.ok) {
             return res.json();
           }
-          throw new Error("Session expired");
+          if (res.status === 401) {
+            throw new Error("Session expired");
+          }
+          return null;
         })
         .then((data) => {
-          setCurrentUser(data.user);
-          localStorage.setItem("tauric_session_user", JSON.stringify(data.user));
+          if (data && data.user) {
+            setCurrentUser(data.user);
+            localStorage.setItem("tauric_session_user", JSON.stringify(data.user));
+          }
         })
-        .catch(() => {
-          // Token expired or invalid
-          localStorage.removeItem("tauric_session_token");
-          localStorage.removeItem("tauric_session_user");
-          setAuthToken(null);
-          setCurrentUser(null);
+        .catch((err) => {
+          if (err && err.message === "Session expired") {
+            localStorage.removeItem("tauric_session_token");
+            localStorage.removeItem("tauric_session_user");
+            setAuthToken(null);
+            setCurrentUser(null);
+          }
         });
     }
   }, []);

@@ -104,9 +104,12 @@ app.include_router(settings_route.router, prefix="/api/v1")
 
 # Include SaaS Multi-Tenant & Billing Routers
 app.include_router(saas_customer.customer_router, prefix="/api/v1")
+app.include_router(saas_customer.customer_router, prefix="/api/v1/saas")
 app.include_router(saas_admin.admin_router, prefix="/api/v1")
+app.include_router(saas_admin.admin_router, prefix="/api/v1/saas")
 app.include_router(saas_admin.webhook_router, prefix="/api/v1")
 app.include_router(exness_hft.router, prefix="/api/v1")
+app.include_router(exness_hft.router, prefix="/api/v1/saas")
 
 @app.get("/")
 async def root():
