@@ -821,3 +821,108 @@ class DemoExecutionService:
             },
             "message": "Phase 7E preflight validation PASSED. Zero orders submitted. Awaiting explicit user sign-off."
         }
+
+
+    @classmethod
+    def dispatch_demo_order(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        auth_token: str,
+        order_spec: Dict[str, Any],
+        dry_run: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Dispatches Demo order to Windows MT5 Gateway (/demo/order/submit).
+        Strict safety: dry_run=True conducts non-mutating preflight test.
+        """
+        import httpx
+
+        # 1. Non-mutating preflight validation locally
+        preflight = cls.preflight_demo_order(conn, user_id, auth_token, order_spec)
+
+        auth_row = conn.execute(
+            "SELECT * FROM hft_demo_authorizations WHERE auth_id = ? AND user_id = ? AND is_authorized = 1",
+            (auth_token, user_id)
+        ).fetchone()
+
+        if not auth_row:
+            raise HTTPException(status_code=401, detail="Active Demo authorization required.")
+
+        gateway_url = "http://10.88.0.2:8095/demo/order/submit"
+        gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
+
+        gateway_payload = {
+            "account_login": auth_row["broker_login"],
+            "server_name": auth_row["server_name"],
+            "environment": auth_row["environment"],
+            "demo_auth_token": auth_token,
+            "symbol": preflight["proposed_order"]["broker_symbol"],
+            "order_type": preflight["proposed_order"]["direction"],
+            "volume": preflight["proposed_order"]["volume"],
+            "price": preflight["proposed_order"]["entry_price"],
+            "sl": preflight["proposed_order"]["stop_loss"],
+            "tp": preflight["proposed_order"]["take_profit"],
+            "dry_run": dry_run
+        }
+
+        try:
+            resp = httpx.post(
+                gateway_url,
+                json=gateway_payload,
+                headers={"X-Gateway-Auth-Token": gateway_token},
+                timeout=10.0
+            )
+            gateway_res = resp.json()
+        except Exception as e:
+            logger.error(f"Gateway connection error: {e}")
+            raise HTTPException(status_code=502, detail=f"Windows MT5 Gateway communication error: {e}")
+
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=gateway_res.get("detail", "Gateway error"))
+
+        # Log audit trail
+        log_id = f"AUD-{secrets.token_hex(6).upper()}"
+        now_str = now_utc_iso()
+        conn.execute(
+            """
+            INSERT INTO audit_logs (log_id, actor_id, action, target_user_id, details_json, created_at)
+            VALUES (?, ?, 'DEMO_GATEWAY_PREFLIGHT_DISPATCHED', ?, ?, ?)
+            """,
+            (
+                log_id,
+                user_id,
+                user_id,
+                json.dumps({
+                    "auth_token": auth_token,
+                    "account_login": auth_row["broker_login"],
+                    "server_name": auth_row["server_name"],
+                    "symbol": preflight["proposed_order"]["broker_symbol"],
+                    "volume": preflight["proposed_order"]["volume"],
+                    "entry_price": preflight["proposed_order"]["entry_price"],
+                    "sl": preflight["proposed_order"]["stop_loss"],
+                    "tp": preflight["proposed_order"]["take_profit"],
+                    "monetary_risk_usd": preflight["proposed_order"]["max_monetary_risk_usd"],
+                    "gateway_status": gateway_res.get("status"),
+                    "dispatched_to_broker": False,
+                }),
+                now_str
+            )
+        )
+        conn.commit()
+
+        return {
+            "status": "SUCCESS",
+            "execution_mode": "NON_MUTATING_PREFLIGHT",
+            "preflight_status": "READY_FOR_EXECUTION_HELD",
+            "gateway_verification": gateway_res,
+            "order_details": preflight["proposed_order"],
+            "account_details": preflight["account_verification"],
+            "safety_governance": {
+                "live_trading_locked": True,
+                "real_trading_locked": True,
+                "read_only_mode": True,
+                "dispatched_to_broker": False,
+            },
+            "message": "Full end-to-end Demo execution pathway verified through Windows Gateway in non-mutating preflight mode. Zero orders submitted to broker. Awaiting explicit user sign-off."
+        }

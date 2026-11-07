@@ -366,5 +366,43 @@ class TestPhase7DDemoExecutionFull(unittest.TestCase):
         self.assertFalse(res["safety_governance"]["broker_order_submitted"])
 
 
+    def test_12_demo_gateway_dispatch_preflight(self):
+        """12. Full end-to-end Demo execution pathway verified via Windows Gateway in non-mutating preflight mode."""
+        auth = DemoExecutionService.authorize_demo_execution(
+            conn=self.conn,
+            user_id=self.primary_user,
+            account_id=self.target_demo_account,
+            symbol="BTCUSD"
+        )
+        token = auth['authorization']['auth_token']
+
+        res = DemoExecutionService.dispatch_demo_order(
+            conn=self.conn,
+            user_id=self.primary_user,
+            auth_token=token,
+            order_spec={
+                "symbol": "BTCUSD",
+                "direction": "BUY",
+                "entry_price": 75687.04,
+                "volume": 0.01,
+                "stop_loss_price": 75587.04,
+                "take_profit_price": 75887.04,
+                "account_equity": 5075.76
+            },
+            dry_run=True
+        )
+        self.assertEqual(res['status'], "SUCCESS")
+        self.assertEqual(res['execution_mode'], "NON_MUTATING_PREFLIGHT")
+        self.assertEqual(res['preflight_status'], "READY_FOR_EXECUTION_HELD")
+        self.assertFalse(res['safety_governance']['dispatched_to_broker'])
+        self.assertTrue(res['safety_governance']['live_trading_locked'])
+        self.assertTrue(res['safety_governance']['real_trading_locked'])
+        self.assertEqual(res['order_details']['broker_symbol'], "BTCUSDr")
+        self.assertEqual(res['order_details']['max_monetary_risk_usd'], 1.0)
+        self.assertIn("interactive_worker", res['gateway_verification'])
+        self.assertEqual(res['gateway_verification']['interactive_worker']['session_id'], 2)
+        self.assertEqual(res['gateway_verification']['interactive_worker']['verified_login'], 474861031)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
