@@ -1,11 +1,11 @@
 # BITDEX — Master Project Status & Live Execution Registry
 
 **Current Date**: 2026-11-08  
-**Current Phase**: **Phase 7D Completed & Verified** (Controlled Demo Execution Readiness)  
+**Current Phase**: **Phase 7E Preflight Verified & Held** (First Genuine Demo Execution)  
 **Website**: `https://bitdex.ltd`  
 **Repository**: `https://github.com/nexuratechpteltd-tech/bitdex-platform`  
 **Active Branch**: `feature/hft-redesign-and-navigation-cleanup`  
-**Previous Verified Baseline**: Phase 7C (`614d06f`)  
+**Previous Verified Baseline**: Phase 7D (`28df8eb`)  
 **Safety Governance**:
 - `live_trading_locked = True`
 - `real_trading_locked = True`
@@ -61,12 +61,19 @@
   - **Multi-Entry & Anti-Grid Barriers**: Max 3 positions, 30% equity exposure cap, min 1.0x ATR spacing between entries, $50.00 daily loss limit, and 30m consecutive-loss cooldown.
   - **Local Windows VPS Execution Architecture**: Implemented `local_scalper_agent.py` beside MT5 terminal (<0.45ms compute, <0.82ms IPC), achieving a **39.75ms total execution loop** (82.8x faster than the 3,292.5ms cloud path). Documented Session 0 service isolation limitation.
   - **20-Point Test Suite**: 100% pass rate (20/20 test cases verified on staging).
-- **Phase 7D — Controlled Demo Execution Readiness** (Current):
+- **Phase 7D — Controlled Demo Execution Readiness** (Commit `28df8eb`):
   - **Demo Execution Isolation Architecture**: Designed and deployed `DemoExecutionService` and scoped endpoints (`demo-authorize`, `emergency-disarm`, `demo-status`, `demo-simulate-order`).
   - **Permanent Real Account Lock**: All Real accounts hard-rejected with `HTTP 403 Forbidden` (`REAL_TRADING_PERMANENTLY_LOCKED`). Global locks (`live_trading_locked = True`, `real_trading_locked = True`) permanently maintained.
   - **Exhaustive Acceptance Testing**: 10/10 automated barrier checks passed with 100% success rate (`test_phase7d_demo_readiness.py`). Live HTTP API endpoints verified on port 8002.
   - **Zero Broker Orders Dispatched**: Testing conducted exclusively using market-data replay and simulation. Zero orders dispatched to MT5 terminal or Exness server.
   - **Pre-Trade Hold**: Explicit written user sign-off required prior to submitting the first genuine Demo trade.
+- **Phase 7E — First Genuine Demo Execution Preparation** (Current):
+  - **Forensic Audit & Preflight Verification**: Audited Git HEAD (commit `28df8eb`), `DemoExecutionService`, all Phase 7D endpoints, and Windows Gateway HTTP 403 blocks.
+  - **Non-Mutating Preflight Test**: Verified `POST /api/v1/saas/customer/trading/hft/session/demo-preflight` on live staging port 8002.
+  - **Proposed Order Sizing**: 0.01 lot `BTCUSDr` at $75,800.00, SL $75,700.00 ($100 distance), TP $76,000.00 ($200 distance, R:R 2.0:1), maximum monetary risk **$1.00 USD** (0.0197% equity).
+  - **11/11 Test Suite Pass Rate**: Verified all 11 automated isolation, risk, and preflight test cases (`test_phase7d_demo_readiness.py`).
+  - **Interactive MT5 Session Topology Documented**: GUI terminal (`terminal64.exe` PID 320) verified in Session 2 on `Exness-MT5Trial15`. Session 0 service isolation limitation documented.
+  - **Strict Pre-Trade Sign-Off Hold**: Zero genuine broker orders submitted. Held pending explicit user approval.
 
 ---
 
@@ -74,7 +81,7 @@
 
 | Account ID | Environment | Platform | Server | Connection Status | Verified Balance | Verified Equity | Classification / Technical State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`474861031`** | **DEMO** | **MT5** | `Exness-MT5Trial15` | **ACCOUNT_DATA_VERIFIED** | **`$5,076.03`** | **`$5,076.03`** | **Active Verified MT5 Demo Account**. Sole authorized owner: `USR-ADM-B022F490`. Authenticated via Windows Gateway (`10.88.0.2:8095`). Selected for Phase 7D Demo Readiness. |
+| **`474861031`** | **DEMO** | **MT5** | `Exness-MT5Trial15` | **ACCOUNT_DATA_VERIFIED** | **`$5,076.03`** | **`$5,076.03`** | **Active Verified MT5 Demo Account**. Sole authorized owner: `USR-ADM-B022F490`. Authenticated via Windows Gateway (`10.88.0.2:8095`). Selected for Phase 7E Demo Execution. |
 | **`16000629657`** | **REAL** | **EXNESS_TERMINAL** | `https://api.exness.com` | **ACCOUNT_DATA_VERIFIED** | **`$0.00`** | **`$0.00`** | **Active Verified Exness Terminal Account**. `stream_id: dx.2.real.std`. Not eligible for MT5 (`mt5_eligible: false`). Real trading permanently locked. |
 | **`460310009`** | **REAL** | **MT5** | `Exness-MT5Real*` | **AUTH_FAILED** | *DATA UNAVAILABLE* | *DATA UNAVAILABLE* | **Real MT5 Standard Account** (Historical screenshot: $14.35). Incompatible with Exness Trader Web API (`HTTP 401/400`). Real trading permanently locked. |
 | **`478461031`** | **DEMO** | **MT5** | `Exness-MT5Trial*` | **AUTH_FAILED** | *DATA UNAVAILABLE* | *DATA UNAVAILABLE* | **Historical Demo MT5 RawSpread Account** ($5,070.71 in screenshot). Superseded on active Windows terminal by `474861031` ($5,076.03). Preserved in database. |

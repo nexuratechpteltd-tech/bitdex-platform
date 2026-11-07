@@ -332,6 +332,39 @@ class TestPhase7DDemoExecutionFull(unittest.TestCase):
         self.assertFalse(res["broker_dispatch"]["dispatched_to_broker"])
         self.assertEqual(res["broker_dispatch"]["mode"], "CONTROLLED_DEMO_REPLAY_SIMULATION")
 
+    def test_11_preflight_demo_order_readiness(self):
+        """11. Non-mutating preflight test confirms account identity, broker symbol BTCUSDr and monetary risk."""
+        auth = DemoExecutionService.authorize_demo_execution(
+            conn=self.conn,
+            user_id=self.primary_user,
+            account_id=self.target_demo_account,
+            symbol="BTCUSD"
+        )
+        token = auth["authorization"]["auth_token"]
+
+        res = DemoExecutionService.preflight_demo_order(
+            conn=self.conn,
+            user_id=self.primary_user,
+            auth_token=token,
+            order_spec={
+                "symbol": "BTCUSD",
+                "direction": "BUY",
+                "entry_price": 75800.0,
+                "volume": 0.01,
+                "stop_loss_price": 75700.0,
+                "take_profit_price": 76000.0,
+                "account_equity": 5076.03
+            }
+        )
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["preflight_status"], "READY_FOR_EXECUTION_HELD")
+        self.assertEqual(res["account_verification"]["broker_login"], "474861031")
+        self.assertEqual(res["account_verification"]["environment"], "DEMO")
+        self.assertEqual(res["proposed_order"]["broker_symbol"], "BTCUSDr")
+        self.assertEqual(res["proposed_order"]["max_monetary_risk_usd"], 1.0)
+        self.assertEqual(res["proposed_order"]["risk_reward_ratio"], 2.0)
+        self.assertFalse(res["safety_governance"]["broker_order_submitted"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

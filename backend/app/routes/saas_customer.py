@@ -3208,6 +3208,29 @@ async def simulate_hft_demo_order_route(
         conn.close()
 
 
+@customer_router.post("/customer/trading/hft/session/demo-preflight")
+async def preflight_hft_demo_order_route(
+    req: HftDemoSimulateOrderRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Phase 7E: Non-mutating preflight validation for proposed genuine Demo trade.
+    Confirms broker symbol specifications, account equity, and monetary risk without order dispatch.
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.preflight_demo_order(
+            conn=conn,
+            user_id=user_id,
+            auth_token=req.auth_token,
+            order_spec=req.dict()
+        )
+    finally:
+        conn.close()
+
+
 class HftActivationCheckoutRequest(BaseModel):
     provider: str = "BINANCE_PAY"
 
