@@ -1023,27 +1023,63 @@ async def resync_exness_account(
         login = row_dict["account_login"]
         server = row_dict["server_name"]
         enc_str = row_dict.get("encrypted_credentials")
+        mode = row_dict.get("adapter_mode", "EXNESS_MT5_GATEWAY")
 
-        if not enc_str or enc_str == "{}":
-            raise HTTPException(status_code=400, detail="Stored credentials missing or revoked.")
+        if mode == "EXNESS_MT5_GATEWAY":
+            adapter = ExnessMT5GatewayAdapter(
+                account_id=login,
+                server=server,
+                environment=row_dict.get("account_type", "DEMO"),
+            )
+            conn_res = await adapter.connect()
+            if conn_res.get("broker_authenticated"):
+                acct_info = await adapter.get_account_info()
+                auth_res = {
+                    "verified": True,
+                    "environment": row_dict.get("account_type", "DEMO"),
+                    "account_tier": acct_info.get("name") or "RawSpread",
+                    "verification_state": "ACCOUNT_DATA_VERIFIED",
+                    "platform": "MT5",
+                    "mt5_eligible": True,
+                    "stream_id": f"mt5.{login}",
+                    "currency": acct_info.get("currency", "USD"),
+                    "leverage": acct_info.get("leverage", 2000),
+                    "balance": float(acct_info.get("balance", 0.0)),
+                    "equity": float(acct_info.get("equity", 0.0)),
+                    "margin_used": float(acct_info.get("margin", 0.0)),
+                    "margin_free": float(acct_info.get("free_margin", acct_info.get("equity", 0.0))),
+                    "environment_confirmed_by": "MT5_GATEWAY_VERIFIED",
+                    "access_point": f"MT5-GATEWAY-{server}",
+                    "trade_mode": "ENABLED" if acct_info.get("trade_allowed") else "READ_ONLY",
+                }
+            else:
+                auth_res = {
+                    "verified": False,
+                    "verification_state": "AUTH_FAILED",
+                    "error_type": conn_res.get("status", "GATEWAY_AUTH_FAILED"),
+                    "error_detail": conn_res.get("reason", "MT5 Gateway execution bridge failed to authenticate."),
+                }
+        else:
+            if not enc_str or enc_str == "{}":
+                raise HTTPException(status_code=400, detail="Stored credentials missing or revoked.")
 
-        creds = ExnessCredentialVault.decrypt_credentials(
-            user_id=user_id,
-            login=login,
-            server=server,
-            enc_payload=json.loads(enc_str)
-        )
-        api_secret = creds.get("password", "")
-        api_key = row_dict.get("api_key") or login
+            creds = ExnessCredentialVault.decrypt_credentials(
+                user_id=user_id,
+                login=login,
+                server=server,
+                enc_payload=json.loads(enc_str)
+            )
+            api_secret = creds.get("password", "")
+            api_key = row_dict.get("api_key") or login
 
-        adapter = ExnessTraderAPIAdapter(
-            api_key=api_key,
-            api_secret=api_secret,
-            account_id=login,
-            discovery_base_url=server,
-        )
+            adapter = ExnessTraderAPIAdapter(
+                api_key=api_key,
+                api_secret=api_secret,
+                account_id=login,
+                discovery_base_url=server,
+            )
 
-        auth_res = await adapter.authenticate_account(login, manual_env=row_dict.get("account_type"))
+            auth_res = await adapter.authenticate_account(login, manual_env=row_dict.get("account_type"))
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         if auth_res.get("verified"):
@@ -1167,27 +1203,64 @@ async def sync_all_exness_accounts(user: Dict[str, Any] = Depends(get_current_us
             login = row_dict["account_login"]
             server = row_dict["server_name"]
             enc_str = row_dict.get("encrypted_credentials")
-            if not enc_str or enc_str == "{}":
-                failed_count += 1
-                results.append({"account_id": login, "status": "FAILED", "error_detail": "Missing stored credentials."})
-                continue
+            mode = row_dict.get("adapter_mode", "EXNESS_MT5_GATEWAY")
 
             try:
-                creds = ExnessCredentialVault.decrypt_credentials(
-                    user_id=user_id,
-                    login=login,
-                    server=server,
-                    enc_payload=json.loads(enc_str),
-                )
-                api_secret = creds.get("password", "")
-                api_key = row_dict.get("api_key") or login
-                adapter = ExnessTraderAPIAdapter(
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    account_id=login,
-                    discovery_base_url=server,
-                )
-                auth_res = await adapter.authenticate_account(login, manual_env=row_dict.get("account_type"))
+                if mode == "EXNESS_MT5_GATEWAY":
+                    adapter = ExnessMT5GatewayAdapter(
+                        account_id=login,
+                        server=server,
+                        environment=row_dict.get("account_type", "DEMO"),
+                    )
+                    conn_res = await adapter.connect()
+                    if conn_res.get("broker_authenticated"):
+                        acct_info = await adapter.get_account_info()
+                        auth_res = {
+                            "verified": True,
+                            "environment": row_dict.get("account_type", "DEMO"),
+                            "account_tier": acct_info.get("name") or "RawSpread",
+                            "verification_state": "ACCOUNT_DATA_VERIFIED",
+                            "platform": "MT5",
+                            "mt5_eligible": True,
+                            "stream_id": f"mt5.{login}",
+                            "currency": acct_info.get("currency", "USD"),
+                            "leverage": acct_info.get("leverage", 2000),
+                            "balance": float(acct_info.get("balance", 0.0)),
+                            "equity": float(acct_info.get("equity", 0.0)),
+                            "margin_used": float(acct_info.get("margin", 0.0)),
+                            "margin_free": float(acct_info.get("free_margin", acct_info.get("equity", 0.0))),
+                            "environment_confirmed_by": "MT5_GATEWAY_VERIFIED",
+                            "access_point": f"MT5-GATEWAY-{server}",
+                            "trade_mode": "ENABLED" if acct_info.get("trade_allowed") else "READ_ONLY",
+                        }
+                    else:
+                        auth_res = {
+                            "verified": False,
+                            "verification_state": "AUTH_FAILED",
+                            "error_type": conn_res.get("status", "GATEWAY_AUTH_FAILED"),
+                            "error_detail": conn_res.get("reason", "MT5 Gateway bridge failed to authenticate."),
+                        }
+                else:
+                    if not enc_str or enc_str == "{}":
+                        failed_count += 1
+                        results.append({"account_id": login, "status": "FAILED", "error_detail": "Missing stored credentials."})
+                        continue
+
+                    creds = ExnessCredentialVault.decrypt_credentials(
+                        user_id=user_id,
+                        login=login,
+                        server=server,
+                        enc_payload=json.loads(enc_str),
+                    )
+                    api_secret = creds.get("password", "")
+                    api_key = row_dict.get("api_key") or login
+                    adapter = ExnessTraderAPIAdapter(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        account_id=login,
+                        discovery_base_url=server,
+                    )
+                    auth_res = await adapter.authenticate_account(login, manual_env=row_dict.get("account_type"))
 
                 if auth_res.get("verified"):
                     verified_count += 1

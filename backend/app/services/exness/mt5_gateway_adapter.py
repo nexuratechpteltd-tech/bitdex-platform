@@ -41,8 +41,17 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
     ):
         self.account_id = str(account_id).strip()
         self.server = str(server).strip()
-        self.gateway_url = (gateway_url or os.getenv("EXNESS_MT5_GATEWAY_URL", "http://127.0.0.1:8095")).rstrip("/")
-        self.auth_token = auth_token or os.getenv("EXNESS_GATEWAY_AUTH_TOKEN")
+        token = auth_token or os.getenv("EXNESS_GATEWAY_AUTH_TOKEN")
+        url = gateway_url or os.getenv("EXNESS_MT5_GATEWAY_URL")
+        if not token or not url:
+            try:
+                from ...config import settings
+                token = token or getattr(settings, "exness_gateway_auth_token", None)
+                url = url or getattr(settings, "exness_mt5_gateway_url", None)
+            except Exception:
+                pass
+        self.gateway_url = (url or "http://10.88.0.2:8095").rstrip("/")
+        self.auth_token = token or "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
         self.is_connected = False
         self.broker_authenticated = False
         self.live_execution_locked = True  # Strict safety requirement
@@ -80,7 +89,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             payload["password"] = password
 
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.post(
                     f"{self.gateway_url}/connect",
                     json=payload,
@@ -180,7 +189,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         self.is_connected = False
         self.broker_authenticated = False
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 await client.post(
                     f"{self.gateway_url}/disconnect",
                     headers=self._get_headers(),
@@ -196,7 +205,20 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             "account_id": self.account_id,
         }
 
+    async def _ensure_connected(self) -> bool:
+        """Auto-connects to MT5 Gateway if not already connected."""
+        if not self.is_connected or not self.broker_authenticated:
+            try:
+                res = await self.connect()
+                return bool(self.broker_authenticated)
+            except Exception as e:
+                logger.warning(f"Auto-connect to MT5 gateway failed for {self.account_id}: {e}")
+                return False
+        return True
+
     async def get_connection_status(self) -> Dict[str, Any]:
+        if not self.is_connected or not self.broker_authenticated:
+            await self._ensure_connected()
         return {
             "is_connected": self.is_connected,
             "adapter_connected": self.is_connected,
@@ -212,10 +234,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         }
 
     async def get_account_info(self) -> Dict[str, Any]:
+        await self._ensure_connected()
         if not self.is_connected or not self.broker_authenticated:
             raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/account", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json()
@@ -224,10 +247,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         raise ConnectionError("Gateway returned non-200 status for account telemetry.")
 
     async def get_symbols(self) -> List[str]:
+        await self._ensure_connected()
         if not self.is_connected or not self.broker_authenticated:
             raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/symbols", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("symbols", [])
@@ -236,10 +260,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             raise ConnectionError(f"Failed to query symbols from gateway: {e}") from e
 
     async def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        await self._ensure_connected()
         if not self.is_connected or not self.broker_authenticated:
             raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/symbol/{symbol}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("symbol_info")
@@ -252,10 +277,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             raise ConnectionError(f"Failed to query symbol info from gateway: {e}") from e
 
     async def get_latest_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
+        await self._ensure_connected()
         if not self.is_connected or not self.broker_authenticated:
             raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/tick/{symbol}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("latest_tick")
@@ -290,7 +316,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         if not self.is_connected or not self.broker_authenticated:
             return {"status": "BLOCKED", "reason": "MT5_GATEWAY_DISCONNECTED"}
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.post(
                     f"{self.gateway_url}/margin/calculate",
                     json={"symbol": symbol, "order_type": order_type, "volume": volume},
@@ -323,10 +349,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         raise PermissionError("Partial close rejected: Live and gateway execution disabled in Phase 2.2.")
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
+        await self._ensure_connected()
         if not self.is_connected or not self.broker_authenticated:
             raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/positions", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("positions", [])
@@ -337,10 +364,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             raise ConnectionError(f"Failed to query open positions from gateway: {e}") from e
 
     async def get_order_history(self, limit: int = 100) -> List[Dict[str, Any]]:
+        await self._ensure_connected()
         if not self.is_connected or not self.broker_authenticated:
             raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/orders/history?limit={limit}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("orders", [])
@@ -351,10 +379,11 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
             raise ConnectionError(f"Failed to query order history from gateway: {e}") from e
 
     async def get_trade_history(self, limit: int = 100) -> List[Dict[str, Any]]:
+        await self._ensure_connected()
         if not self.is_connected or not self.broker_authenticated:
             raise ConnectionError("MT5 Gateway terminal is disconnected or unauthenticated.")
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/trades/history?limit={limit}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json().get("trades", [])
@@ -368,7 +397,7 @@ class ExnessMT5GatewayAdapter(ExnessBaseAdapter):
         if not self.is_connected or not self.broker_authenticated:
             return {"broker_stop_active": False, "reason": "MT5_GATEWAY_DISCONNECTED"}
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(f"{self.gateway_url}/stops/verify/{ticket}", headers=self._get_headers())
                 if res.status_code == 200:
                     return res.json()

@@ -92,6 +92,29 @@ try:
 except ImportError:
     logger.warning("MetaTrader5 library not found. Running in mock/testing environment.")
 
+DEFAULT_TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", r"C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe")
+if not os.path.exists(DEFAULT_TERMINAL_PATH):
+    for p in [r"C:\Program Files\Exness MetaTrader 5\terminal64.exe", r"C:\ExnessMT5\terminal64.exe"]:
+        if os.path.exists(p):
+            DEFAULT_TERMINAL_PATH = p
+            break
+
+def init_mt5_terminal() -> bool:
+    if not MT5_AVAILABLE:
+        return False
+    try:
+        t_info = mt5.terminal_info()
+        if t_info and t_info.connected:
+            return True
+        if DEFAULT_TERMINAL_PATH and os.path.exists(DEFAULT_TERMINAL_PATH):
+            res = mt5.initialize(path=DEFAULT_TERMINAL_PATH)
+        else:
+            res = mt5.initialize()
+        return bool(res)
+    except Exception as e:
+        logger.error(f"Error in init_mt5_terminal: {e}")
+        return False
+
 STARTUP_TIME = time.time()
 
 # ─────────────────────────────────────────────────────────────
@@ -192,7 +215,8 @@ def require_mt5_terminal():
     if not t_info or not t_info.connected:
         # Attempt auto-reconnect once
         logger.warning("MT5 terminal connection dropped. Attempting automated reinitialization...")
-        mt5.initialize()
+        logger.warning("MT5 terminal connection dropped. Attempting automated reinitialization...")
+        init_mt5_terminal()
         t_info = mt5.terminal_info()
         if not t_info or not t_info.connected:
             raise HTTPException(
@@ -256,6 +280,9 @@ async def health_check():
 
     if MT5_AVAILABLE:
         t_info = mt5.terminal_info()
+        if not t_info or not t_info.connected:
+            init_mt5_terminal()
+            t_info = mt5.terminal_info()
         if t_info:
             terminal_connected = bool(t_info.connected)
             terminal_build = int(t_info.build)
@@ -307,7 +334,7 @@ async def connect_mt5(req: ConnectRequest):
             detail="MetaTrader 5 Python IPC library is unavailable on this host.",
         )
 
-    if not mt5.initialize():
+    if not init_mt5_terminal():
         err = mt5.last_error()
         logger.error(f"Failed to initialize MT5 terminal: {err}")
         raise HTTPException(

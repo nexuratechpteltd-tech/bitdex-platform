@@ -614,7 +614,7 @@ export default function InstitutionalTradingDashboard({
       const list: ConnectedAccount[] = json.accounts || [];
       setConnectedAccounts(list);
       setAccountsError(null);
-      setSelectedAccountId((cur) => (cur && list.some((a) => a.account_id === cur) ? cur : ""));
+      setSelectedAccountId((cur) => (cur && list.some((a) => a.account_id === cur) ? cur : (list.length > 0 ? list[0].account_id : "")));
     } catch (err: any) {
       setAccountsError(err.message || "Could not load connected accounts");
     }
