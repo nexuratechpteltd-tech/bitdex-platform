@@ -659,10 +659,11 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
 
             # Classify platform eligibility / Trader API scoping limitation transparently
             if bal_probe_status == 400 and bal_probe_err == "REQUEST_INVALID_PARAMETERS":
+                err_type = "UNSUPPORTED_ACCOUNT_PLATFORM"
                 limitation_note = (
-                    f"Account {clean_id} is not accessible via this Exness Trader API key ({'; '.join(diag_parts)}). "
-                    f"Note: Exness Trader REST API only supports Exness Terminal accounts explicitly authorized for the API key; "
-                    f"MetaTrader 5 (MT5) accounts require the Windows MT5 Gateway, and additional Exness Terminal accounts require explicit API key scope authorization in Exness Personal Area."
+                    f"Account {clean_id} is a MetaTrader 5 (MT5) Real account and cannot be authenticated via the Exness Trader REST API. "
+                    f"Exness Trader REST API keys are strictly scoped to Exness Terminal accounts (such as 16000629657). "
+                    f"MetaTrader 5 accounts require direct connection via the Windows MT5 Gateway ({'; '.join(diag_parts)})."
                 )
             else:
                 limitation_note = f"{disc.get('detail') or 'Gateway Access Point discovery failed.'} ({'; '.join(diag_parts)})"
