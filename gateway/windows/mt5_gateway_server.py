@@ -115,6 +115,11 @@ def init_mt5_terminal() -> bool:
         t_info = mt5.terminal_info()
         if t_info and t_info.connected:
             return True
+        # First attempt connecting to already-running terminal instance
+        if mt5.initialize():
+            t_info = mt5.terminal_info()
+            if t_info and t_info.connected:
+                return True
         if DEFAULT_TERMINAL_PATH and os.path.exists(DEFAULT_TERMINAL_PATH):
             res = mt5.initialize(path=DEFAULT_TERMINAL_PATH)
         else:
