@@ -3231,13 +3231,25 @@ async def preflight_hft_demo_order_route(
         conn.close()
 
 
+class HftDemoExecuteOrderRequest(BaseModel):
+    auth_token: str
+    symbol: str = "BTCUSD"
+    direction: str = "BUY"
+    entry_price: float
+    volume: float = 0.01
+    stop_loss_price: float
+    take_profit_price: float
+    account_equity: Optional[float] = 5075.76
+    dry_run: bool = False
+
+
 @customer_router.post("/customer/trading/hft/session/demo-execute")
 async def execute_hft_demo_order_route(
-    req: HftDemoSimulateOrderRequest,
+    req: HftDemoExecuteOrderRequest,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Phase 7F: Dedicated Demo execution dispatch pathway with strict non-mutating preflight mode.
+    Phase 7F: Dedicated Demo execution dispatch pathway.
     Dispatches to Windows MT5 Gateway /demo/order/submit over WireGuard tunnel.
     """
     user_id = current_user["user_id"]
@@ -3249,7 +3261,7 @@ async def execute_hft_demo_order_route(
             user_id=user_id,
             auth_token=req.auth_token,
             order_spec=req.dict(),
-            dry_run=True  # STRICT: Non-mutating preflight test only during Phase 7F preparation
+            dry_run=req.dry_run
         )
     finally:
         conn.close()

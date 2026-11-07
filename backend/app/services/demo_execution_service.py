@@ -911,6 +911,66 @@ class DemoExecutionService:
         )
         conn.commit()
 
+        if not dry_run and gateway_res.get("dispatched_to_broker"):
+            # Record genuine broker execution audit
+            exec_log_id = f"AUD-{secrets.token_hex(6).upper()}"
+            conn.execute(
+                """
+                INSERT INTO audit_logs (log_id, actor_id, action, target_user_id, details_json, created_at)
+                VALUES (?, ?, 'DEMO_ORDER_EXECUTED_ON_BROKER', ?, ?, ?)
+                """,
+                (
+                    exec_log_id,
+                    user_id,
+                    user_id,
+                    json.dumps({
+                        "auth_token": auth_token,
+                        "account_login": auth_row["broker_login"],
+                        "server_name": auth_row["server_name"],
+                        "symbol": gateway_res.get("symbol"),
+                        "volume": gateway_res.get("volume"),
+                        "price": gateway_res.get("execution_price"),
+                        "sl": gateway_res.get("sl"),
+                        "tp": gateway_res.get("tp"),
+                        "order_id": gateway_res.get("order_id"),
+                        "deal_id": gateway_res.get("deal_id"),
+                        "dispatch_latency_ms": gateway_res.get("dispatch_latency_ms"),
+                        "dispatched_to_broker": True,
+                    }),
+                    now_str
+                )
+            )
+            conn.commit()
+
+            return {
+                "status": "SUCCESS",
+                "execution_mode": "GENUINE_BROKER_EXECUTION",
+                "dispatched_to_broker": True,
+                "broker_execution": {
+                    "order_id": gateway_res.get("order_id"),
+                    "deal_id": gateway_res.get("deal_id"),
+                    "symbol": gateway_res.get("symbol"),
+                    "order_type": gateway_res.get("order_type"),
+                    "volume": gateway_res.get("volume"),
+                    "execution_price": gateway_res.get("execution_price"),
+                    "stop_loss": gateway_res.get("sl"),
+                    "take_profit": gateway_res.get("tp"),
+                    "dispatch_latency_ms": gateway_res.get("dispatch_latency_ms"),
+                    "confirmed_position": gateway_res.get("confirmed_position"),
+                },
+                "account_details": {
+                    "login": auth_row["broker_login"],
+                    "server": auth_row["server_name"],
+                    "environment": auth_row["environment"],
+                },
+                "safety_governance": {
+                    "live_trading_locked": True,
+                    "real_trading_locked": True,
+                    "dispatched_to_broker": True,
+                },
+                "message": gateway_res.get("message")
+            }
+
         return {
             "status": "SUCCESS",
             "execution_mode": "NON_MUTATING_PREFLIGHT",
