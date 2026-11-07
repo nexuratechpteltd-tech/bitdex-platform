@@ -300,7 +300,7 @@ export default function InstitutionalTradingDashboard({
   // Session Control State
   const [sessionActionLoading, setSessionActionLoading] = useState<boolean>(false);
   const [sessionState, setSessionState] = useState<
-    "NOT_CONFIGURED" | "CONFIGURED" | "VALIDATING" | "READY" | "ACTIVE" | "STOPPING" | "STOPPED" | "FAILED"
+    "NOT_CONFIGURED" | "VALIDATING" | "ARMED_READ_ONLY" | "STOPPED" | "FAILED"
   >("NOT_CONFIGURED");
 
   // ─── Phase 2: $20.00 USD One-Time HFT Account Activation State ───────────
@@ -429,7 +429,7 @@ export default function InstitutionalTradingDashboard({
         type: "success",
         message: "Account Activated ($20.00 USD verified). High-Frequency Trading configuration and execution controls are now unlocked.",
       });
-      setSessionState("ACTIVE");
+      setSessionState("ARMED_READ_ONLY");
       await runValidation(selectedPair);
       await fetchOverview();
     } catch (err: any) {
@@ -571,9 +571,9 @@ export default function InstitutionalTradingDashboard({
         if (json.config) {
           setStrategyConfig(json.config);
           if (json.config.status === "ACTIVE") {
-            setSessionState("ACTIVE");
+            setSessionState("ARMED_READ_ONLY");
           } else if (json.config.status === "CONFIGURED") {
-            setSessionState("CONFIGURED");
+            setSessionState("NOT_CONFIGURED");
           } else {
             setSessionState("NOT_CONFIGURED");
           }
@@ -601,11 +601,11 @@ export default function InstitutionalTradingDashboard({
         setChecklist(json.checklist || []);
         setIsReady(Boolean(json.is_ready));
         if (json.session_active) {
-          setSessionState("ACTIVE");
+          setSessionState("ARMED_READ_ONLY");
         } else if (json.is_ready) {
-          setSessionState("READY");
+          setSessionState("NOT_CONFIGURED");
         } else if (json.strategy_configured) {
-          setSessionState("CONFIGURED");
+          setSessionState("NOT_CONFIGURED");
         } else {
           setSessionState("NOT_CONFIGURED");
         }
@@ -1513,21 +1513,23 @@ export default function InstitutionalTradingDashboard({
             <span className="text-[#94A3B8]">Session State:</span>
             <span
               className={`px-3 py-1 rounded-full font-bold border flex items-center gap-1.5 ${
-                sessionState === "ACTIVE"
-                  ? "bg-[#10B981]/15 text-[#10B981] border-[#10B981]/40"
-                  : sessionState === "READY"
+                sessionState === "ARMED_READ_ONLY"
                   ? "bg-[#00E5FF]/15 text-[#00E5FF] border-[#00E5FF]/40"
-                  : sessionState === "CONFIGURED"
+                  : sessionState === "VALIDATING"
                   ? "bg-amber-950/40 text-amber-400 border-amber-500/40"
+                  : sessionState === "FAILED"
+                  ? "bg-[#F6465D]/15 text-[#F6465D] border-[#F6465D]/40"
                   : "bg-[#181822] text-[#94A3B8] border-[#272735]"
               }`}
             >
               <span
                 className={`w-2 h-2 rounded-full ${
-                  sessionState === "ACTIVE"
-                    ? "bg-[#10B981] animate-pulse"
-                    : sessionState === "READY"
-                    ? "bg-[#00E5FF]"
+                  sessionState === "ARMED_READ_ONLY"
+                    ? "bg-[#00E5FF] animate-pulse"
+                    : sessionState === "VALIDATING"
+                    ? "bg-amber-400 animate-spin"
+                    : sessionState === "FAILED"
+                    ? "bg-[#F6465D]"
                     : "bg-[#64748B]"
                 }`}
               />
@@ -1542,8 +1544,8 @@ export default function InstitutionalTradingDashboard({
               {selectedAccount?.source === 'EXNESS' ? 'Autonomous CFD Momentum Scalper · Exness MT5' : 'Autonomous Post-Only Scalper · Binance USDⓈ-M Perps'}
             </p>
             <p className="text-[#94A3B8]">
-              {sessionState === "ACTIVE"
-                ? "Session active in Controlled Testnet Validation Mode. Order placement held at execution gate."
+              {sessionState === "ARMED_READ_ONLY"
+                ? "Session armed in strict READ-ONLY mode. Live and simulated order dispatch are locked by server-side safety gates."
                 : isReady
                 ? "All 9 security and risk checks passed. Ready for simulated session arming."
                 : "Prerequisites incomplete. Review pre-trade checklist above to arm session."}
@@ -1551,7 +1553,7 @@ export default function InstitutionalTradingDashboard({
           </div>
 
           <div className="flex items-center gap-3">
-            {sessionState === "ACTIVE" ? (
+            {sessionState === "ARMED_READ_ONLY" ? (
               <button
                 type="button"
                 id="btn-stop-hft-session"

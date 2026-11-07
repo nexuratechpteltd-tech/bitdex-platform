@@ -323,6 +323,12 @@ async def submit_demo_order(
     assert_customer_active(current_user)
     user_id = current_user["user_id"]
 
+    if settings.live_trading_locked or settings.read_only_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Order submission blocked: Safety lock active (live_trading_locked=true / read_only_mode=true). All order execution is disabled."
+        )
+
     # Guard: Reject scalping grid orders sent to Spot endpoint
     strat = getattr(req, "strategy", "") or getattr(req, "strategy_type", "") or ""
     side_str = getattr(req, "side", "") or ""
@@ -1010,6 +1016,13 @@ async def adjust_position_tp_sl(
     Strictly verifies customer ownership and active account status.
     """
     assert_customer_active(current_user)
+
+    if settings.live_trading_locked or settings.read_only_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Position modification blocked: Safety lock active (live_trading_locked=true / read_only_mode=true). Position modifications are disabled."
+        )
+
     find_and_assert_position_ownership(position_id, current_user)
 
     if not req.confirmed:
@@ -1048,6 +1061,13 @@ async def close_position(
     Customer A cannot close Customer B's positions.
     """
     assert_customer_active(current_user)
+
+    if settings.live_trading_locked or settings.read_only_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Position closure blocked: Safety lock active (live_trading_locked=true / read_only_mode=true). Position closures are disabled."
+        )
+
     find_and_assert_position_ownership(position_id, current_user)
 
     try:
@@ -1210,6 +1230,12 @@ async def cancel_order(
     assert_customer_active(current_user)
     user_id = current_user["user_id"]
     is_admin = current_user.get("role") in ("ADMIN", "OWNER")
+
+    if settings.live_trading_locked or settings.read_only_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Order cancellation blocked: Safety lock active (live_trading_locked=true / read_only_mode=true). Order cancellations are disabled."
+        )
 
     # Verify ownership in database exchange_orders
     conn = get_db_connection()
