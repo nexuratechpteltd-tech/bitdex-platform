@@ -3090,6 +3090,124 @@ async def stop_hft_session_route(req: HftSessionActionRequest, current_user: Dic
 
 # ─── Phase 2: One-Time $20.00 USD HFT Account Activation Routes ───────────────
 
+
+# ─── Phase 7D: Controlled Demo Execution Readiness Endpoints ──────────────────
+
+class HftDemoAuthorizeRequest(BaseModel):
+    account_id: str
+    symbol: str = "BTCUSD"
+    confirm_demo_only: bool = True
+
+class HftEmergencyDisarmRequest(BaseModel):
+    account_id: Optional[str] = None
+    reason: Optional[str] = "User triggered emergency disarm"
+
+class HftDemoSimulateOrderRequest(BaseModel):
+    auth_token: str
+    symbol: str = "BTCUSD"
+    direction: str = "BUY"
+    entry_price: float
+    volume: float = 0.01
+    stop_loss_price: float
+    take_profit_price: float
+    account_equity: Optional[float] = 5076.03
+
+
+@customer_router.post("/customer/trading/hft/session/demo-authorize")
+async def authorize_hft_demo_execution_route(
+    req: HftDemoAuthorizeRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Grants dedicated, server-confirmed Demo execution authorization for verified Demo accounts.
+    Hard-rejects Real accounts with HTTP 403 Forbidden.
+    Enforces risk limits, mandatory SL & TP, and records an immutable audit trail.
+    """
+    from ..services.activation_service import assert_hft_activated
+    assert_hft_activated(current_user)
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.authorize_demo_execution(
+            conn=conn,
+            user_id=user_id,
+            account_id=req.account_id,
+            symbol=req.symbol,
+            confirm_demo_only=req.confirm_demo_only
+        )
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/trading/hft/session/emergency-disarm")
+async def emergency_disarm_hft_demo_route(
+    req: HftEmergencyDisarmRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Emergency Stop control: immediately disarms Demo execution authorization,
+    sets emergency_stop_triggered = 1, and records an immutable audit trail.
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.emergency_disarm(
+            conn=conn,
+            user_id=user_id,
+            account_id=req.account_id,
+            reason=req.reason or "User triggered emergency disarm"
+        )
+    finally:
+        conn.close()
+
+
+@customer_router.get("/customer/trading/hft/session/demo-status")
+async def get_hft_demo_status_route(
+    account_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Returns current Demo execution authorization state, risk barrier metrics,
+    and platform safety lock status.
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.get_demo_status(
+            conn=conn,
+            user_id=user_id,
+            account_id=account_id
+        )
+    finally:
+        conn.close()
+
+
+@customer_router.post("/customer/trading/hft/session/demo-simulate-order")
+async def simulate_hft_demo_order_route(
+    req: HftDemoSimulateOrderRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Simulates proposed Demo order execution across all risk barriers and broker constraints.
+    Zero orders are dispatched to live broker. Used for pre-execution verification.
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.validate_and_simulate_order(
+            conn=conn,
+            user_id=user_id,
+            auth_token=req.auth_token,
+            order_spec=req.dict()
+        )
+    finally:
+        conn.close()
+
+
 class HftActivationCheckoutRequest(BaseModel):
     provider: str = "BINANCE_PAY"
 
