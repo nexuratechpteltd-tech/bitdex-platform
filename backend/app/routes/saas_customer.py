@@ -2456,13 +2456,22 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id:
                     "critical": True,
                     "detail": "Explicit real-money consent recorded for this account." if consented else "Real-account consent not yet recorded for this account."
                 })
-            checklist.append({
-                "id": "LIVE_EXECUTION_LOCK",
-                "name": "Platform Live Execution Lock",
-                "passed": False,
-                "critical": True,
-                "detail": "live_trading_locked / emergency_lock_active / read_only_mode are enforced. No orders will be dispatched."
-            })
+            if sel_acct["environment"] == "DEMO":
+                checklist.append({
+                    "id": "DEMO_EXECUTION_AUTH",
+                    "name": "Demo Execution Authorization",
+                    "passed": True,
+                    "critical": True,
+                    "detail": "Demo environment authorized. Standby simulation gate armed (broker live locks preserved)."
+                })
+            else:
+                checklist.append({
+                    "id": "LIVE_EXECUTION_LOCK",
+                    "name": "Platform Live Execution Lock",
+                    "passed": False,
+                    "critical": True,
+                    "detail": "live_trading_locked / emergency_lock_active / read_only_mode are enforced. Real live orders blocked."
+                })
 
         all_critical_passed = all(c["passed"] for c in checklist if c["critical"])
 
@@ -2897,6 +2906,7 @@ def _resolve_hft_account(conn, user_id: str, account_id: str):
             "error_detail": r.get("error_detail") or "",
             "last_connected_at": r.get("last_reconciled_at"),
             "adapter_mode": r.get("adapter_mode"),
+            "platform": r.get("platform") or ("MT5" if env == "DEMO" else "EXNESS_TERMINAL"),
         }
     return None
 

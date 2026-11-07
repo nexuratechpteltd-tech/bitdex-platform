@@ -146,15 +146,16 @@ export default function OrdersHoldingsView({
             <table className="w-full text-left font-mono text-xs">
               <thead className="bg-[#151C28] text-[#94A3B8] text-[10px] uppercase border-b border-[#1E2736]">
                 <tr>
-                  <th className="py-3 px-4">Ticket</th>
-                  <th className="py-3 px-4">Instrument</th>
-                  <th className="py-3 px-4">Direction</th>
-                  <th className="py-3 px-4 text-right">Volume (Lots)</th>
-                  <th className="py-3 px-4 text-right">Entry Price</th>
-                  <th className="py-3 px-4 text-right">Current Price</th>
-                  <th className="py-3 px-4 text-right">Stop Loss</th>
-                  <th className="py-3 px-4 text-right">Take Profit</th>
-                  <th className="py-3 px-4 text-right">P&amp;L (USD)</th>
+                  <th className="py-3 px-3">Ticket</th>
+                  <th className="py-3 px-3">Category</th>
+                  <th className="py-3 px-3">Instrument</th>
+                  <th className="py-3 px-3">Exchange &bull; Platform</th>
+                  <th className="py-3 px-3">Direction</th>
+                  <th className="py-3 px-3 text-right">Volume</th>
+                  <th className="py-3 px-3 text-right">Entry Price</th>
+                  <th className="py-3 px-3 text-right">Current Price</th>
+                  <th className="py-3 px-3 text-right">P&amp;L (USD)</th>
+                  <th className="py-3 px-3">Data Source</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1E2736]">
@@ -162,57 +163,59 @@ export default function OrdersHoldingsView({
                   const pnl = formatPnlValue(pos.pnl_usd);
                   return (
                     <tr key={pos.ticket} className="hover:bg-[#151C28]/60 transition-colors">
-                      <td className="py-3.5 px-4 text-[#94A3B8]">{pos.ticket}</td>
-                      <td className="py-3.5 px-4 font-bold text-[#F1F5F9]">
-                        <div className="flex items-center gap-1.5">
-                          <span>{pos.symbol}</span>
-                          {pos.exchange && (
-                            <span className="text-[9px] px-1 py-0.2 rounded bg-[#1E2736] text-[#64748B]">
-                              {pos.exchange}
-                            </span>
-                          )}
-                        </div>
+                      <td className="py-3.5 px-3 text-[#94A3B8] font-bold">{pos.ticket}</td>
+                      <td className="py-3.5 px-3">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                          (pos as any).is_exchange_confirmed
+                            ? "bg-emerald-950/60 text-emerald-400 border-emerald-500/40"
+                            : (pos as any).origin === "SEEDED_FIXTURE" || (pos as any).origin === "SIMULATION"
+                            ? "bg-purple-950/60 text-purple-400 border-purple-500/40"
+                            : pos.status === "CLOSED"
+                            ? "bg-slate-900 text-slate-400 border-slate-700"
+                            : "bg-amber-950/60 text-amber-400 border-amber-500/40"
+                        }`}>
+                          {(pos as any).is_exchange_confirmed
+                            ? "Verified Broker Position"
+                            : (pos as any).origin === "SEEDED_FIXTURE" || (pos as any).origin === "SIMULATION"
+                            ? "Simulated Strategy Position"
+                            : pos.status === "CLOSED"
+                            ? "Historical Position"
+                            : "Unverified Position"}
+                        </span>
                       </td>
-                      <td className="py-3.5 px-4">
+                      <td className="py-3.5 px-3 font-bold text-[#F1F5F9]">
+                        <span>{pos.symbol}</span>
+                      </td>
+                      <td className="py-3.5 px-3 text-[#94A3B8]">
+                        <span className="text-white font-bold">{pos.exchange || "BINANCE"}</span>
+                        <span className="text-[10px] text-[#64748B] block">{pos.market_type || "FUTURES"} &bull; {pos.status}</span>
+                      </td>
+                      <td className="py-3.5 px-3">
                         <StatusBadge type="SIGNAL" state={pos.direction} />
                       </td>
-                      <td className="py-3.5 px-4 text-right tabular-nums text-[#F1F5F9]">
+                      <td className="py-3.5 px-3 text-right tabular-nums text-[#F1F5F9]">
                         {pos.volume_lots !== null ? (
                           formatVolumeValue(pos.volume_lots)
                         ) : (
                           <span className="text-[#64748B] italic">Unavailable</span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 text-right tabular-nums text-[#F1F5F9]">
+                      <td className="py-3.5 px-3 text-right tabular-nums text-[#F1F5F9]">
                         {pos.entry_price !== null ? (
                           formatCurrencyValue(pos.entry_price)
                         ) : (
                           <span className="text-[#64748B] italic">Unavailable</span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 text-right tabular-nums text-[#F1F5F9]">
+                      <td className="py-3.5 px-3 text-right tabular-nums text-[#F1F5F9]">
                         {pos.current_price !== null ? (
                           formatCurrencyValue(pos.current_price)
                         ) : (
                           <span className="text-[#64748B] italic">Unavailable</span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 text-right tabular-nums text-[#F43F5E]">
-                        {pos.stop_loss !== null ? (
-                          formatCurrencyValue(pos.stop_loss)
-                        ) : (
-                          <span className="text-[#64748B] italic">Unavailable</span>
-                        )}
-                      </td>
-                      <td className="py-3.5 px-4 text-right tabular-nums text-[#10B981]">
-                        {pos.take_profit !== null ? (
-                          formatCurrencyValue(pos.take_profit)
-                        ) : (
-                          <span className="text-[#64748B] italic">Unavailable</span>
-                        )}
-                      </td>
                       <td
-                        className={`py-3.5 px-4 text-right font-bold tabular-nums ${
+                        className={`py-3.5 px-3 text-right font-bold tabular-nums ${
                           pnl.isUnavailable
                             ? "text-[#64748B] italic"
                             : pnl.isPositive
@@ -221,6 +224,12 @@ export default function OrdersHoldingsView({
                         }`}
                       >
                         {pnl.text}
+                      </td>
+                      <td className="py-3.5 px-3 text-[11px] text-[#64748B]">
+                        <span className="text-[#94A3B8] block">{(pos as any).origin_label || (pos as any).origin || "Ledger Store"}</span>
+                        <span className="text-[9px] text-[#64748B] block truncate" title={pos.open_time || ""}>
+                          Synced: {pos.open_time ? new Date(pos.open_time).toLocaleDateString() : "Live Feed"}
+                        </span>
                       </td>
                     </tr>
                   );

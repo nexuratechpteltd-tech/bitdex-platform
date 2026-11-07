@@ -121,6 +121,7 @@ interface ConnectedAccount {
   account_id: string;
   source: string;
   exchange: string;
+  platform?: string;
   environment: "REAL" | "DEMO";
   environment_label: string;
   masked_id: string;
@@ -639,7 +640,11 @@ export default function InstitutionalTradingDashboard({
     if (newlySelected && newlySelected.environment === "REAL" && !newlySelected.real_consent_recorded) {
       setConsentModalOpen(true);
     }
-  }, [selectedAccountId, connectedAccounts]);
+    // Refresh pre-trade checklist immediately when selected account changes
+    if (selectedPair) {
+      runValidation(selectedPair);
+    }
+  }, [selectedAccountId, connectedAccounts, selectedPair, runValidation]);
 
   // Gate any configure/arm action on account selection, connectivity and REAL consent
   const guardAccountAction = (action: "CONFIG" | "START"): boolean => {
@@ -1030,12 +1035,26 @@ export default function InstitutionalTradingDashboard({
               ? "NO VERIFIED TRADING ACCOUNTS CONNECTED"
               : "— Select a verified Exness trading account —"}
           </option>
-          {connectedAccounts.map((a) => (
-            <option key={a.account_id} value={a.account_id}>
-              {a.display_label} · {a.connected ? "VERIFIED" : a.connection_status}
-              {typeof a.available_balance === "number" && !isNaN(a.available_balance) ? ` · ${a.available_balance.toFixed(2)} ${a.currency}` : ""}
-            </option>
-          ))}
+          {connectedAccounts.filter(a => a.environment === "DEMO").length > 0 && (
+            <optgroup label="DEMO ACCOUNTS (SIMULATION / TRIAL)">
+              {connectedAccounts.filter(a => a.environment === "DEMO").map((a) => (
+                <option key={a.account_id} value={a.account_id}>
+                  {a.display_label} [{a.platform || "MT5"}] · {a.connected ? "VERIFIED" : a.connection_status}
+                  {typeof a.available_balance === "number" && !isNaN(a.available_balance) ? ` · $${a.available_balance.toFixed(2)} ${a.currency}` : ""}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {connectedAccounts.filter(a => a.environment === "REAL").length > 0 && (
+            <optgroup label="REAL ACCOUNTS (LIVE TRADING - STRICT CONSENT REQUIRED)">
+              {connectedAccounts.filter(a => a.environment === "REAL").map((a) => (
+                <option key={a.account_id} value={a.account_id}>
+                  {a.display_label} [{a.platform || "EXNESS_TERMINAL"}] · {a.connected ? "VERIFIED" : a.connection_status}
+                  {typeof a.available_balance === "number" && !isNaN(a.available_balance) ? ` · $${a.available_balance.toFixed(2)} ${a.currency}` : ""}
+                </option>
+              ))}
+            </optgroup>
+          )}
         </select>
         {accountsError && <div className="text-xs text-[#F6465D]">{accountsError}</div>}
         {connectedAccounts.length === 0 && !accountsError && (
@@ -1050,13 +1069,13 @@ export default function InstitutionalTradingDashboard({
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-[11px]">
             {[
               ["Exchange", selectedAccount.exchange],
+              ["Platform", selectedAccount.platform || (selectedAccount.environment === "DEMO" ? "MT5" : "EXNESS_TERMINAL")],
               ["Environment", selectedAccount.environment],
               ["Account", selectedAccount.masked_id],
               ["Status", selectedAccount.connected ? "CONNECTED" : selectedAccount.connection_status],
               ["Currency", selectedAccount.currency],
-              ["Available", typeof selectedAccount.available_balance === "number" && !isNaN(selectedAccount.available_balance) ? selectedAccount.available_balance.toFixed(2) : "Not retrieved"],
-              ["Equity", typeof selectedAccount.equity === "number" && !isNaN(selectedAccount.equity) ? selectedAccount.equity.toFixed(2) : "Not retrieved"],
-              ["Last connected", selectedAccount.last_connected_at ? new Date(selectedAccount.last_connected_at).toLocaleString() : "Never"],
+              ["Available", typeof selectedAccount.available_balance === "number" && !isNaN(selectedAccount.available_balance) ? `$${selectedAccount.available_balance.toFixed(2)}` : "Not retrieved"],
+              ["Equity", typeof selectedAccount.equity === "number" && !isNaN(selectedAccount.equity) ? `$${selectedAccount.equity.toFixed(2)}` : "Not retrieved"],
             ].map(([k, v]) => (
               <div key={k} className="p-2 rounded-lg bg-[#0B0E11] border border-[#272735]">
                 <div className="text-[#64748B] uppercase text-[9px]">{k}</div>
@@ -1918,7 +1937,9 @@ export default function InstitutionalTradingDashboard({
               </div>
               <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
                 <span className="text-[10px] text-[#64748B] block uppercase">Safety Locks:</span>
-                <span className="font-bold text-red-400 font-mono">LIVE LOCKED &bull; READ-ONLY</span>
+                <span className={`font-bold font-mono ${(hftAccountSummary?.environment || selectedAccount?.environment) === "DEMO" ? "text-amber-400" : "text-red-400"}`}>
+                  {(hftAccountSummary?.environment || selectedAccount?.environment) === "DEMO" ? "DEMO AUTHORIZED • READ-ONLY" : "LIVE LOCKED • READ-ONLY"}
+                </span>
               </div>
             </div>
           </div>
