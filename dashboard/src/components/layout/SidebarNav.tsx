@@ -80,13 +80,13 @@ export default function SidebarNav({
     },
     {
       id: "HFT" as NavDestination,
-      label: "High-Frequency Trading",
+      label: "Automated Scalping Engine",
       hash: "hft",
       icon: Zap,
       group: "TRADING PRODUCTS",
       badge: (
         <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/30">
-          HFT
+          SCALP
         </span>
       ),
     },

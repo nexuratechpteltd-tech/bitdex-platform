@@ -248,8 +248,8 @@ export default function OverviewView({
                 <Zap className="w-4 h-4" />
               </div>
               <div>
-                <h3 className="font-mono font-bold text-sm text-[#F1F5F9]">High-Frequency Trading</h3>
-                <span className="text-[11px] font-mono text-[#94A3B8]">Exness MT5 Paired Quantitative Scalper</span>
+                <h3 className="font-mono font-bold text-sm text-[#F1F5F9]">Automated High-Frequency Scalping Engine</h3>
+                <span className="text-[11px] font-mono text-[#94A3B8]">Exness MT5 Paired Automated Scalper</span>
               </div>
             </div>
             <StatusBadge type="HFT" state="WAITING" />
@@ -261,7 +261,7 @@ export default function OverviewView({
             onClick={() => onNavigate("HFT")}
             className="w-full py-2.5 rounded-lg bg-[#151C28] hover:bg-[#1E2736] text-[#F1F5F9] font-mono font-bold text-xs border border-[#1E2736] transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
-            <span>Open HFT Quantitative Workspace</span>
+            <span>Open Scalping Engine Workspace</span>
             <ArrowUpRight className="w-3.5 h-3.5 text-[#38BDF8]" />
           </button>
         </div>
