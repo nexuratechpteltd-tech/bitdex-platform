@@ -385,6 +385,18 @@ def save_exness_connection(
                 (user_id, acct_type),
             )
 
+        # Strict Physical Broker Uniqueness: Verify account_login is not already registered under another user
+        other_owner = conn.execute(
+            "SELECT user_id, connection_id FROM exness_demo_connections WHERE account_login = ? AND user_id != ? AND is_active = 1 LIMIT 1",
+            (login, user_id)
+        ).fetchone()
+        if other_owner:
+            raise ValueError(
+                f"DUPLICATE_BROKER_ACCOUNT_CONFLICT: Physical broker account {login} on {server} "
+                f"is already registered to another user ({other_owner['user_id']}). "
+                "Multi-tenant duplicate registration without authorized delegation is prohibited."
+            )
+
         # Deduplicate strictly by (user_id, account_login) regardless of server_name variations
         existing_rows = conn.execute(
             "SELECT connection_id, last_reconciled_at FROM exness_demo_connections WHERE user_id = ? AND account_login = ? ORDER BY is_active DESC, updated_at DESC",

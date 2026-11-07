@@ -645,6 +645,11 @@ export default function InstitutionalTradingDashboard({
     setConsentChecked(false);
     setStepUpPassword("");
     setConsentError(null);
+    // Clear stale client-side session state and collision info immediately on account change
+    setSessionState("NOT_CONFIGURED");
+    setCollisionInfo(null);
+    setChecklist([]);
+    setIsReady(false);
     const newlySelected = connectedAccounts.find((a) => a.account_id === selectedAccountId);
     if (newlySelected && newlySelected.environment === "REAL" && !newlySelected.real_consent_recorded) {
       setConsentModalOpen(true);
@@ -1547,7 +1552,7 @@ export default function InstitutionalTradingDashboard({
               {sessionState === "ARMED_READ_ONLY"
                 ? "Session armed in strict READ-ONLY mode. Live and simulated order dispatch are locked by server-side safety gates."
                 : sessionState === "BLOCKED"
-                ? `Collision detected: Engine ${collisionInfo?.engine_id || "B"} holds active lock (${collisionInfo?.lease_token || "LSE"}) on another account. Arming blocked by CAS.`
+                ? `Collision detected: Engine ${collisionInfo?.engine_id || "B"} holds active lock (${collisionInfo?.lease_token || "LSE"}) on account ${collisionInfo?.account_id || "another account"} (Broker #${collisionInfo?.broker_login || "MT5"}). ${collisionInfo?.recovery_explanation || "Arming blocked by CAS."}`
                 : isReady
                 ? "All 9 security and risk checks passed. Ready for simulated session arming."
                 : "Prerequisites incomplete. Review pre-trade checklist above to arm session."}
@@ -1584,7 +1589,7 @@ export default function InstitutionalTradingDashboard({
                   } else if (hasDuplicatePair) {
                     setFeedback({ type: "error", message: `Position or order for ${selectedPair} already active on ${selectedAccount.masked_id}.` });
                   } else if (sessionState === "BLOCKED") {
-                    setFeedback({ type: "error", message: `Cannot arm session: Engine ${collisionInfo?.engine_id || "B"} holds active lease (${collisionInfo?.lease_token || "LSE"}) on another account. Arming blocked by CAS.` });
+                    setFeedback({ type: "error", message: `Cannot arm session: Engine ${collisionInfo?.engine_id || "B"} holds active lease (${collisionInfo?.lease_token || "LSE"}) on account ${collisionInfo?.account_id || "another account"} (Broker #${collisionInfo?.broker_login || "MT5"}). Arming blocked by CAS.` });
                   } else if (!isReady) {
                     const failing = checklist.filter((item) => item.critical && !item.passed);
                     const reason = failing.length > 0 ? failing[0].name + ": " + failing[0].detail : "Pre-trade validation checklist incomplete.";

@@ -2411,9 +2411,9 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id:
         else:
             conn_detail = "No active broker profile found. Connect exchange credentials in Settings."
 
-        # 2. Account Availability
+        # 2. Account Availability & Scoping
         acc_row = conn.execute(
-            "SELECT * FROM futures_accounts WHERE user_id = ? LIMIT 1",
+            "SELECT * FROM futures_accounts WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1",
             (user_id,)
         ).fetchone()
         is_provisioned = bool(acc_row)
@@ -2433,6 +2433,27 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id:
             conn_detail = (f"{conn_label} {sel_acct['masked_id']} — status {sel_acct['connection_status']}."
                            if has_conn else f"{conn_label} {sel_acct['masked_id']} unavailable: {sel_acct['connection_status']}. Execution disabled.")
             avail_balance = float(sel_acct["available_balance"] or 0.0) if sel_acct["available_balance"] is not None else 0.0
+
+            # Scope futures_accounts to the selected exchange connection
+            futures_acc = conn.execute(
+                "SELECT * FROM futures_accounts WHERE user_id = ? AND (account_id = ? OR exchange_connection_id = ?)",
+                (user_id, sel_acct["account_id"], sel_acct["account_id"])
+            ).fetchone()
+            if not futures_acc:
+                from ..services.futures_db import get_or_create_futures_account
+                futures_acc = get_or_create_futures_account(
+                    conn,
+                    user_id,
+                    sel_acct["account_id"],
+                    environment=("live" if norm_env == "REAL" else "testnet"),
+                    initial_balance=avail_balance
+                )
+            if futures_acc:
+                acc_row = futures_acc
+                is_provisioned = True
+                fa_dict = dict(futures_acc)
+                kill_switch = bool(fa_dict.get("kill_switch_active", False))
+                engine_b_enabled = bool(fa_dict.get("engine_b_enabled", False))
 
         # 3. Pair Eligibility Check via Discovery (Broker-Aware)
         pair_eligible = True
@@ -2484,10 +2505,55 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id:
         active_lease = EngineCoordinator.get_symbol_active_lease(conn, clean_symbol)
         my_account_id = acc_row["account_id"] if acc_row else ""
         symbol_exclusive = (not active_lease) or (active_lease["account_id"] == my_account_id)
+        
+        collision_info = None
         if symbol_exclusive:
             lease_detail = f"Symbol {clean_symbol} available for exclusive atomic lock."
         else:
-            lease_detail = f"Symbol collision: Engine {active_lease.get('engine_id')} holds active lease ({active_lease.get('lease_token')}) until {active_lease.get('expires_at')}."
+            conflicting_acc_id = active_lease.get("account_id")
+            owner_row = conn.execute(
+                "SELECT fa.account_id, fa.user_id, u.email, edc.account_login, edc.server_name FROM futures_accounts fa LEFT JOIN users u ON fa.user_id = u.user_id LEFT JOIN exness_demo_connections edc ON fa.exchange_connection_id = edc.connection_id WHERE fa.account_id = ?",
+                (conflicting_acc_id,)
+            ).fetchone()
+
+            masked_login = "UNKNOWN"
+            owner_email = "UNKNOWN"
+            server_name = ""
+            if owner_row:
+                raw_login = str(owner_row["account_login"] or "")
+                masked_login = f"{raw_login[:4]}•••{raw_login[-3:]}" if len(raw_login) >= 7 else raw_login
+                owner_email = owner_row["email"] or "UNKNOWN"
+                server_name = owner_row["server_name"] or ""
+
+            now_utc = datetime.now(timezone.utc)
+            is_stale = False
+            try:
+                exp_dt = datetime.fromisoformat(active_lease["expires_at"].replace("Z", "+00:00"))
+                is_stale = now_utc >= exp_dt
+            except Exception:
+                is_stale = False
+
+            collision_info = {
+                "account_id": conflicting_acc_id,
+                "symbol": clean_symbol,
+                "engine_id": active_lease.get("engine_id", "ENGINE_B"),
+                "lease_token": active_lease.get("lease_token"),
+                "acquired_at": active_lease.get("acquired_at"),
+                "expires_at": active_lease.get("expires_at"),
+                "status": active_lease.get("status", "ACTIVE"),
+                "is_stale": is_stale,
+                "owning_user_id": owner_row["user_id"] if owner_row else "UNKNOWN",
+                "owning_email": owner_email,
+                "broker_login": masked_login,
+                "broker_server": server_name,
+                "recovery_explanation": (
+                    f"Symbol {clean_symbol} is locked by {active_lease.get('engine_id', 'ENGINE_B')} "
+                    f"under account {conflicting_acc_id} (Broker #{masked_login}, User {owner_email}) "
+                    f"until {active_lease.get('expires_at')}. "
+                    "Disarm the active session on that account or wait for lease expiration to reclaim."
+                )
+            }
+            lease_detail = f"Symbol collision: Engine {active_lease.get('engine_id')} holds active lease ({active_lease.get('lease_token')}) on account {conflicting_acc_id} (#{masked_login}) until {active_lease.get('expires_at')}."
 
         # 9. Watchdog Daemon Status
         heartbeat_path = "/opt/tauric-platform-staging/backend/watchdog_heartbeat.json"
@@ -2623,19 +2689,18 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id:
                 })
 
         all_critical_passed = all(c["passed"] for c in checklist if c["critical"])
-        collision_gate = next((c for c in checklist if c.get("id") == "SYMBOL_EXCLUSIVE_LOCK"), None)
-        has_collision = bool(collision_gate and not collision_gate.get("passed", True))
+        has_collision = not symbol_exclusive
 
         return {
             "status": "SUCCESS",
             "symbol": clean_symbol,
-            "account_id": account_id,
+            "account_id": account_id or my_account_id,
             "is_ready": all_critical_passed,
             "checklist": checklist,
             "strategy_configured": bool(cfg and cfg.get("status") != "NOT_CONFIGURED"),
             "session_active": bool(cfg and cfg.get("status") == "ACTIVE" and engine_b_enabled and not has_collision),
             "has_collision": has_collision,
-            "collision_detail": active_lease if has_collision else None
+            "collision_detail": collision_info if has_collision else None
         }
     finally:
         conn.close()
@@ -2770,18 +2835,33 @@ async def stop_hft_session_route(req: HftSessionActionRequest, current_user: Dic
     conn = get_db_connection()
     try:
         from ..services.engine_coordinator import EngineCoordinator
-        acc = conn.execute("SELECT account_id FROM futures_accounts WHERE user_id = ?", (user_id,)).fetchone()
+        target_acc = None
+        if req.account_id:
+            resolved = _resolve_hft_account(conn, user_id, req.account_id)
+            if not resolved:
+                raise HTTPException(status_code=404, detail=f"Selected account {req.account_id} not found or unauthorized for this user.")
+            target_acc = conn.execute(
+                "SELECT * FROM futures_accounts WHERE user_id = ? AND (account_id = ? OR exchange_connection_id = ?)",
+                (user_id, resolved["account_id"], resolved["account_id"])
+            ).fetchone()
+        else:
+            target_acc = conn.execute(
+                "SELECT * FROM futures_accounts WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (user_id,)
+            ).fetchone()
+
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with conn:
-            if acc:
+            if target_acc:
+                target_acc_id = target_acc["account_id"]
                 conn.execute(
                     "UPDATE futures_symbol_leases SET status = 'RELEASED' WHERE account_id = ? AND symbol = ? AND engine_id = 'ENGINE_B' AND status = 'ACTIVE'",
-                    (acc["account_id"], clean_symbol)
+                    (target_acc_id, clean_symbol)
                 )
-            conn.execute(
-                "UPDATE futures_accounts SET engine_b_enabled = 0, updated_at = ? WHERE user_id = ?",
-                (now_str, user_id)
-            )
+                conn.execute(
+                    "UPDATE futures_accounts SET engine_b_enabled = 0, updated_at = ? WHERE account_id = ?",
+                    (now_str, target_acc_id)
+                )
             conn.execute(
                 "UPDATE futures_strategy_configs SET status = 'STOPPED', updated_at = ? WHERE user_id = ? AND symbol = ?",
                 (now_str, user_id, clean_symbol)
@@ -2791,6 +2871,7 @@ async def stop_hft_session_route(req: HftSessionActionRequest, current_user: Dic
             "status": "SUCCESS",
             "symbol": clean_symbol,
             "session_state": "STOPPED",
+            "account_id": target_acc["account_id"] if target_acc else req.account_id,
             "message": f"High-Frequency Trading session for {clean_symbol} disarmed and stopped cleanly. Symbol lease released."
         }
     finally:

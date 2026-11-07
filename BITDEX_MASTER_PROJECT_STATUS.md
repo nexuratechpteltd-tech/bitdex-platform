@@ -1,7 +1,7 @@
 # BITDEX — Master Project Status & Live Execution Registry
 
 **Current Date**: 2026-11-07  
-**Current Phase**: **Phase 7B.2 Completed & Verified** (Multi-Tenant Technical Proof & Architecture Validation)  
+**Current Phase**: **Phase 7B.7 Completed & Verified** (Recurring CAS Collision & Duplicate Tenant Account Ownership Investigation)  
 **Repository**: `https://github.com/nexuratechpteltd-tech/bitdex-platform`  
 **Active Branch**: `feature/hft-redesign-and-navigation-cleanup`  
 **Latest Git Commit**: `27ec640` (Phase 7A Remediation pushed to remote)  
@@ -80,6 +80,17 @@
   - Eliminated asynchronous race condition between `fetchStrategyConfig` and `runValidation`.
   - Implemented locked, red-bordered button state `Arming Blocked (CAS Exclusivity Lock)` preventing execution.
   - Passed 100% of the 8-point automated CAS regression suite (`SCENARIO_1` through `SCENARIO_8`).
+
+- **Phase 7B.7 — Recurring CAS Collision & Duplicate Tenant Account Ownership Remediation**:
+  - Traced recurring CAS collision on symbol `BTCUSD` (`LSE-bed6ec473ba3b7ea`) to `FACC-1A8017734CFA` (`USR-ADM-B022F490` / `hello@nexura.ltd`).
+  - Identified root cause in `saas_customer.py`: un-scoped futures account lookup returned Binance live account (`FACC-64F5ABB5E75F`), causing artificial self-collision and orphaned Exness leases on session stop.
+  - Remediated duplicate physical broker account registration: `EXN-CONN-3D40DE9B8CE8` deactivated with `DUPLICATE_TENANT_CONFLICT` while preserving historical records.
+  - Implemented strict physical broker uniqueness policy in `backend/app/services/exness/exness_db.py` preventing cross-tenant duplicate active bindings.
+  - Scoped account resolution across pre-trade validation, start session, and stop session endpoints.
+  - Enhanced dashboard with conflicting account attribution, masked login (`#4748•••031`), recovery explanation, and immediate client-side state reset on account switch.
+  - Executed mandatory 12-scenario regression audit suite: **12 / 12 Scenarios Passed (100% Accepted)**.
+  - Captured verified browser evidence: `phase7b7_owner_armed_readonly_btcusd.png` and `phase7b7_cross_tenant_collision_blocked.png`.
+  - Confirmed 0 active dangling leases post clean disarm. All safety invariants enforced (`live_trading_locked = True`, `read_only_mode = True`, `emergency_lock_active = True`).
 
 ---
 
