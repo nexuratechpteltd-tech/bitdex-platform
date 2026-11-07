@@ -2623,6 +2623,8 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id:
                 })
 
         all_critical_passed = all(c["passed"] for c in checklist if c["critical"])
+        collision_gate = next((c for c in checklist if c.get("id") == "SYMBOL_EXCLUSIVE_LOCK"), None)
+        has_collision = bool(collision_gate and not collision_gate.get("passed", True))
 
         return {
             "status": "SUCCESS",
@@ -2631,7 +2633,9 @@ async def get_hft_pretrade_validation_route(symbol: str = "BTCUSDT", account_id:
             "is_ready": all_critical_passed,
             "checklist": checklist,
             "strategy_configured": bool(cfg and cfg.get("status") != "NOT_CONFIGURED"),
-            "session_active": bool(cfg and cfg.get("status") == "ACTIVE" and engine_b_enabled)
+            "session_active": bool(cfg and cfg.get("status") == "ACTIVE" and engine_b_enabled and not has_collision),
+            "has_collision": has_collision,
+            "collision_detail": active_lease if has_collision else None
         }
     finally:
         conn.close()

@@ -60,6 +60,26 @@
   - Reviewed unified trading_accounts database migration DDL and safe rollback scripts (unapplied).
   - Benchmarked MT5 worker latency: local Windows IPC = 0.040 - 0.080 ms vs WireGuard WAN RTT = 248.7 ms.
   - Verified Phase 6.0 Launch Readiness Security Audit: 12 Passed, 0 Failed.
+- **Phase 7B.3 — Complete HFT Session-Start Remediation & End-to-End Verification** (Commit `1349bb9`):
+  - Fixed frontend instrument catalogue loading dynamically per selected account/broker.
+  - Resolved session-start button unresponsiveness.
+  - Implemented Controlled Testnet Simulation Mode arming and disarming cycle on Exness MT5 account `474861031`.
+- **Phase 7B.4 — Post-Remediation Forensic Acceptance Audit** (Commit `742e0e0`):
+  - Independent forensic audit confirming worker instance identity, telemetry, and WireGuard connection health.
+  - Identified MT5 Session 0 service IPC constraint and Git HEAD ancestry discrepancies.
+- **Phase 7B.5 — Final Audit Discrepancy Resolution & MT5 Telemetry Verification** (Commit `84ada9b`):
+  - Reconciled Git branch HEAD on remote `origin/feature/hft-redesign-and-navigation-cleanup`.
+  - Standardized UI session status to `ARMED_READ_ONLY` with persistent simulated exposure indicator.
+  - Validated server-side HTTP 403 order locks and verified Session 1 interactive worker supervisor architecture.
+- **Phase 7B.6 — CAS Symbol-Lease Collision Forensic Remediation & State Correction**:
+  - Traced lease `LSE-578fc79592d138dd` on `XAUUSD` to `FACC-1A8017734CFA` (owned by `USR-ADM-B022F490`).
+  - Identified tenancy collision where the identical physical Exness Demo login `474861031` was registered across two SaaS accounts.
+  - Verified CAS mutual exclusivity engine successfully defended against symbol cross-account collision.
+  - Hardened backend API with `has_collision` and `collision_detail` payloads; strictly blocked `session_active`.
+  - Implemented dedicated `BLOCKED` session state in frontend with red animated badge and detailed collision attribution.
+  - Eliminated asynchronous race condition between `fetchStrategyConfig` and `runValidation`.
+  - Implemented locked, red-bordered button state `Arming Blocked (CAS Exclusivity Lock)` preventing execution.
+  - Passed 100% of the 8-point automated CAS regression suite (`SCENARIO_1` through `SCENARIO_8`).
 
 ---
 

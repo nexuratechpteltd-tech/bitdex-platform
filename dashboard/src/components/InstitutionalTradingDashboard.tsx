@@ -300,8 +300,9 @@ export default function InstitutionalTradingDashboard({
   // Session Control State
   const [sessionActionLoading, setSessionActionLoading] = useState<boolean>(false);
   const [sessionState, setSessionState] = useState<
-    "NOT_CONFIGURED" | "VALIDATING" | "ARMED_READ_ONLY" | "STOPPED" | "FAILED"
+    "NOT_CONFIGURED" | "VALIDATING" | "ARMED_READ_ONLY" | "BLOCKED" | "STOPPED" | "FAILED"
   >("NOT_CONFIGURED");
+  const [collisionInfo, setCollisionInfo] = useState<any>(null);
 
   // ─── Phase 2: $20.00 USD One-Time HFT Account Activation State ───────────
   const [activationStatus, setActivationStatus] = useState<string>("NOT_ACTIVATED");
@@ -570,13 +571,6 @@ export default function InstitutionalTradingDashboard({
         const json = await res.json();
         if (json.config) {
           setStrategyConfig(json.config);
-          if (json.config.status === "ACTIVE") {
-            setSessionState("ARMED_READ_ONLY");
-          } else if (json.config.status === "CONFIGURED") {
-            setSessionState("NOT_CONFIGURED");
-          } else {
-            setSessionState("NOT_CONFIGURED");
-          }
         }
       }
     } catch {
@@ -600,14 +594,16 @@ export default function InstitutionalTradingDashboard({
         const json = await res.json();
         setChecklist(json.checklist || []);
         setIsReady(Boolean(json.is_ready));
-        if (json.session_active) {
-          setSessionState("ARMED_READ_ONLY");
-        } else if (json.is_ready) {
-          setSessionState("NOT_CONFIGURED");
-        } else if (json.strategy_configured) {
-          setSessionState("NOT_CONFIGURED");
+        if (json.has_collision) {
+          setSessionState("BLOCKED");
+          setCollisionInfo(json.collision_detail);
         } else {
-          setSessionState("NOT_CONFIGURED");
+          setCollisionInfo(null);
+          if (json.session_active) {
+            setSessionState("ARMED_READ_ONLY");
+          } else {
+            setSessionState("NOT_CONFIGURED");
+          }
         }
       }
     } catch {
@@ -1515,6 +1511,8 @@ export default function InstitutionalTradingDashboard({
               className={`px-3 py-1 rounded-full font-bold border flex items-center gap-1.5 ${
                 sessionState === "ARMED_READ_ONLY"
                   ? "bg-[#00E5FF]/15 text-[#00E5FF] border-[#00E5FF]/40"
+                  : sessionState === "BLOCKED"
+                  ? "bg-[#F6465D]/15 text-[#F6465D] border-[#F6465D]/40"
                   : sessionState === "VALIDATING"
                   ? "bg-amber-950/40 text-amber-400 border-amber-500/40"
                   : sessionState === "FAILED"
@@ -1526,6 +1524,8 @@ export default function InstitutionalTradingDashboard({
                 className={`w-2 h-2 rounded-full ${
                   sessionState === "ARMED_READ_ONLY"
                     ? "bg-[#00E5FF] animate-pulse"
+                    : sessionState === "BLOCKED"
+                    ? "bg-[#F6465D] animate-ping"
                     : sessionState === "VALIDATING"
                     ? "bg-amber-400 animate-spin"
                     : sessionState === "FAILED"
@@ -1546,6 +1546,8 @@ export default function InstitutionalTradingDashboard({
             <p className="text-[#94A3B8]">
               {sessionState === "ARMED_READ_ONLY"
                 ? "Session armed in strict READ-ONLY mode. Live and simulated order dispatch are locked by server-side safety gates."
+                : sessionState === "BLOCKED"
+                ? `Collision detected: Engine ${collisionInfo?.engine_id || "B"} holds active lock (${collisionInfo?.lease_token || "LSE"}) on another account. Arming blocked by CAS.`
                 : isReady
                 ? "All 9 security and risk checks passed. Ready for simulated session arming."
                 : "Prerequisites incomplete. Review pre-trade checklist above to arm session."}
@@ -1581,6 +1583,8 @@ export default function InstitutionalTradingDashboard({
                     setFeedback({ type: "error", message: `${selectedAccount.display_label} is not connected (${selectedAccount.connection_status}).` });
                   } else if (hasDuplicatePair) {
                     setFeedback({ type: "error", message: `Position or order for ${selectedPair} already active on ${selectedAccount.masked_id}.` });
+                  } else if (sessionState === "BLOCKED") {
+                    setFeedback({ type: "error", message: `Cannot arm session: Engine ${collisionInfo?.engine_id || "B"} holds active lease (${collisionInfo?.lease_token || "LSE"}) on another account. Arming blocked by CAS.` });
                   } else if (!isReady) {
                     const failing = checklist.filter((item) => item.critical && !item.passed);
                     const reason = failing.length > 0 ? failing[0].name + ": " + failing[0].detail : "Pre-trade validation checklist incomplete.";
@@ -1593,6 +1597,8 @@ export default function InstitutionalTradingDashboard({
                 className={`px-5 py-2.5 rounded-xl font-bold transition-all flex items-center gap-2 ${
                   activationStatus !== "ACTIVE"
                     ? "bg-amber-500 hover:bg-amber-400 text-[#0B0E11] cursor-pointer shadow-lg shadow-amber-500/20"
+                    : sessionState === "BLOCKED"
+                    ? "bg-[#181822] text-[#F6465D] border border-[#F6465D]/40 cursor-not-allowed shadow-lg shadow-[#F6465D]/10"
                     : isReady && !sessionActionLoading && !hasDuplicatePair && selectedAccount?.connected
                     ? "bg-[#10B981] hover:bg-[#10B981]/90 text-[#0B0E11] cursor-pointer shadow-lg shadow-[#10B981]/20"
                     : "bg-[#181822] hover:bg-[#272735] text-amber-400 border border-amber-500/30 cursor-pointer"
@@ -1603,6 +1609,8 @@ export default function InstitutionalTradingDashboard({
                   <RefreshCw className="w-4 h-4 animate-spin" />
                 ) : activationStatus !== "ACTIVE" ? (
                   <Lock className="w-4 h-4" />
+                ) : sessionState === "BLOCKED" ? (
+                  <Lock className="w-4 h-4 text-[#F6465D]" />
                 ) : (
                   <Play className="w-4 h-4 fill-current" />
                 )}
