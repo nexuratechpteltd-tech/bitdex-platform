@@ -75,6 +75,9 @@ def init_saas_db():
             safe_add_column(conn, "users", "email_otp_sent_at TEXT DEFAULT ''")
             safe_add_column(conn, "users", "invitation_token TEXT DEFAULT ''")
             safe_add_column(conn, "users", "invitation_expires_at TEXT DEFAULT ''")
+            safe_add_column(conn, "users", "failed_attempts INTEGER DEFAULT 0")
+            safe_add_column(conn, "users", "last_failed_login TEXT DEFAULT ''")
+            safe_add_column(conn, "users", "is_fee_exempt INTEGER DEFAULT 0")
 
             # Login OTP Challenges Table
             conn.execute("""
@@ -243,6 +246,11 @@ def init_saas_db():
             safe_add_column(conn, "fee_policies", "ai_research_fee_usd REAL DEFAULT 1.00")
             safe_add_column(conn, "fee_policies", "ai_research_fee_cents INTEGER DEFAULT 100")
             safe_add_column(conn, "fee_policies", "ai_research_fee_waived INTEGER DEFAULT 0")
+            safe_add_column(conn, "fee_policies", "is_fee_exempt INTEGER DEFAULT 0")
+            safe_add_column(conn, "fee_policies", "gas_fee_rate REAL DEFAULT 0.50")
+            safe_add_column(conn, "fee_policies", "platform_fee_usd REAL DEFAULT 20.00")
+            safe_add_column(conn, "billing_accounts", "admin_held_amount REAL DEFAULT 0.0")
+            safe_add_column(conn, "exness_demo_connections", "admin_held_amount REAL DEFAULT 0.0")
 
             # 6. Billing Accounts (Prepaid credit balances)
             conn.execute("""
@@ -443,6 +451,74 @@ def init_saas_db():
                 BEGIN
                     SELECT RAISE(ABORT, 'IMMUTABILITY VIOLATION: audit_logs entries are strictly append-only and cannot be deleted.');
                 END;
+            """)
+
+            # Supported Brokers Registry (Diagram 2 SSOT)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS supported_brokers (
+                    broker_id TEXT PRIMARY KEY,
+                    broker_name TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    adapter_class TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    supported_platforms TEXT NOT NULL DEFAULT '["MT5","EXNESS_TERMINAL"]',
+                    supported_environments TEXT NOT NULL DEFAULT '["DEMO","REAL"]',
+                    created_at TEXT NOT NULL
+                );
+            """)
+
+            # Seed supported brokers registry
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            brokers_seed = [
+                ('EXNESS', 'Exness Technologies', 'Exness MT5 & Terminal', 'ExnessMT5GatewayAdapter', 1, '["MT5","EXNESS_TERMINAL"]', '["DEMO","REAL"]', now_iso),
+                ('FUTURE_BROKER_SLOT', 'Universal Broker Slot', 'Universal Plug-and-Play Slot', 'UniversalBrokerAdapter', 0, '["MT5","REST"]', '["DEMO","REAL"]', now_iso),
+                ('BINANCE', 'Binance', 'Binance Crypto Futures & Spot', 'BinanceSpotAdapter', 1, '["BINANCE_PERP","BINANCE_SPOT"]', '["DEMO","LIVE"]', now_iso),
+                ('BYBIT', 'Bybit', 'Bybit Derivatives', 'BybitSpotAdapter', 1, '["BYBIT_PERP"]', '["DEMO","LIVE"]', now_iso),
+            ]
+            for b in brokers_seed:
+                conn.execute("""
+                    INSERT OR IGNORE INTO supported_brokers (broker_id, broker_name, display_name, adapter_class, is_active, supported_platforms, supported_environments, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, b)
+
+            # Broker Sub-Accounts Table (Diagram 2 Universal Multi-Broker Account Registry)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS broker_sub_accounts (
+                    sub_account_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    broker_id TEXT NOT NULL,
+                    account_number TEXT NOT NULL,
+                    account_tier TEXT DEFAULT 'STANDARD',
+                    mode TEXT NOT NULL DEFAULT 'DEMO',
+                    balance REAL DEFAULT 0.0,
+                    equity REAL DEFAULT 0.0,
+                    free_margin REAL DEFAULT 0.0,
+                    admin_held_amount REAL DEFAULT 0.0,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    server_name TEXT NOT NULL,
+                    is_connected INTEGER NOT NULL DEFAULT 1,
+                    verification_status TEXT NOT NULL DEFAULT 'VERIFIED',
+                    last_synced_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                    FOREIGN KEY (broker_id) REFERENCES supported_brokers(broker_id)
+                );
+            """)
+
+            # Sync active verified Exness accounts into broker_sub_accounts
+            conn.execute("""
+                INSERT OR REPLACE INTO broker_sub_accounts (
+                    sub_account_id, user_id, broker_id, account_number, account_tier, mode,
+                    balance, equity, free_margin, admin_held_amount, currency, server_name,
+                    is_connected, verification_status, last_synced_at, created_at
+                )
+                SELECT connection_id, user_id, 'EXNESS', account_login, COALESCE(account_tier, 'STANDARD'),
+                       CASE WHEN UPPER(account_type) = 'REAL' THEN 'LIVE' ELSE 'DEMO' END,
+                       COALESCE(balance_usd, 0.0), COALESCE(equity_usd, 0.0), COALESCE(margin_free, balance_usd, 0.0),
+                       COALESCE(admin_held_amount, 0.0), COALESCE(currency, 'USD'), COALESCE(server_name, 'Exness-MT5Trial15'),
+                       1, verification_status, updated_at, created_at
+                FROM exness_demo_connections
+                WHERE verification_status IN ('VERIFIED', 'ACCOUNT_DATA_VERIFIED');
             """)
 
         logger.info("Bitdex SaaS database schema, support tickets, AI analysis runs, and immutability triggers initialized successfully.")

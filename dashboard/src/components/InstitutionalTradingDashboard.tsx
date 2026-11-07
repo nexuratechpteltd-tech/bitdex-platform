@@ -259,7 +259,7 @@ export default function InstitutionalTradingDashboard({
   const [rejectedPairs, setRejectedPairs] = useState<RejectedPair[]>([]);
   const [loadingPairs, setLoadingPairs] = useState<boolean>(false);
   const [pairSearch, setPairSearch] = useState<string>("");
-  const [selectedPair, setSelectedPair] = useState<string>("BTCUSDT");
+  const [selectedPair, setSelectedPair] = useState<string>("");
   const [showRejected, setShowRejected] = useState<boolean>(false);
 
   // Section J: Connected exchange & account selector
@@ -429,6 +429,7 @@ export default function InstitutionalTradingDashboard({
         type: "success",
         message: "Account Activated ($20.00 USD verified). High-Frequency Trading configuration and execution controls are now unlocked.",
       });
+      setSessionState("ACTIVE");
       await runValidation(selectedPair);
       await fetchOverview();
     } catch (err: any) {
@@ -513,12 +514,16 @@ export default function InstitutionalTradingDashboard({
     }
   }, [getAuthToken]);
 
-  // 2. Fetch HFT Eligible Pairs
-  const fetchHftPairs = useCallback(async () => {
+  // 2. Fetch HFT Eligible Pairs (Broker-Aware)
+  const fetchHftPairs = useCallback(async (targetAcctId?: string) => {
     try {
       setLoadingPairs(true);
       const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/pairs", {
+      const acctParam = targetAcctId !== undefined ? targetAcctId : selectedAccountId;
+      const url = acctParam
+        ? "/api/backend/saas/customer/trading/hft/pairs?account_id=" + encodeURIComponent(acctParam)
+        : "/api/backend/saas/customer/trading/hft/pairs";
+      const res = await fetch(url, {
         headers: {
           "Content-Type": "application/json",
           ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
@@ -528,8 +533,16 @@ export default function InstitutionalTradingDashboard({
         const json = await res.json();
         if (json.pairs && Array.isArray(json.pairs)) {
           setHftPairs(json.pairs);
-          if (json.pairs.length > 0 && !selectedPair) {
-            setSelectedPair(json.pairs[0].symbol);
+          // If current selectedPair is not in eligible pairs, auto-select first eligible pair
+          if (json.pairs.length > 0) {
+            setSelectedPair((cur) => {
+              if (cur && json.pairs.some((p: any) => p.symbol === cur)) {
+                return cur;
+              }
+              return json.pairs[0].symbol;
+            });
+          } else {
+            setSelectedPair("");
           }
         }
         if (json.rejected_pairs && Array.isArray(json.rejected_pairs)) {
@@ -541,7 +554,7 @@ export default function InstitutionalTradingDashboard({
     } finally {
       setLoadingPairs(false);
     }
-  }, [getAuthToken, selectedPair]);
+  }, [getAuthToken, selectedAccountId]);
 
   // 3. Fetch Strategy Configuration for Selected Pair
   const fetchStrategyConfig = useCallback(async (sym: string) => {
@@ -640,11 +653,14 @@ export default function InstitutionalTradingDashboard({
     if (newlySelected && newlySelected.environment === "REAL" && !newlySelected.real_consent_recorded) {
       setConsentModalOpen(true);
     }
-    // Refresh pre-trade checklist immediately when selected account changes
+    // Reload broker-specific instrument catalogue immediately when selected account changes
+    if (selectedAccountId) {
+      fetchHftPairs(selectedAccountId);
+    }
     if (selectedPair) {
       runValidation(selectedPair);
     }
-  }, [selectedAccountId, connectedAccounts, selectedPair, runValidation]);
+  }, [selectedAccountId, connectedAccounts, selectedPair, runValidation, fetchHftPairs]);
 
   // Gate any configure/arm action on account selection, connectivity and REAL consent
   const guardAccountAction = (action: "CONFIG" | "START"): boolean => {
@@ -844,7 +860,7 @@ export default function InstitutionalTradingDashboard({
           "Content-Type": "application/json",
           ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
         },
-        body: JSON.stringify({ symbol: selectedPair }),
+        body: JSON.stringify({ symbol: selectedPair, account_id: selectedAccountId }),
       });
 
       const resJson = await res.json();
@@ -882,7 +898,7 @@ export default function InstitutionalTradingDashboard({
           "Content-Type": "application/json",
           ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
         },
-        body: JSON.stringify({ symbol: selectedPair }),
+        body: JSON.stringify({ symbol: selectedPair, account_id: selectedAccountId }),
       });
 
       const resJson = await res.json();
@@ -1139,15 +1155,15 @@ export default function InstitutionalTradingDashboard({
           </div>
         </div>
 
-                {/* Verified Binance Spot Market Data Instruments */}
+                {/* Verified Broker Instruments */}
         <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735] space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-white uppercase tracking-wider">
-                Verified Binance Instruments
+                {selectedAccount?.source === 'EXNESS' ? 'Verified Exness MT5 CFD Instruments' : 'Verified Binance Instruments'}
               </span>
               <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-500/30 font-bold">
-                Binance Spot Market Data (Public Feed)
+                {selectedAccount?.source === 'EXNESS' ? 'Exness MT5 Gateway (Live Tick Feed)' : 'Binance Spot Market Data (Public Feed)'}
               </span>
             </div>
             <span className="text-[10px] text-[#64748B]">
@@ -1156,7 +1172,10 @@ export default function InstitutionalTradingDashboard({
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 pt-1">
-            {["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT"].map((pairSym) => {
+            {(selectedAccount?.source === 'EXNESS'
+              ? ["BTCUSD", "ETHUSD", "XAUUSD", "EURUSD", "GBPUSD"]
+              : ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT"]
+            ).map((pairSym) => {
               const pairData = hftPairs.find((p) => p.symbol === pairSym);
               const isSelected = selectedPair === pairSym;
               const price = pairData?.price;
@@ -1520,7 +1539,7 @@ export default function InstitutionalTradingDashboard({
         <div className="flex flex-wrap items-center justify-between gap-4 font-mono text-xs">
           <div className="space-y-1">
             <p className="text-white font-medium">
-              Autonomous Post-Only Scalper · Binance USDⓈ-M Perps
+              {selectedAccount?.source === 'EXNESS' ? 'Autonomous CFD Momentum Scalper · Exness MT5' : 'Autonomous Post-Only Scalper · Binance USDⓈ-M Perps'}
             </p>
             <p className="text-[#94A3B8]">
               {sessionState === "ACTIVE"
@@ -1554,18 +1573,29 @@ export default function InstitutionalTradingDashboard({
                 onClick={() => {
                   if (activationStatus !== "ACTIVE") {
                     setIsActivationModalOpen(true);
+                  } else if (!selectedAccount) {
+                    setFeedback({ type: "error", message: "No trading account selected. Please choose a connected Exness account." });
+                  } else if (!selectedAccount.connected) {
+                    setFeedback({ type: "error", message: `${selectedAccount.display_label} is not connected (${selectedAccount.connection_status}).` });
+                  } else if (hasDuplicatePair) {
+                    setFeedback({ type: "error", message: `Position or order for ${selectedPair} already active on ${selectedAccount.masked_id}.` });
+                  } else if (!isReady) {
+                    const failing = checklist.filter((item) => item.critical && !item.passed);
+                    const reason = failing.length > 0 ? failing[0].name + ": " + failing[0].detail : "Pre-trade validation checklist incomplete.";
+                    setFeedback({ type: "error", message: `Cannot arm session: ${reason}` });
                   } else if (guardAccountAction("START")) {
                     handleStartSession();
                   }
                 }}
-                disabled={(activationStatus === "ACTIVE" && !isReady) || sessionActionLoading || hasDuplicatePair || !selectedAccount || !selectedAccount.connected}
+                disabled={sessionActionLoading}
                 className={`px-5 py-2.5 rounded-xl font-bold transition-all flex items-center gap-2 ${
                   activationStatus !== "ACTIVE"
                     ? "bg-amber-500 hover:bg-amber-400 text-[#0B0E11] cursor-pointer shadow-lg shadow-amber-500/20"
-                    : isReady && !sessionActionLoading
+                    : isReady && !sessionActionLoading && !hasDuplicatePair && selectedAccount?.connected
                     ? "bg-[#10B981] hover:bg-[#10B981]/90 text-[#0B0E11] cursor-pointer shadow-lg shadow-[#10B981]/20"
-                    : "bg-[#181822] text-[#64748B] border border-[#272735] cursor-not-allowed opacity-60"
+                    : "bg-[#181822] hover:bg-[#272735] text-amber-400 border border-amber-500/30 cursor-pointer"
                 }`}
+                title={!isReady ? "Click to inspect validation checklist requirements" : "Arm read-only high-frequency trading session"}
               >
                 {sessionActionLoading ? (
                   <RefreshCw className="w-4 h-4 animate-spin" />
@@ -1574,7 +1604,15 @@ export default function InstitutionalTradingDashboard({
                 ) : (
                   <Play className="w-4 h-4 fill-current" />
                 )}
-                <span>{activationStatus !== "ACTIVE" ? "Activate Account ($20.00) to Start HFT" : "Arm & Start Session"}</span>
+                <span>
+                  {sessionActionLoading
+                    ? "Arming Read-Only Session..."
+                    : activationStatus !== "ACTIVE"
+                    ? "Activate Account ($20.00) to Start HFT"
+                    : isReady && selectedAccount?.connected && !hasDuplicatePair
+                    ? "Arm & Start Session (Read-Only)"
+                    : "Checklist Incomplete — Click to Inspect"}
+                </span>
               </button>
             )}
           </div>
