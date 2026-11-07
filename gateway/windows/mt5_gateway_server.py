@@ -29,11 +29,20 @@ from pydantic import BaseModel, Field, field_validator
 import uvicorn
 
 # Configure logging (scrub sensitive passwords)
+# Configure logging (scrub sensitive passwords)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [bitdex-mt5-gateway] %(message)s",
 )
 logger = logging.getLogger("bitdex.mt5.gateway")
+
+# ─────────────────────────────────────────────────────────────
+# 0. Global Platform Safety Governance & Server-Side Locks
+# ─────────────────────────────────────────────────────────────
+LIVE_TRADING_LOCKED = True
+EMERGENCY_LOCK_ACTIVE = True
+READ_ONLY_MODE = True
+
 
 # ─────────────────────────────────────────────────────────────
 # 1. Startup Secret Configuration & Validation (Fail-Closed)
@@ -311,6 +320,10 @@ async def health_check():
         "equity": equity,
         "uptime_seconds": uptime_sec,
         "supported_environments": ["DEMO", "REAL"],
+        "read_only_mode": READ_ONLY_MODE,
+        "live_trading_locked": LIVE_TRADING_LOCKED,
+        "emergency_lock_active": EMERGENCY_LOCK_ACTIVE,
+        "server_side_order_block_active": True,
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
@@ -493,7 +506,15 @@ async def get_account_telemetry():
         "free_margin": float(acct.margin_free),
         "margin_level": float(acct.margin_level) if acct.margin_level else 0.0,
         "leverage": int(acct.leverage),
-        "trade_allowed": bool(acct.trade_allowed),
+        "trade_allowed": False,  # Server-side order block active
+        "broker_trade_allowed": bool(acct.trade_allowed),  # Raw broker credential telemetry
+        "read_only": True,  # Platform safety lock active across all environments
+        "platform_safety_locks": {
+            "live_trading_locked": LIVE_TRADING_LOCKED,
+            "emergency_lock_active": EMERGENCY_LOCK_ACTIVE,
+            "read_only_mode": READ_ONLY_MODE,
+            "order_execution_blocked": True,
+        },
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
@@ -812,7 +833,84 @@ async def reconcile_positions(req: ReconcileRequest):
     }
 
 
+# ─────────────────────────────────────────────────────────────
+# 6. Hard Server-Side Order Execution Defense Block
+# ─────────────────────────────────────────────────────────────
+
+class OrderSubmitRequest(BaseModel):
+    symbol: str
+    order_type: str
+    volume: float
+    price: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    comment: Optional[str] = None
+
+class OrderModifyRequest(BaseModel):
+    ticket: str
+    price: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+
+class OrderCancelRequest(BaseModel):
+    ticket: str
+
+class PositionCloseRequest(BaseModel):
+    ticket: str
+    volume: Optional[float] = None
+
+
+@app.post("/order/submit", dependencies=[Depends(require_gateway_token)])
+async def submit_order(req: OrderSubmitRequest):
+    """HARD SERVER-SIDE EXECUTION BLOCK: Rejects all order placements."""
+    logger.warning(
+        f"CRITICAL SECURITY INTERCEPTION: Rejected order submit for {req.symbol} "
+        f"{req.order_type} {req.volume} lots. Reason: Platform safety lock active."
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="ORDER_EXECUTION_BLOCKED: Platform safety lock active (live_trading_locked=True, read_only_mode=True, emergency_lock_active=True). Zero live orders permitted."
+    )
+
+
+@app.post("/order/modify", dependencies=[Depends(require_gateway_token)])
+async def modify_order(req: OrderModifyRequest):
+    """HARD SERVER-SIDE EXECUTION BLOCK: Rejects all order modifications."""
+    logger.warning(
+        f"CRITICAL SECURITY INTERCEPTION: Rejected order modify for ticket {req.ticket}. Reason: Platform safety lock active."
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="ORDER_MODIFICATION_BLOCKED: Platform safety lock active (live_trading_locked=True, read_only_mode=True). Zero modifications permitted."
+    )
+
+
+@app.post("/order/cancel", dependencies=[Depends(require_gateway_token)])
+async def cancel_order(req: OrderCancelRequest):
+    """HARD SERVER-SIDE EXECUTION BLOCK: Rejects all order cancellations."""
+    logger.warning(
+        f"CRITICAL SECURITY INTERCEPTION: Rejected order cancel for ticket {req.ticket}. Reason: Platform safety lock active."
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="ORDER_CANCELLATION_BLOCKED: Platform safety lock active (read_only_mode=True). Zero cancellations permitted via this endpoint."
+    )
+
+
+@app.post("/position/close", dependencies=[Depends(require_gateway_token)])
+async def close_position(req: PositionCloseRequest):
+    """HARD SERVER-SIDE EXECUTION BLOCK: Rejects all position closures."""
+    logger.warning(
+        f"CRITICAL SECURITY INTERCEPTION: Rejected position close for ticket {req.ticket}. Reason: Platform safety lock active."
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="POSITION_CLOSE_BLOCKED: Platform safety lock active (read_only_mode=True). Position closure blocked by gateway server policy."
+    )
+
+
 if __name__ == "__main__":
+
     uvicorn.run(
         "mt5_gateway_server:app",
         host=GATEWAY_HOST,
