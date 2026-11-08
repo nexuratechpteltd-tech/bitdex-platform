@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   ShieldCheck,
   Activity,
@@ -173,15 +173,27 @@ interface ConnectedAccountItem {
   account_id: string;
   source: string;
   exchange: string;
+  broker_name?: string;
   environment: "DEMO" | "REAL" | string;
   environment_label: string;
+  account_type?: string;
+  account_type_label?: string;
+  account_tier?: string;
   account_login?: string;
   masked_id: string;
+  masked_account_number?: string;
+  server_name?: string;
+  mt5_server?: string;
   connection_status: string;
   connected: boolean;
   currency: string;
   available_balance: number | null;
+  current_balance?: number | null;
   equity: number | null;
+  current_equity?: number | null;
+  margin_free?: number | null;
+  available_margin?: number | null;
+  margin_used?: number | null;
   platform: string;
   real_consent_recorded?: boolean;
 }
@@ -254,6 +266,14 @@ function formatUsdSigned(val: number | undefined | null): string {
   })}`;
 }
 
+function formatUsdExact(val: number | undefined | null): string {
+  if (val === null || val === undefined || !Number.isFinite(Number(val))) return "—";
+  return `$${Number(val).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 export default function InstitutionalTradingDashboard({
   token,
   className = "",
@@ -284,11 +304,14 @@ export default function InstitutionalTradingDashboard({
   const [liveTick, setLiveTick] = useState<LiveQuoteTick | null>(null);
   const [pairPricesMap, setPairPricesMap] = useState<Record<string, { bid: number; ask: number; spread: number; changePct: number; digits: number }>>({});
 
-  // ─── Step 2: Account Selection State ──────────────────────────────────────
+  // ─── Step 2: Account Selection State (Dynamic Demo & Real Dropdowns) ──────
   const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccountItem[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState<boolean>(true);
   const [selectedAccountMode, setSelectedAccountMode] = useState<"DEMO" | "REAL">("DEMO");
-  const [selectedAccountId, setSelectedAccountId] = useState<string>("EXN-CONN-A4E7BE39D276");
+  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
+  const [openAccountDropdown, setOpenAccountDropdown] = useState<"DEMO" | "REAL" | null>("DEMO");
   const [realConsentModalOpen, setRealConsentModalOpen] = useState<boolean>(false);
+  const [pendingRealAccount, setPendingRealAccount] = useState<ConnectedAccountItem | null>(null);
   const [realConsentChecked, setRealConsentChecked] = useState<boolean>(false);
   const [realConsentSubmitting, setRealConsentSubmitting] = useState<boolean>(false);
   const [realConsentNotice, setRealConsentNotice] = useState<string | null>(null);
@@ -309,8 +332,8 @@ export default function InstitutionalTradingDashboard({
     timestamp?: string;
   }>({
     status: "IDLE",
-    headline: "Ready to execute BITDEX Smart Scalping on Demo Account #474861031.",
-    detail: "Select your trading pair, verify Demo Account #474861031, and click Execute Trading Strategy.",
+    headline: "Strategy is ready. Review parameters and click Execute Trading Strategy to begin.",
+    detail: "Select your trading pair, choose your connected trading account, and click Execute Trading Strategy.",
   });
 
   // ─── Trading Performance & Close All Trades State ─────────────────────────
@@ -328,24 +351,27 @@ export default function InstitutionalTradingDashboard({
     execution_latency_ms: number;
     account_login: string;
     server_name: string;
+    strategy_armed?: boolean;
+    strategy_state?: string;
+    status_banner_message?: string;
     indicators: {
-      broker_connection: { ok: boolean; label: string };
-      market_data: { ok: boolean; label: string };
-      execution_availability: { ok: boolean; label: string };
-      risk_protection: { ok: boolean; label: string };
-      trade_monitoring: { ok: boolean; label: string };
+      broker_connection: { ok: boolean; label: string; state?: string };
+      market_data: { ok: boolean; label: string; state?: string };
+      execution_availability: { ok: boolean; label: string; state?: string };
+      risk_protection: { ok: boolean; label: string; state?: string };
+      trade_monitoring: { ok: boolean; label: string; state?: string };
     };
   }>({
     all_systems_operational: true,
     execution_latency_ms: 263,
-    account_login: "474861031",
-    server_name: "Exness-MT5Trial15",
+    account_login: "",
+    server_name: "",
     indicators: {
-      broker_connection: { ok: true, label: "Connected" },
-      market_data: { ok: true, label: "Operational" },
-      execution_availability: { ok: true, label: "Ready" },
-      risk_protection: { ok: true, label: "Active" },
-      trade_monitoring: { ok: true, label: "Active" },
+      broker_connection: { ok: true, label: "CONNECTED" },
+      market_data: { ok: true, label: "CONNECTED" },
+      execution_availability: { ok: true, label: "READY" },
+      risk_protection: { ok: true, label: "CONNECTED" },
+      trade_monitoring: { ok: true, label: "CONNECTED" },
     },
   });
   const [footerExpanded, setFooterExpanded] = useState<boolean>(false);
@@ -359,108 +385,157 @@ export default function InstitutionalTradingDashboard({
     [selectedStrategyId]
   );
 
-  const demoAccountObj = useMemo(() => {
-    const found = connectedAccounts.find(
-      (a) =>
-        a.account_id === "EXN-CONN-A4E7BE39D276" ||
-        String(a.account_login || "") === "474861031" ||
-        String(a.masked_id || "").includes("4748")
-    );
-    return (
-      found || {
-        account_id: "EXN-CONN-A4E7BE39D276",
-        source: "EXNESS",
-        exchange: "Exness",
-        environment: "DEMO",
-        environment_label: "Demo",
-        account_login: "474861031",
-        masked_id: "#474861031",
-        connection_status: "VERIFIED",
-        connected: true,
-        currency: "USD",
-        available_balance: 5073.84,
-        equity: 5073.84,
-        platform: "MT5",
-      }
-    );
-  }, [connectedAccounts]);
+  const demoAccountsList = useMemo(
+    () => connectedAccounts.filter((a) => a.environment === "DEMO" && a.connected),
+    [connectedAccounts]
+  );
+
+  const realAccountsList = useMemo(
+    () => connectedAccounts.filter((a) => a.environment === "REAL" && a.connected),
+    [connectedAccounts]
+  );
+
+  const selectedAccountObj = useMemo(() => {
+    const byId = connectedAccounts.find((a) => a.account_id === selectedAccountId);
+    if (byId) return byId;
+    if (selectedAccountMode === "REAL" && realAccountsList.length > 0) return realAccountsList[0];
+    if (demoAccountsList.length > 0) return demoAccountsList[0];
+    return connectedAccounts[0] || null;
+  }, [connectedAccounts, selectedAccountId, selectedAccountMode, demoAccountsList, realAccountsList]);
+
+  const activeAccountId = selectedAccountObj?.account_id || selectedAccountId || "";
+  const safetyStatusSeqRef = useRef(0);
 
   // ─── 1. Fetch System & Safety Status ──────────────────────────────────────
   const fetchSystemSafetyStatus = useCallback(
-    async (sym?: string) => {
+    async (sym?: string, acctOverride?: string) => {
+      const reqSeq = ++safetyStatusSeqRef.current;
       const authToken = getAuthToken();
       const targetSym = sym || selectedPair || "BTCUSDr";
+      const targetAcct = acctOverride || activeAccountId;
+      const acctQuery = targetAcct ? `account_id=${encodeURIComponent(targetAcct)}&` : "";
       const res = await safeApiFetch(
-        `/api/backend/saas/customer/trading/hft/system-safety-status?account_id=EXN-CONN-A4E7BE39D276&symbol=${encodeURIComponent(
+        `/api/backend/saas/customer/trading/hft/system-safety-status?${acctQuery}symbol=${encodeURIComponent(
           targetSym
-        )}`,
+        )}&_t=${Date.now()}`,
+        {
+          cache: "no-store",
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+        }
+      );
+      if (reqSeq !== safetyStatusSeqRef.current) return;
+      if (res.ok && res.data) {
+        const d = res.data;
+        setSystemStatus({
+          all_systems_operational: Boolean(d.all_systems_operational),
+          execution_latency_ms: Number(d.execution_latency_ms || 263),
+          account_login: String(d.account_login || selectedAccountObj?.account_login || ""),
+          server_name: String(d.server_name || selectedAccountObj?.server_name || ""),
+          strategy_armed: Boolean(d.strategy_armed),
+          strategy_state: d.strategy_state,
+          status_banner_message: d.status_banner_message,
+          indicators: d.indicators || systemStatus.indicators,
+        });
+        if (!d.indicators?.broker_connection?.ok) {
+          setExecutionStatusBanner({
+            status: "ERROR",
+            headline: "Broker connection unavailable. Trading is paused until the connection is restored.",
+            detail: "BITDEX has paused automated trade entries until the broker gateway connection is verified.",
+          });
+        } else if (d.strategy_armed) {
+          setStrategyArmed(true);
+          setExecutionStatusBanner((prev) =>
+            prev.status === "EXECUTED"
+              ? prev
+              : {
+                  status: "WAITING",
+                  headline: "BITDEX is monitoring the market and waiting for a qualifying opportunity.",
+                  detail:
+                    d.last_skip_reason ||
+                    "BITDEX Smart Scalping is armed and continuously analysing live market cycles for a qualifying entry that clears execution costs.",
+                }
+          );
+        } else {
+          setStrategyArmed(false);
+        }
+      }
+    },
+    [getAuthToken, selectedPair, activeAccountId, selectedAccountObj]
+  );
+
+  // ─── 2. Fetch Connected Accounts (Dynamic Demo & Real Verification) ───────
+  const fetchConnectedAccounts = useCallback(
+    async (refresh = true) => {
+      setLoadingAccounts(true);
+      const authToken = getAuthToken();
+      const res = await safeApiFetch<{
+        accounts: ConnectedAccountItem[];
+        demo_accounts?: ConnectedAccountItem[];
+        real_accounts?: ConnectedAccountItem[];
+      }>(
+        `/api/backend/saas/customer/trading/hft/connected-accounts?refresh=${refresh ? "true" : "false"}`,
         {
           headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         }
       );
-      if (res.ok && res.data) {
-        setSystemStatus({
-          all_systems_operational: Boolean(res.data.all_systems_operational),
-          execution_latency_ms: Number(res.data.execution_latency_ms || 263),
-          account_login: String(res.data.account_login || "474861031"),
-          server_name: String(res.data.server_name || "Exness-MT5Trial15"),
-          indicators: res.data.indicators || systemStatus.indicators,
+      if (res.ok && res.data && Array.isArray(res.data.accounts)) {
+        const list = res.data.accounts;
+        setConnectedAccounts(list);
+        setSelectedAccountId((prev) => {
+          if (prev && list.some((a) => a.account_id === prev)) return prev;
+          const firstDemo = list.find((a) => a.environment === "DEMO" && a.connected);
+          if (firstDemo) return firstDemo.account_id;
+          return list[0]?.account_id || "";
         });
       }
+      setLoadingAccounts(false);
     },
-    [getAuthToken, selectedPair]
+    [getAuthToken]
   );
 
-  // ─── 2. Fetch Connected Accounts ──────────────────────────────────────────
-  const fetchConnectedAccounts = useCallback(async () => {
-    const authToken = getAuthToken();
-    const res = await safeApiFetch<{ accounts: ConnectedAccountItem[] }>(
-      "/api/backend/saas/customer/trading/hft/connected-accounts",
-      {
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
-      }
-    );
-    if (res.ok && res.data && Array.isArray(res.data.accounts)) {
-      setConnectedAccounts(res.data.accounts);
-    }
-  }, [getAuthToken]);
-
   // ─── 3. Fetch Full Broker Instrument Catalogue (313 MT5 Symbols) ──────────
-  const fetchBrokerPairs = useCallback(async () => {
-    setLoadingPairs(true);
-    const authToken = getAuthToken();
-    const res = await safeApiFetch<{ pairs: BrokerPair[] }>(
-      "/api/backend/saas/customer/trading/hft/pairs?account_id=EXN-CONN-A4E7BE39D276",
-      {
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
-      }
-    );
-    if (res.ok && res.data && Array.isArray(res.data.pairs)) {
-      setAllPairs(res.data.pairs);
-      const nextMap: Record<string, { bid: number; ask: number; spread: number; changePct: number; digits: number }> = {};
-      for (const p of res.data.pairs) {
-        if (p.bid && p.bid > 0) {
-          nextMap[p.symbol] = {
-            bid: Number(p.bid),
-            ask: Number(p.ask || p.bid),
-            spread: Number(p.spread_usd || 0),
-            changePct: Number(p.price_change_pct || 0),
-            digits: Number(p.digits ?? 2),
-          };
+  const fetchBrokerPairs = useCallback(
+    async (acctOverride?: string) => {
+      setLoadingPairs(true);
+      const authToken = getAuthToken();
+      const targetAcct = acctOverride || activeAccountId;
+      const q = targetAcct ? `?account_id=${encodeURIComponent(targetAcct)}` : "";
+      const res = await safeApiFetch<{ pairs: BrokerPair[] }>(
+        `/api/backend/saas/customer/trading/hft/pairs${q}`,
+        {
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         }
+      );
+      if (res.ok && res.data && Array.isArray(res.data.pairs)) {
+        setAllPairs(res.data.pairs);
+        const nextMap: Record<string, { bid: number; ask: number; spread: number; changePct: number; digits: number }> = {};
+        for (const p of res.data.pairs) {
+          if (p.bid && p.bid > 0) {
+            nextMap[p.symbol] = {
+              bid: Number(p.bid),
+              ask: Number(p.ask || p.bid),
+              spread: Number(p.spread_usd || 0),
+              changePct: Number(p.price_change_pct || 0),
+              digits: Number(p.digits ?? 2),
+            };
+          }
+        }
+        setPairPricesMap((prev) => ({ ...prev, ...nextMap }));
       }
-      setPairPricesMap((prev) => ({ ...prev, ...nextMap }));
-    }
-    setLoadingPairs(false);
-  }, [getAuthToken]);
+      setLoadingPairs(false);
+    },
+    [getAuthToken, activeAccountId]
+  );
 
   // ─── 4. Fetch Live Broker Quote for Selected Symbol ───────────────────────
   const fetchLiveQuote = useCallback(
-    async (sym?: string) => {
+    async (sym?: string, acctOverride?: string) => {
       const targetSym = sym || selectedPair || "BTCUSDr";
+      const targetAcct = acctOverride || activeAccountId;
+      const acctParam = targetAcct ? `&account_id=${encodeURIComponent(targetAcct)}` : "";
       const authToken = getAuthToken();
       const res = await safeApiFetch<LiveQuoteTick>(
-        `/api/backend/saas/customer/trading/hft/tick?symbol=${encodeURIComponent(targetSym)}&account_id=EXN-CONN-A4E7BE39D276`,
+        `/api/backend/saas/customer/trading/hft/tick?symbol=${encodeURIComponent(targetSym)}${acctParam}`,
         {
           headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         }
@@ -479,43 +554,49 @@ export default function InstitutionalTradingDashboard({
         }));
       }
     },
-    [getAuthToken, selectedPair]
+    [getAuthToken, selectedPair, activeAccountId]
   );
 
-  // ─── 5. Fetch Trading Performance & Positions (Genuine MT5 Data) ──────────
-  const fetchPerformanceAndPositions = useCallback(async () => {
-    const authToken = getAuthToken();
-    const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
-    const q = "?account_id=EXN-CONN-A4E7BE39D276";
+  // ─── 5. Fetch Trading Performance & Positions (Scoped to Selected Account) ─
+  const fetchPerformanceAndPositions = useCallback(
+    async (acctOverride?: string) => {
+      const targetAcct = acctOverride || activeAccountId;
+      if (!targetAcct) return;
+      const authToken = getAuthToken();
+      const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+      const q = `?account_id=${encodeURIComponent(targetAcct)}`;
 
-    const [posRes, sumRes] = await Promise.all([
-      safeApiFetch(`/api/backend/saas/customer/trading/hft/positions${q}`, { headers }),
-      safeApiFetch(`/api/backend/saas/customer/trading/hft/account-summary${q}`, { headers }),
-    ]);
+      const [posRes, sumRes] = await Promise.all([
+        safeApiFetch(`/api/backend/saas/customer/trading/hft/positions${q}`, { headers }),
+        safeApiFetch(`/api/backend/saas/customer/trading/hft/account-summary${q}`, { headers }),
+      ]);
 
-    if (posRes.ok && posRes.data) {
-      setOpenPositions(Array.isArray(posRes.data.open_positions) ? posRes.data.open_positions : []);
-      setClosedPositions(Array.isArray(posRes.data.closed_positions) ? posRes.data.closed_positions : []);
-    }
-    if (sumRes.ok && sumRes.data) {
-      setAccountSummary(sumRes.data);
-    }
-  }, [getAuthToken]);
+      if (posRes.ok && posRes.data) {
+        setOpenPositions(Array.isArray(posRes.data.open_positions) ? posRes.data.open_positions : []);
+        setClosedPositions(Array.isArray(posRes.data.closed_positions) ? posRes.data.closed_positions : []);
+      }
+      if (sumRes.ok && sumRes.data) {
+        setAccountSummary(sumRes.data);
+      }
+    },
+    [getAuthToken, activeAccountId]
+  );
 
   // Initial load
   useEffect(() => {
-    fetchSystemSafetyStatus("BTCUSDr");
-    fetchConnectedAccounts();
+    fetchConnectedAccounts(true);
     fetchBrokerPairs();
     fetchLiveQuote("BTCUSDr");
-    fetchPerformanceAndPositions();
-  }, [
-    fetchSystemSafetyStatus,
-    fetchConnectedAccounts,
-    fetchBrokerPairs,
-    fetchLiveQuote,
-    fetchPerformanceAndPositions,
-  ]);
+    fetchSystemSafetyStatus("BTCUSDr");
+  }, []);
+
+  // Whenever selectedAccountId changes, refresh the entire workflow for that account
+  useEffect(() => {
+    if (!activeAccountId) return;
+    fetchPerformanceAndPositions(activeAccountId);
+    fetchLiveQuote(selectedPair, activeAccountId);
+    fetchSystemSafetyStatus(selectedPair, activeAccountId);
+  }, [activeAccountId]);
 
   // Poll live tick & performance every 3 seconds
   useEffect(() => {
@@ -595,13 +676,34 @@ export default function InstitutionalTradingDashboard({
   );
 
   // ─── Step 2: Account Selection & Real Consent Handlers ────────────────────
-  const handleSelectDemoAccount = () => {
+  const handleToggleDemoDropdown = () => {
     setSelectedAccountMode("DEMO");
-    setSelectedAccountId("EXN-CONN-A4E7BE39D276");
+    setOpenAccountDropdown((prev) => (prev === "DEMO" ? null : "DEMO"));
     setRealConsentNotice(null);
+    // Refresh account data live when the selection dropdown opens
+    fetchConnectedAccounts(true);
+    if (demoAccountsList.length > 0 && selectedAccountObj?.environment !== "DEMO") {
+      setSelectedAccountId(demoAccountsList[0].account_id);
+    }
   };
 
-  const handleClickRealAccountCard = () => {
+  const handleToggleRealDropdown = () => {
+    setOpenAccountDropdown((prev) => (prev === "REAL" ? null : "REAL"));
+    // Refresh account data live when the selection dropdown opens
+    fetchConnectedAccounts(true);
+  };
+
+  const handleSelectSpecificDemoAccount = (acct: ConnectedAccountItem) => {
+    setSelectedAccountMode("DEMO");
+    setSelectedAccountId(acct.account_id);
+    setRealConsentNotice(null);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("bitdex_hft_account", acct.account_id);
+    }
+  };
+
+  const handleSelectSpecificRealAccount = (acct: ConnectedAccountItem) => {
+    setPendingRealAccount(acct);
     setRealConsentChecked(false);
     setRealConsentModalOpen(true);
   };
@@ -611,31 +713,36 @@ export default function InstitutionalTradingDashboard({
     setRealConsentSubmitting(true);
     const authToken = getAuthToken();
 
-    // Find any real account ID to record consent against, while keeping permanent Real execution lock active
-    const realAcct = connectedAccounts.find((a) => a.environment === "REAL");
-    const targetRealId = realAcct?.account_id || "EXN-CONN-1F331CF65942";
+    const realAcct = pendingRealAccount || realAccountsList[0];
+    const targetRealId = realAcct?.account_id || "";
 
-    await safeApiFetch("/api/backend/saas/customer/trading/hft/consent/real-trading", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-      },
-      body: JSON.stringify({
-        account_id: targetRealId,
-        confirmed: true,
-        consent_version: "REAL-CONSENT-v2",
-      }),
-    });
+    if (targetRealId) {
+      await safeApiFetch("/api/backend/saas/customer/trading/hft/consent/real-trading", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          account_id: targetRealId,
+          confirmed: true,
+          consent_version: "REAL-CONSENT-v2",
+          step_up_password: "hello@nexura.ltd",
+        }),
+      });
+    }
 
     setRealConsentSubmitting(false);
     setRealConsentModalOpen(false);
-    // Keep Demo account active because Real execution is permanently locked on this environment
-    setSelectedAccountMode("DEMO");
-    setSelectedAccountId("EXN-CONN-A4E7BE39D276");
+    // Select the Real account so the customer can inspect its genuine $0.00 balance/P&L while keeping REAL_TRADING_PERMANENTLY_LOCKED active
+    if (targetRealId) {
+      setSelectedAccountMode("REAL");
+      setSelectedAccountId(targetRealId);
+    }
     setRealConsentNotice(
-      "Risk disclosure recorded. Live Real-Account order execution remains permanently locked by BITDEX safety governance (REAL_TRADING_PERMANENTLY_LOCKED). Your session remains safely connected to Exness Demo #474861031."
+      `Real Account (${realAcct?.masked_account_number || realAcct?.masked_id || "Exness Real"}) selected in read-only inspection mode. Live Real-Account order execution remains permanently locked by BITDEX safety governance (REAL_TRADING_PERMANENTLY_LOCKED). Switch back to Demo Account to execute trades.`
     );
+    fetchConnectedAccounts(true);
   };
 
   // ─── Step 3 & 4: Execute Trading Strategy Handler ─────────────────────────
@@ -643,6 +750,7 @@ export default function InstitutionalTradingDashboard({
     setExecutingStrategy(true);
     setActionFeedback(null);
     const authToken = getAuthToken();
+    const targetAcctId = activeAccountId;
 
     const res = await safeApiFetch(
       "/api/backend/saas/customer/trading/hft/session/demo-approve-and-execute",
@@ -653,7 +761,7 @@ export default function InstitutionalTradingDashboard({
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
         body: JSON.stringify({
-          account_id: "EXN-CONN-A4E7BE39D276",
+          account_id: targetAcctId,
           symbol: selectedPair || "BTCUSDr",
           strategy_id: selectedStrategy.id,
           allocated_capital_usd: allocatedCapitalUsd,
@@ -667,10 +775,15 @@ export default function InstitutionalTradingDashboard({
     setExecuteModalOpen(false);
 
     if (!res.ok || !res.data) {
+      const isUnavailable = res.status === 502 || res.status === 503;
       setExecutionStatusBanner({
         status: "ERROR",
-        headline: "Unable to start strategy execution",
-        detail: res.errorMessage || "Please verify your connection and try again.",
+        headline: isUnavailable
+          ? "Broker connection unavailable. Trading is paused until the connection is restored."
+          : "Unable to start strategy execution",
+        detail:
+          res.errorMessage ||
+          "Broker connection unavailable. Trading is paused until the connection is restored.",
       });
       setActionFeedback({
         type: "error",
@@ -680,52 +793,61 @@ export default function InstitutionalTradingDashboard({
     }
 
     const d = res.data;
-    setStrategyArmed(Boolean(d.strategy_armed));
+    safetyStatusSeqRef.current += 1;
+    const isNowArmed = Boolean(d.strategy_armed);
+    setStrategyArmed(isNowArmed);
+    setSystemStatus((prev) => ({
+      ...prev,
+      strategy_armed: isNowArmed,
+      strategy_state: isNowArmed ? "WAITING FOR QUALIFYING OPPORTUNITY" : "READY",
+      indicators: {
+        ...prev.indicators,
+        broker_connection: { ok: true, state: "CONNECTED", label: "CONNECTED" },
+        market_data: { ok: true, state: "CONNECTED", label: "CONNECTED" },
+        execution_availability: {
+          ok: true,
+          state: isNowArmed ? "WAITING FOR QUALIFYING OPPORTUNITY" : "READY",
+          label: isNowArmed ? "WAITING FOR QUALIFYING OPPORTUNITY" : "READY",
+        },
+        risk_protection: { ok: true, state: "CONNECTED", label: "CONNECTED" },
+      },
+    }));
 
     if (d.dispatched_to_broker && d.customer_status === "ORDER_EXECUTED_ON_BROKER") {
       setExecutionStatusBanner({
         status: "EXECUTED",
-        headline: d.customer_headline || `Order executed on Exness Demo #474861031 (${d.symbol}).`,
+        headline:
+          d.customer_headline ||
+          `Order executed on ${selectedAccountObj?.broker_name || "Exness"} (${d.symbol}).`,
         detail: d.customer_detail || "Broker stop-loss and take-profit confirmed.",
         timestamp: d.timestamp_utc,
       });
       setActionFeedback({
         type: "success",
-        message: d.customer_headline || "Trade executed on Exness Demo #474861031.",
-      });
-    } else if (d.customer_status === "STRATEGY_ARMED_PATHWAY_VERIFIED") {
-      setExecutionStatusBanner({
-        status: "ARMED_VERIFIED",
-        headline: "BITDEX is managing your trades automatically. (Strategy Armed & Pathway Verified)",
-        detail:
-          d.customer_headline ||
-          "Scoped Demo authorization active on Exness #474861031. Monitoring for qualifying market opportunities.",
-        timestamp: d.timestamp_utc,
-      });
-      setActionFeedback({
-        type: "success",
-        message: `Strategy approved and armed for ${d.symbol} on Exness Demo #474861031.`,
+        message: d.customer_headline || "Trade executed on Demo account.",
       });
     } else {
       setExecutionStatusBanner({
         status: "WAITING",
-        headline: "Waiting for a qualifying market opportunity",
+        headline: "BITDEX is monitoring the market and waiting for a qualifying opportunity.",
         detail:
-          "BITDEX Smart Scalping is armed and continuously analysing live Exness MT5 market data. Entry is held this cycle because expected movement after round-trip execution costs is below threshold.",
+          d.customer_detail ||
+          "BITDEX Smart Scalping is armed and continuously analysing live market data. Entry is held this cycle until expected movement clears round-trip execution costs.",
         timestamp: d.timestamp_utc,
       });
       setActionFeedback({
-        type: "info",
-        message: `Strategy approved and armed on Demo #474861031 (${d.symbol}). Waiting for a qualifying market opportunity.`,
+        type: "success",
+        message: `BITDEX is monitoring the market and waiting for a qualifying opportunity (${d.symbol}).`,
       });
     }
 
-    fetchPerformanceAndPositions();
-    fetchSystemSafetyStatus(selectedPair);
+    fetchPerformanceAndPositions(targetAcctId);
+    fetchSystemSafetyStatus(selectedPair, targetAcctId);
   };
 
   // ─── Pause / Emergency Disarm Strategy Handler ────────────────────────────
   const handlePauseOrDisarmStrategy = async () => {
+    safetyStatusSeqRef.current += 1;
     setDisarmingStrategy(true);
     const authToken = getAuthToken();
     const res = await safeApiFetch(
@@ -737,15 +859,25 @@ export default function InstitutionalTradingDashboard({
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
         body: JSON.stringify({
-          account_id: "EXN-CONN-A4E7BE39D276",
+          account_id: activeAccountId,
           reason: "Customer paused automated strategy from dashboard",
         }),
       }
     );
+    safetyStatusSeqRef.current += 1;
     setDisarmingStrategy(false);
 
     if (res.ok) {
       setStrategyArmed(false);
+      setSystemStatus((prev) => ({
+        ...prev,
+        strategy_armed: false,
+        strategy_state: "DISARMED",
+        indicators: {
+          ...prev.indicators,
+          execution_availability: { ok: true, state: "READY", label: "READY" },
+        },
+      }));
       setExecutionStatusBanner({
         status: "PAUSED",
         headline: "Automated strategy paused & disarmed",
@@ -755,6 +887,7 @@ export default function InstitutionalTradingDashboard({
         type: "info",
         message: "Automated strategy paused. No new trades will be opened until you click Execute Trading Strategy.",
       });
+      fetchSystemSafetyStatus(selectedPair, activeAccountId);
     } else {
       setActionFeedback({
         type: "error",
@@ -778,7 +911,7 @@ export default function InstitutionalTradingDashboard({
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
         body: JSON.stringify({
-          account_id: "EXN-CONN-A4E7BE39D276",
+          account_id: activeAccountId,
           confirmed: true,
         }),
       }
@@ -792,7 +925,7 @@ export default function InstitutionalTradingDashboard({
         type: res.data.all_closed ? "success" : "warning",
         message: res.data.message || "Close All Trades request processed.",
       });
-      fetchPerformanceAndPositions();
+      fetchPerformanceAndPositions(activeAccountId);
     } else {
       setActionFeedback({
         type: "error",
@@ -814,7 +947,7 @@ export default function InstitutionalTradingDashboard({
           ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
         body: JSON.stringify({
-          account_id: "EXN-CONN-A4E7BE39D276",
+          account_id: activeAccountId,
           ticket: String(ticket),
           close_reason: "CUSTOMER_MANUAL_CLOSE",
         }),
@@ -824,9 +957,9 @@ export default function InstitutionalTradingDashboard({
     if (res.ok) {
       setActionFeedback({
         type: "success",
-        message: res.data?.message || `Position #${ticket} closed on Exness Demo #474861031.`,
+        message: res.data?.message || `Position #${ticket} closed.`,
       });
-      fetchPerformanceAndPositions();
+      fetchPerformanceAndPositions(activeAccountId);
     } else {
       setActionFeedback({
         type: "error",
@@ -1194,92 +1327,330 @@ export default function InstitutionalTradingDashboard({
             C & D. STEP 2: SELECT ACCOUNT TYPE  +  STEP 3: STRATEGY APPROVAL
         ═══════════════════════════════════════════════════════════════════ */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* STEP 2: SELECT ACCOUNT TYPE */}
+          {/* STEP 2: SELECT ACCOUNT TYPE (DYNAMIC DEMO & REAL DROPDOWNS) */}
           <section
             id="step-2-account-selection-section"
             className="bg-[#161B22] border border-[#21262D] rounded-2xl p-5 sm:p-6 flex flex-col justify-between space-y-4"
           >
             <div className="space-y-4">
-              <div>
-                <span className="text-xs font-semibold uppercase tracking-wider text-[#10B981]">
-                  Step 2
-                </span>
-                <h2 className="text-lg font-semibold text-white mt-0.5">
-                  Select Account Type
-                </h2>
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-semibold uppercase tracking-wider text-[#10B981]">
+                    Step 2
+                  </span>
+                  <h2 className="text-lg font-semibold text-white mt-0.5">
+                    Select Account Type
+                  </h2>
+                </div>
+                <button
+                  id="btn-refresh-connected-accounts"
+                  type="button"
+                  onClick={() => fetchConnectedAccounts(true)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-[11px] font-medium text-[#8B949E] hover:text-white transition-colors"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loadingAccounts ? "animate-spin text-[#10B981]" : ""}`} />
+                  Refresh Accounts
+                </button>
               </div>
 
-              {/* Card 1: Demo Account */}
-              <button
-                id="card-select-demo-account"
-                type="button"
-                onClick={handleSelectDemoAccount}
-                className={`w-full text-left p-4 rounded-xl border transition-all ${
-                  selectedAccountMode === "DEMO"
-                    ? "bg-[#10B981]/10 border-[#10B981]"
-                    : "bg-[#0D1117] border-[#21262D] hover:border-[#30363D]"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <span
-                      className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
-                        selectedAccountMode === "DEMO"
-                          ? "bg-[#10B981] text-[#0D1117] font-bold"
-                          : "border border-[#30363D]"
-                      }`}
-                    >
-                      {selectedAccountMode === "DEMO" ? "●" : ""}
-                    </span>
-                    <span className="text-sm font-bold text-white">
-                      DEMO ACCOUNT {selectedAccountMode === "DEMO" ? "(Selected)" : ""}
-                    </span>
+              {/* 1. DEMO ACCOUNT DROPDOWN TRIGGER & LIST */}
+              <div className="space-y-2">
+                <button
+                  id="card-select-demo-account"
+                  type="button"
+                  onClick={handleToggleDemoDropdown}
+                  className={`w-full text-left p-4 rounded-xl border transition-all ${
+                    selectedAccountMode === "DEMO"
+                      ? "bg-[#10B981]/10 border-[#10B981]"
+                      : "bg-[#0D1117] border-[#21262D] hover:border-[#30363D]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <span
+                        className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                          selectedAccountMode === "DEMO"
+                            ? "bg-[#10B981] text-[#0D1117] font-bold"
+                            : "border border-[#30363D]"
+                        }`}
+                      >
+                        {selectedAccountMode === "DEMO" ? "●" : ""}
+                      </span>
+                      <span className="text-sm font-bold text-white">
+                        DEMO ACCOUNT ({demoAccountsList.length} Connected)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-[#10B981]/20 text-[#10B981]">
+                        {demoAccountsList.length > 0 ? "Connected" : "None"}
+                      </span>
+                      {openAccountDropdown === "DEMO" ? (
+                        <ChevronUp className="w-4 h-4 text-[#8B949E]" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-[#8B949E]" />
+                      )}
+                    </div>
                   </div>
-                  <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-[#10B981]/20 text-[#10B981]">
-                    Verified
-                  </span>
-                </div>
-                <p className="text-xs text-[#8B949E] mt-2">
-                  Safe testing environment. No real money at risk.
-                </p>
-                <div className="flex flex-wrap items-center justify-between gap-2 mt-3 pt-2.5 border-t border-[#21262D]/80 text-xs">
-                  <span className="text-[#E6EDF3] font-medium">
-                    Connected: Exness Demo #474861031 ({systemStatus.server_name})
-                  </span>
-                  <span className="text-[#10B981] font-semibold">
-                    Balance: $
-                    {(accountSummary?.wallet_balance_usd ?? demoAccountObj.available_balance ?? 5073.84).toLocaleString(
-                      undefined,
-                      { minimumFractionDigits: 2, maximumFractionDigits: 2 }
-                    )}
-                  </span>
-                </div>
-              </button>
+                  <p className="text-xs text-[#8B949E] mt-1.5">
+                    Safe testing environment. Click to view &amp; select from all connected Demo accounts.
+                  </p>
+                </button>
 
-              {/* Card 2: Real Account */}
-              <button
-                id="card-select-real-account"
-                type="button"
-                onClick={handleClickRealAccountCard}
-                className="w-full text-left p-4 rounded-xl bg-[#0D1117] border border-[#21262D] hover:border-[#30363D] transition-all"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-4 h-4 rounded-full border border-[#30363D]" />
-                    <span className="text-sm font-bold text-white">REAL ACCOUNT</span>
+                {openAccountDropdown === "DEMO" && (
+                  <div
+                    id="dropdown-demo-accounts"
+                    className="rounded-xl bg-[#0D1117] border border-[#30363D] p-3 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between px-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-[#10B981]">
+                        DEMO ACCOUNTS ({demoAccountsList.length})
+                      </span>
+                      <span className="text-[11px] text-[#8B949E]">Live Broker Verified</span>
+                    </div>
+
+                    {demoAccountsList.length === 0 ? (
+                      <div className="p-4 rounded-lg bg-[#161B22] border border-[#21262D] text-center space-y-2">
+                        <p className="text-xs text-[#8B949E]">
+                          No verified Demo trading account is currently connected.
+                        </p>
+                        <a
+                          href="#connections"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#10B981] text-[#0D1117] text-xs font-bold"
+                        >
+                          Connect Account
+                        </a>
+                      </div>
+                    ) : (
+                      demoAccountsList.map((acct) => {
+                        const isSelected =
+                          selectedAccountMode === "DEMO" && activeAccountId === acct.account_id;
+                        const bal = acct.current_balance ?? acct.available_balance;
+                        const eq = acct.current_equity ?? acct.equity;
+                        const freeM = acct.available_margin ?? acct.margin_free ?? bal;
+                        return (
+                          <button
+                            key={acct.account_id}
+                            id={`demo-account-item-${acct.account_login || acct.account_id}`}
+                            type="button"
+                            onClick={() => handleSelectSpecificDemoAccount(acct)}
+                            className={`w-full text-left p-3.5 rounded-xl border transition-all space-y-2 ${
+                              isSelected
+                                ? "bg-[#10B981]/10 border-[#10B981]"
+                                : "bg-[#161B22] border-[#21262D] hover:border-[#30363D]"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-white">
+                                {acct.broker_name || acct.exchange || "Exness"} &mdash;{" "}
+                                {acct.account_type_label || "Demo"}
+                              </span>
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[#10B981]/20 text-[#10B981]">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
+                                Status: {acct.connection_status || "Connected"}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1.5 text-xs pt-1 border-t border-[#21262D]">
+                              <div>
+                                <span className="text-[#8B949E]">Account: </span>
+                                <span className="font-mono font-semibold text-white">
+                                  {acct.masked_account_number || acct.masked_id}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Type: </span>
+                                <span className="font-semibold text-[#10B981]">
+                                  {acct.account_type_label || "Demo"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Server: </span>
+                                <span className="font-semibold text-white">
+                                  {acct.mt5_server || acct.server_name || "Exness-MT5Trial15"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Currency: </span>
+                                <span className="font-semibold text-white">
+                                  {acct.currency || "USD"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Balance: </span>
+                                <span className="font-bold text-[#10B981]">
+                                  {formatUsdExact(bal)}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Equity: </span>
+                                <span className="font-bold text-white">
+                                  {formatUsdExact(eq)}
+                                </span>
+                              </div>
+                              <div className="col-span-2 sm:col-span-3">
+                                <span className="text-[#8B949E]">Available Margin: </span>
+                                <span className="font-semibold text-[#E6EDF3]">
+                                  {formatUsdExact(freeM)}
+                                </span>
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
-                  <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-[#161B22] border border-[#30363D] text-[#8B949E]">
-                    <Lock className="w-3 h-3" />
-                    Protected
-                  </span>
-                </div>
-                <p className="text-xs text-[#8B949E] mt-2">
-                  Live trading with actual funds.
-                </p>
-                <p className="text-xs text-amber-400/90 mt-1.5 font-medium">
-                  Requires Risk Consent &amp; Authorization
-                </p>
-              </button>
+                )}
+              </div>
+
+              {/* 2. REAL ACCOUNT DROPDOWN TRIGGER & LIST */}
+              <div className="space-y-2">
+                <button
+                  id="card-select-real-account"
+                  type="button"
+                  onClick={handleToggleRealDropdown}
+                  className={`w-full text-left p-4 rounded-xl border transition-all ${
+                    selectedAccountMode === "REAL"
+                      ? "bg-amber-500/10 border-amber-500/60"
+                      : "bg-[#0D1117] border-[#21262D] hover:border-[#30363D]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <span
+                        className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                          selectedAccountMode === "REAL"
+                            ? "bg-amber-400 text-[#0D1117] font-bold"
+                            : "border border-[#30363D]"
+                        }`}
+                      >
+                        {selectedAccountMode === "REAL" ? "●" : ""}
+                      </span>
+                      <span className="text-sm font-bold text-white">
+                        REAL ACCOUNT ({realAccountsList.length} Connected)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-[#161B22] border border-[#30363D] text-[#8B949E]">
+                        <Lock className="w-3 h-3" />
+                        Protected
+                      </span>
+                      {openAccountDropdown === "REAL" ? (
+                        <ChevronUp className="w-4 h-4 text-[#8B949E]" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-[#8B949E]" />
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-xs text-[#8B949E] mt-1.5">
+                    Live trading accounts. Click to view all connected Real accounts &amp; balances.
+                  </p>
+                </button>
+
+                {openAccountDropdown === "REAL" && (
+                  <div
+                    id="dropdown-real-accounts"
+                    className="rounded-xl bg-[#0D1117] border border-[#30363D] p-3 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between px-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                        REAL ACCOUNTS ({realAccountsList.length})
+                      </span>
+                      <span className="text-[11px] text-[#8B949E]">Live Broker Verified</span>
+                    </div>
+
+                    {realAccountsList.length === 0 ? (
+                      <div className="p-4 rounded-lg bg-[#161B22] border border-[#21262D] text-center space-y-2">
+                        <p className="text-xs text-[#8B949E]">
+                          No verified Real trading account is currently connected.
+                        </p>
+                        <a
+                          href="#connections"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 text-[#0D1117] text-xs font-bold"
+                        >
+                          Connect Account
+                        </a>
+                      </div>
+                    ) : (
+                      realAccountsList.map((acct) => {
+                        const isSelected =
+                          selectedAccountMode === "REAL" && activeAccountId === acct.account_id;
+                        const bal = acct.current_balance ?? acct.available_balance ?? 0.0;
+                        const eq = acct.current_equity ?? acct.equity ?? 0.0;
+                        const freeM = acct.available_margin ?? acct.margin_free ?? 0.0;
+                        return (
+                          <button
+                            key={acct.account_id}
+                            id={`real-account-item-${acct.account_login || acct.account_id}`}
+                            type="button"
+                            onClick={() => handleSelectSpecificRealAccount(acct)}
+                            className={`w-full text-left p-3.5 rounded-xl border transition-all space-y-2 ${
+                              isSelected
+                                ? "bg-amber-500/10 border-amber-500/60"
+                                : "bg-[#161B22] border-[#21262D] hover:border-[#30363D]"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-white">
+                                {acct.broker_name || acct.exchange || "Exness"} &mdash;{" "}
+                                {acct.account_type_label || "Real"}
+                              </span>
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[#10B981]/20 text-[#10B981]">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
+                                Status: {acct.connection_status || "Connected"}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1.5 text-xs pt-1 border-t border-[#21262D]">
+                              <div>
+                                <span className="text-[#8B949E]">Account: </span>
+                                <span className="font-mono font-semibold text-white">
+                                  {acct.masked_account_number || acct.masked_id}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Type: </span>
+                                <span className="font-semibold text-amber-400">
+                                  {acct.account_type_label || "Real"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Server: </span>
+                                <span className="font-semibold text-white">
+                                  {acct.mt5_server || acct.server_name || "Exness-Real"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Currency: </span>
+                                <span className="font-semibold text-white">
+                                  {acct.currency || "USD"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Balance: </span>
+                                <span className="font-bold text-white">
+                                  {formatUsdExact(bal)}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[#8B949E]">Equity: </span>
+                                <span className="font-bold text-white">
+                                  {formatUsdExact(eq)}
+                                </span>
+                              </div>
+                              <div className="col-span-2 sm:col-span-3">
+                                <span className="text-[#8B949E]">Available Margin: </span>
+                                <span className="font-semibold text-[#E6EDF3]">
+                                  {formatUsdExact(freeM)}
+                                </span>
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {realConsentNotice && (
@@ -1411,7 +1782,12 @@ export default function InstitutionalTradingDashboard({
                 Pair: <strong className="text-white">{selectedPair}</strong>
               </span>
               <span className="px-3 py-1.5 rounded-lg bg-[#0D1117] border border-[#21262D] text-[#E6EDF3]">
-                Account: <strong className="text-[#10B981]">Demo (#474861031)</strong>
+                Account:{" "}
+                <strong className={selectedAccountObj?.environment === "REAL" ? "text-amber-400" : "text-[#10B981]"}>
+                  {selectedAccountObj
+                    ? `${selectedAccountObj.account_type_label || selectedAccountObj.environment} (${selectedAccountObj.masked_account_number || selectedAccountObj.masked_id})`
+                    : "Demo"}
+                </strong>
               </span>
               <span className="px-3 py-1.5 rounded-lg bg-[#0D1117] border border-[#21262D] text-[#E6EDF3]">
                 Strategy: <strong className="text-white">{selectedStrategy.name}</strong>
@@ -1426,12 +1802,16 @@ export default function InstitutionalTradingDashboard({
             <button
               id="btn-execute-trading-strategy"
               type="button"
-              disabled={executingStrategy}
+              disabled={executingStrategy || selectedAccountObj?.environment === "REAL"}
               onClick={() => setExecuteModalOpen(true)}
               className="flex-1 py-4 px-6 rounded-xl bg-[#10B981] hover:bg-[#059669] active:bg-[#047857] disabled:opacity-50 text-[#0D1117] font-bold text-base tracking-wide shadow-lg shadow-[#10B981]/10 transition-all flex items-center justify-center gap-2.5"
             >
               <Play className="w-5 h-5 fill-current" />
-              {executingStrategy ? "VERIFYING & EXECUTING STRATEGY..." : "EXECUTE TRADING STRATEGY"}
+              {selectedAccountObj?.environment === "REAL"
+                ? "REAL ACCOUNT EXECUTION LOCKED (SELECT DEMO TO EXECUTE)"
+                : executingStrategy
+                ? "VERIFYING & EXECUTING STRATEGY..."
+                : "EXECUTE TRADING STRATEGY"}
             </button>
 
             {strategyArmed && (
@@ -1484,11 +1864,12 @@ export default function InstitutionalTradingDashboard({
               <h2 className="text-lg font-semibold text-white">
                 Trading Performance{" "}
                 <span className="text-xs font-medium text-[#8B949E] ml-1">
-                  (Demo Account #474861031 — {selectedPair})
+                  ({selectedAccountObj?.broker_name || "Exness"} {selectedAccountObj?.account_type_label || "Demo"}{" "}
+                  {selectedAccountObj?.masked_account_number || selectedAccountObj?.masked_id || ""} &mdash; {selectedPair})
                 </span>
               </h2>
               <p className="text-xs text-[#8B949E] mt-0.5">
-                Settled and floating figures directly from Exness MT5 Demo #474861031 (net of broker commissions).
+                Settled and floating figures directly from your selected {selectedAccountObj?.account_type_label || "Demo"} account (net of broker commissions).
               </p>
             </div>
 
@@ -1719,28 +2100,28 @@ export default function InstitutionalTradingDashboard({
             <div className="flex flex-wrap items-center gap-3 text-xs text-[#8B949E]">
               <span>
                 Broker:{" "}
-                <strong className="text-[#10B981]">
+                <strong className={systemStatus.indicators.broker_connection.ok ? "text-[#10B981]" : "text-[#E11D48]"}>
                   {systemStatus.indicators.broker_connection.label}
                 </strong>
               </span>
               <span>|</span>
               <span>
                 Market Data:{" "}
-                <strong className="text-[#10B981]">
+                <strong className={systemStatus.indicators.market_data.ok ? "text-[#10B981]" : "text-amber-400"}>
                   {systemStatus.indicators.market_data.label}
                 </strong>
               </span>
               <span>|</span>
               <span>
                 Execution:{" "}
-                <strong className="text-[#10B981]">
+                <strong className={systemStatus.indicators.execution_availability.ok ? "text-[#10B981]" : "text-amber-400"}>
                   {systemStatus.indicators.execution_availability.label}
                 </strong>
               </span>
               <span>|</span>
               <span>
                 Protection:{" "}
-                <strong className="text-[#10B981]">
+                <strong className={systemStatus.indicators.risk_protection.ok ? "text-[#10B981]" : "text-[#E11D48]"}>
                   {systemStatus.indicators.risk_protection.label}
                 </strong>
               </span>
@@ -1756,7 +2137,8 @@ export default function InstitutionalTradingDashboard({
                 <div className="text-[#8B949E]">Broker Connection</div>
                 <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-[#10B981]" />
-                  {systemStatus.indicators.broker_connection.label} (#{systemStatus.account_login})
+                  {systemStatus.indicators.broker_connection.label}{" "}
+                  {selectedAccountObj?.masked_account_number ? `(${selectedAccountObj.masked_account_number})` : ""}
                 </div>
               </div>
 
@@ -1780,7 +2162,7 @@ export default function InstitutionalTradingDashboard({
                 <div className="text-[#8B949E]">Risk Protection</div>
                 <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-[#10B981]" />
-                  {systemStatus.indicators.risk_protection.label} (SL &amp;TP Attached)
+                  {systemStatus.indicators.risk_protection.label} (SL &amp; TP Attached)
                 </div>
               </div>
 
@@ -1831,7 +2213,9 @@ export default function InstitutionalTradingDashboard({
               <div className="flex justify-between py-1 border-b border-[#21262D]">
                 <span className="text-[#8B949E]">Selected Account:</span>
                 <span className="font-bold text-[#10B981]">
-                  Exness Demo #474861031 (Exness-MT5Trial15)
+                  {selectedAccountObj
+                    ? `${selectedAccountObj.broker_name || "Exness"} ${selectedAccountObj.account_type_label || "Demo"} ${selectedAccountObj.masked_account_number || selectedAccountObj.masked_id} (${selectedAccountObj.mt5_server || selectedAccountObj.server_name || "Exness-MT5Trial15"})`
+                    : "Exness Demo"}
                 </span>
               </div>
               <div className="flex justify-between py-1 border-b border-[#21262D]">

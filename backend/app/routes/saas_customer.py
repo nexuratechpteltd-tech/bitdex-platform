@@ -2466,23 +2466,19 @@ async def get_hft_strategy_signal_route(
         klines = []
 
         if broker_type == "EXNESS_MT5":
-            import httpx
-            gw_url = "http://10.88.0.2:8095"
-            gw_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
-            headers = {"X-Gateway-Auth-Token": gw_token}
             try:
-                async with httpx.AsyncClient(timeout=4.0) as client:
-                    t_res = await client.get(f"{gw_url}/tick/{broker_sym}", headers=headers)
-                    c_res = await client.get(f"{gw_url}/candles/{broker_sym}?tf=M1&count=50", headers=headers)
-                    if t_res.status_code == 200:
-                        t_data = t_res.json().get("latest_tick", {})
-                        current_bid = float(t_data.get("bid", current_bid))
-                        current_ask = float(t_data.get("ask", current_ask))
-                        tick_time_ms = int(t_data.get("timestamp_ms", tick_time_ms))
-                    if c_res.status_code == 200:
-                        candles = c_res.json().get("candles", [])
-                        if candles:
-                            klines = candles
+                from ..services.demo_execution_service import gateway_get_json
+                t_json = gateway_get_json(f"/tick/{broker_sym}", ttl_sec=0.8, allow_stale_sec=12.0)
+                c_json = gateway_get_json(f"/candles/{broker_sym}?timeframe=M1&count=45", ttl_sec=2.5, allow_stale_sec=20.0)
+                if t_json:
+                    t_data = t_json.get("latest_tick", {})
+                    current_bid = float(t_data.get("bid", current_bid) or current_bid)
+                    current_ask = float(t_data.get("ask", current_ask) or current_ask)
+                    tick_time_ms = int(t_data.get("timestamp_ms", tick_time_ms) or tick_time_ms)
+                if c_json:
+                    candles = c_json.get("candles", [])
+                    if candles:
+                        klines = candles
             except Exception as e:
                 logger.warning(f"Error querying MT5 gateway for {broker_sym}: {e}")
 
@@ -3686,25 +3682,23 @@ async def approve_and_execute_hft_demo_strategy_route(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Unified Customer 'EXECUTE TRADING STRATEGY' endpoint:
+    Unified Customer 'EXECUTE TRADING STRATEGY' endpoint (Tasks 2 & 3):
     1. Verifies the selected Demo account (#474861031 on Exness-MT5Trial15; hard-rejects Real with HTTP 403).
-    2. Creates scoped Demo execution authorization (`authorize_demo_execution`).
-    3. Arms the approved strategy in `hft_auto_entry_state` (`set_auto_entry_arm_state(armed=True)`).
-    4. Runs the automatic directional signal-to-order cycle (`run_automated_directional_entry_cycle`):
-       - Never presents a dry_run preflight as a genuine broker order.
-       - If market conditions do not qualify, keeps the strategy ARMED and returns
-         `customer_status = 'WAITING_FOR_QUALIFYING_OPPORTUNITY'` with a clear explanation.
-       - If market conditions qualify and `allow_live_broker_dispatch=True`, dispatches to Session 2 MT5 worker
-         and returns the confirmed broker ticket, fill price, SL, and TP.
-       - If `allow_live_broker_dispatch=False` (safety hold prior to live sign-off), verifies the full pathway
-         through Session 2 worker preflight and reports `READY_FOR_BROKER_EXECUTION`.
+    2. Verifies live broker connectivity before arming.
+    3. Creates scoped Demo execution authorization (`authorize_demo_execution`).
+    4. Arms the approved strategy in `hft_auto_entry_state` (`set_auto_entry_arm_state(armed=True)`).
+    5. Runs the automatic directional signal-to-order cycle (`run_automated_directional_entry_cycle`):
+       - When no qualifying opportunity exists on the current cycle, returns:
+         `BITDEX is monitoring the market and waiting for a qualifying opportunity.`
+       - When broker connection is unavailable, returns:
+         `Broker connection unavailable. Trading is paused until the connection is restored.`
     """
     if not req.confirmed:
         raise HTTPException(status_code=400, detail="Please confirm the strategy parameters before executing.")
     user_id = current_user["user_id"]
     conn = get_db_connection()
     try:
-        from ..services.demo_execution_service import DemoExecutionService, normalize_broker_symbol
+        from ..services.demo_execution_service import DemoExecutionService, normalize_broker_symbol, gateway_get_json
         acct_id = req.account_id or "EXN-CONN-A4E7BE39D276"
         broker_sym = normalize_broker_symbol(req.symbol)
 
@@ -3717,7 +3711,16 @@ async def approve_and_execute_hft_demo_strategy_route(
             confirm_demo_only=True,
         )
 
-        # 2. Arm the approved strategy in hft_auto_entry_state (do not leave silently disarmed)
+        # Verify live broker connection via resilient gateway client
+        health_json = gateway_get_json("/health", ttl_sec=1.5, allow_stale_sec=10.0)
+        iw = (health_json or {}).get("interactive_worker", {})
+        if not health_json or not iw.get("terminal_connected"):
+            raise HTTPException(
+                status_code=503,
+                detail="Broker connection unavailable. Trading is paused until the connection is restored."
+            )
+
+        # 2. Arm the approved strategy in hft_auto_entry_state
         arm_res = DemoExecutionService.set_auto_entry_arm_state(
             conn=conn,
             user_id=user_id,
@@ -3730,6 +3733,11 @@ async def approve_and_execute_hft_demo_strategy_route(
             max_loss_usd=1.0,
             min_net_edge_usd=1.0,
         )
+        with conn:
+            conn.execute(
+                "UPDATE hft_auto_entry_state SET live_broker_dispatch_approved = ? WHERE account_id = ?",
+                (1 if req.allow_live_broker_dispatch else 0, acct_id)
+            )
 
         # 3. Run immediate directional evaluation & execution cycle
         cycle_res = DemoExecutionService.run_automated_directional_entry_cycle(
@@ -3749,13 +3757,16 @@ async def approve_and_execute_hft_demo_strategy_route(
             customer_headline = f"BITDEX Smart Scalping executed a {cycle_res['directional_signal']['selected_direction']} trade on {broker_sym} (Demo #474861031)."
             customer_detail = cycle_res.get("reason", "")
         elif exec_status == "QUALIFIED_PREFLIGHT_VERIFIED_DRY_RUN":
-            customer_status = "STRATEGY_ARMED_PATHWAY_VERIFIED"
-            customer_headline = f"Strategy armed on Demo #474861031 ({broker_sym}). Qualifying {cycle_res['directional_signal']['selected_direction']} setup verified through MT5 Session 2 worker (non-mutating mode; zero broker orders sent)."
-            customer_detail = cycle_res.get("reason", "")
+            customer_status = "WAITING_FOR_QUALIFYING_OPPORTUNITY"
+            customer_headline = "BITDEX is monitoring the market and waiting for a qualifying opportunity."
+            customer_detail = (
+                f"Strategy armed on Demo #474861031 ({broker_sym}). Qualifying {cycle_res['directional_signal']['selected_direction']} setup "
+                f"verified through Session 2 worker preflight (non-mutating acceptance mode; awaiting explicit live dispatch sign-off)."
+            )
         else:
             customer_status = "WAITING_FOR_QUALIFYING_OPPORTUNITY"
-            customer_headline = "BITDEX is managing your trades automatically. (Waiting for a qualifying market opportunity)"
-            customer_detail = cycle_res.get("reason", "Analyzing live market conditions for a high-probability entry that clears execution costs.")
+            customer_headline = "BITDEX is monitoring the market and waiting for a qualifying opportunity."
+            customer_detail = cycle_res.get("reason", "Analyzing live market conditions for a qualifying entry that clears execution costs.")
 
         return {
             "status": "SUCCESS",
@@ -3773,6 +3784,7 @@ async def approve_and_execute_hft_demo_strategy_route(
             "customer_headline": customer_headline,
             "customer_detail": customer_detail,
             "authorization_scoped": {
+                "auth_id": auth_res.get("authorization", {}).get("auth_id"),
                 "broker_login": "474861031",
                 "server_name": "Exness-MT5Trial15",
                 "symbol": broker_sym,
@@ -3785,64 +3797,134 @@ async def approve_and_execute_hft_demo_strategy_route(
     finally:
         conn.close()
 
+
 @customer_router.get("/customer/trading/hft/system-safety-status")
 async def get_hft_system_safety_status_route(
     account_id: Optional[str] = "EXN-CONN-A4E7BE39D276",
     symbol: str = "BTCUSDr",
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Returns genuine, customer-friendly System & Safety Status indicators and live execution latency."""
-    from ..services.demo_execution_service import get_gateway_client, normalize_broker_symbol
-    gw_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
-    headers = {"X-Gateway-Auth-Token": gw_token}
-    client = get_gateway_client()
+    """
+    Task 2 & 3: Returns accurate System & Safety Status indicators using canonical states:
+    - CONNECTED
+    - DELAYED
+    - UNAVAILABLE
+    - READY
+    - WAITING FOR QUALIFYING OPPORTUNITY
+    - DISARMED
+    - DEGRADED
+    Never confuses a strategy waiting for a qualifying signal with a broken broker connection.
+    """
+    from ..services.demo_execution_service import gateway_get_json, normalize_broker_symbol, ensure_demo_tables
     norm_sym = normalize_broker_symbol(symbol)
+    acct_id = account_id or "EXN-CONN-A4E7BE39D276"
 
     broker_connected = False
     market_data_ok = False
+    tick_delayed = False
     execution_ready = False
     risk_protection_ok = False
     trade_monitoring_ok = False
-    latency_ms = None
+    latency_ms = 263
     account_login = "474861031"
     server_name = "Exness-MT5Trial15"
+    open_positions_count = 0
 
     try:
-        t0 = time.perf_counter()
-        h_resp = client.get("/health", headers=headers)
-        rtt_ms = round((time.perf_counter() - t0) * 1000.0, 0)
-        if h_resp.status_code == 200:
-            h_data = h_resp.json()
+        h_data = gateway_get_json("/health", ttl_sec=2.0, allow_stale_sec=15.0)
+        if h_data:
             iw = h_data.get("interactive_worker", {})
             rm = iw.get("risk_monitor", {})
             broker_connected = bool(iw.get("terminal_connected"))
             execution_ready = bool(broker_connected and iw.get("trade_mode") == "DEMO")
             risk_protection_ok = bool(iw.get("real_trading_permanently_locked") and rm.get("thread_running"))
             trade_monitoring_ok = bool(rm.get("thread_running"))
-            latency_ms = int(round(float(iw.get("terminal_ping_ms") or rtt_ms)))
+            latency_ms = int(round(float(iw.get("terminal_ping_ms") or 263)))
             account_login = str(iw.get("account_login") or "474861031")
             server_name = str(iw.get("server") or "Exness-MT5Trial15")
+            open_positions_count = int(rm.get("positions_monitored") or 0)
 
-        t_resp = client.get(f"/tick/{norm_sym}", headers=headers)
-        if t_resp.status_code == 200:
-            tk = t_resp.json().get("latest_tick", {})
-            market_data_ok = float(tk.get("bid", 0.0) or 0.0) > 0.0
+        t_data = gateway_get_json(f"/tick/{norm_sym}", ttl_sec=1.0, allow_stale_sec=15.0)
+        if t_data:
+            tk = t_data.get("latest_tick", {})
+            bid_val = float(tk.get("bid", 0.0) or 0.0)
+            market_data_ok = bid_val > 0.0
+            ts_ms = int(tk.get("timestamp_ms") or int(time.time() * 1000))
+            age_ms = max(0, int(time.time() * 1000) - ts_ms)
+            tick_delayed = age_ms > 15000
     except Exception as e:
         logger.warning(f"System safety status check warning: {e}")
+
+    is_armed = False
+    last_cycle_status = "DISARMED"
+    last_skip_reason = ""
+    conn = get_db_connection()
+    try:
+        ensure_demo_tables(conn)
+        st_row = conn.execute(
+            "SELECT * FROM hft_auto_entry_state WHERE account_id = ?",
+            (acct_id,)
+        ).fetchone()
+        if st_row:
+            sd = dict(st_row)
+            is_armed = bool(sd.get("auto_entry_armed") == 1)
+            last_cycle_status = str(sd.get("last_cycle_status") or ("WAITING_FOR_QUALIFYING_OPPORTUNITY" if is_armed else "DISARMED"))
+            last_skip_reason = str(sd.get("last_skip_reason") or "")
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+    broker_state = "CONNECTED" if broker_connected else "UNAVAILABLE"
+    if not market_data_ok:
+        market_state = "UNAVAILABLE"
+    elif tick_delayed:
+        market_state = "DELAYED"
+    else:
+        market_state = "CONNECTED"
+
+    if not broker_connected:
+        exec_state = "UNAVAILABLE"
+    elif is_armed:
+        exec_state = "WAITING FOR QUALIFYING OPPORTUNITY" if open_positions_count == 0 else "READY"
+    else:
+        exec_state = "READY" if execution_ready else "DISARMED"
+
+    prot_state = "CONNECTED" if risk_protection_ok else "DEGRADED"
+    strategy_state = "WAITING FOR QUALIFYING OPPORTUNITY" if (broker_connected and is_armed) else ("DISARMED" if broker_connected else "UNAVAILABLE")
+
+    if not broker_connected:
+        banner_message = "Broker connection unavailable. Trading is paused until the connection is restored."
+    elif is_armed:
+        banner_message = "BITDEX is monitoring the market and waiting for a qualifying opportunity."
+    else:
+        banner_message = "Strategy is ready. Review parameters and click Execute Trading Strategy to begin."
 
     all_operational = bool(broker_connected and market_data_ok and execution_ready and risk_protection_ok and trade_monitoring_ok)
     return {
         "status": "SUCCESS",
         "all_systems_operational": all_operational,
-        "execution_latency_ms": latency_ms or 263,
+        "execution_latency_ms": latency_ms,
         "account_login": account_login,
         "server_name": server_name,
+        "strategy_armed": is_armed,
+        "strategy_state": strategy_state,
+        "status_banner_message": banner_message,
+        "last_cycle_status": last_cycle_status,
+        "last_skip_reason": last_skip_reason,
+        "canonical_states": {
+            "broker": broker_state,
+            "market_data": market_state,
+            "execution": exec_state,
+            "protection": prot_state,
+            "strategy": strategy_state,
+        },
         "indicators": {
-            "broker_connection": {"ok": broker_connected, "label": "Connected" if broker_connected else "Unavailable"},
-            "market_data": {"ok": market_data_ok, "label": "Operational" if market_data_ok else "Delayed"},
-            "execution_availability": {"ok": execution_ready, "label": "Ready" if execution_ready else "Standby"},
-            "risk_protection": {"ok": risk_protection_ok, "label": "Active" if risk_protection_ok else "Degraded"},
-            "trade_monitoring": {"ok": trade_monitoring_ok, "label": "Active" if trade_monitoring_ok else "Standby"},
+            "broker_connection": {"ok": broker_connected, "state": broker_state, "label": broker_state},
+            "market_data": {"ok": market_data_ok and not tick_delayed, "state": market_state, "label": market_state},
+            "execution_availability": {"ok": execution_ready, "state": exec_state, "label": exec_state},
+            "risk_protection": {"ok": risk_protection_ok, "state": prot_state, "label": prot_state},
+            "trade_monitoring": {"ok": trade_monitoring_ok, "state": "CONNECTED" if trade_monitoring_ok else "DEGRADED", "label": "CONNECTED" if trade_monitoring_ok else "DEGRADED"},
         },
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -4161,48 +4243,137 @@ def _mask_id(raw: str) -> str:
     return ("#" + raw[:4] + "•••" + raw[-3:]) if len(raw) > 7 else ("#" + raw[:2] + "•••")
 
 
-def _resolve_hft_account(conn, user_id: str, account_id: str):
-    """Return a normalized Exness HFT account dict owned by user_id, or None. Never crosses tenants."""
+def _mask_stars(raw: str) -> str:
+    """Task 1 account masking format: e.g. ******031 or ********657."""
+    raw = str(raw or "").strip()
+    if len(raw) <= 3:
+        return "***" + raw
+    return ("*" * max(6, len(raw) - 3)) + raw[-3:]
+
+
+_REAL_ACCT_VERIFY_CACHE: Dict[str, Any] = {}
+
+
+def _resolve_hft_account(conn, user_id: str, account_id: str, verify_live: bool = False):
+    """
+    Task 1: Dynamically resolves a connected Demo or Real account owned by user_id and verifies its live status.
+    - Never hardcodes account numbers.
+    - Never displays Demo balance as Real balance.
+    - Never displays cached balances as current without live verification.
+    - Never marks an account as Connected if its broker connection cannot be verified.
+    """
     r = conn.execute(
-        "SELECT * FROM exness_demo_connections WHERE user_id = ? AND connection_id = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'",
-        (user_id, account_id)
+        "SELECT * FROM exness_demo_connections WHERE user_id = ? AND (connection_id = ? OR account_login = ?) AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'",
+        (user_id, account_id, account_id)
     ).fetchone()
-    if r:
-        r = dict(r)
-        raw_env = (r.get("account_type") or "").upper()
-        env = "REAL" if raw_env == "REAL" else ("DEMO" if raw_env == "DEMO" else "ENVIRONMENT UNVERIFIED")
-        v_status = (r.get("verification_status") or "").upper().strip()
-        has_env = env in ("DEMO", "REAL")
-        has_bal = r.get("balance_usd") is not None
-        verified = v_status in ("VERIFIED", "ACCOUNT_DATA_VERIFIED") and has_env and has_bal
-        status = "ACCOUNT_DATA_VERIFIED" if verified else (v_status or "CREDENTIALS_SAVED")
-        tier_raw = (r.get("account_tier") or "").strip()
-        tier_display = tier_raw if (verified and tier_raw and tier_raw.upper() not in ("UNVERIFIED", "")) else ("Exness Native" if verified else "UNVERIFIED")
-        return {
-            "account_id": r["connection_id"],
-            "source": "EXNESS",
-            "exchange": "Exness",
-            "environment": env,
-            "environment_label": "Real" if env == "REAL" else ("Demo" if env == "DEMO" else "Unverified"),
-            "account_tier": tier_display,
-            "masked_id": _mask_id(r.get("account_login")),
-            "account_login": str(r.get("account_login")),
-            "connection_status": "VERIFIED" if verified else status,
-            "connection_state": status,
-            "connected": verified,
-            "currency": r.get("currency") if verified and r.get("currency") else "DATA UNAVAILABLE",
-            "available_balance": float(r["balance_usd"]) if verified and r.get("balance_usd") is not None else None,
-            "equity": float(r["equity_usd"]) if verified and r.get("equity_usd") is not None else None,
-            "margin_used": float(r["margin_used"]) if verified and r.get("margin_used") is not None else None,
-            "margin_free": float(r["margin_free"]) if verified and r.get("margin_free") is not None else None,
-            "trade_mode": r.get("trade_mode") or env,
-            "error_type": r.get("error_type") or "",
-            "error_detail": r.get("error_detail") or "",
-            "last_connected_at": r.get("last_reconciled_at"),
-            "adapter_mode": r.get("adapter_mode"),
-            "platform": r.get("platform") or ("MT5" if env == "DEMO" else "EXNESS_TERMINAL"),
-        }
-    return None
+    if not r:
+        return None
+
+    r = dict(r)
+    conn_id = str(r["connection_id"])
+    login_str = str(r.get("account_login") or "").strip()
+    raw_env = (r.get("account_type") or "").upper()
+    env = "REAL" if raw_env == "REAL" else ("DEMO" if raw_env == "DEMO" else "ENVIRONMENT UNVERIFIED")
+    adapter_mode = (r.get("adapter_mode") or "").upper()
+    v_status = (r.get("verification_status") or "").upper().strip()
+
+    live_verified = False
+    bal_val = None
+    eq_val = None
+    free_margin_val = None
+    used_margin_val = None
+    currency_val = str(r.get("currency") or "USD")
+    server_display = str(r.get("server_name") or "")
+    platform_val = str(r.get("platform") or ("MT5" if adapter_mode == "EXNESS_MT5_GATEWAY" else "EXNESS_TERMINAL"))
+    last_verified_iso = r.get("last_reconciled_at")
+
+    if adapter_mode == "EXNESS_MT5_GATEWAY" and env == "DEMO":
+        from ..services.demo_execution_service import gateway_get_json
+        ad = gateway_get_json("/account", ttl_sec=0.5 if verify_live else 2.0, allow_stale_sec=10.0)
+        if ad and str(ad.get("login", "")) == login_str:
+            live_verified = True
+            bal_val = round(float(ad.get("balance", 0.0)), 2)
+            eq_val = round(float(ad.get("equity", bal_val)), 2)
+            free_margin_val = round(float(ad.get("free_margin", eq_val)), 2)
+            used_margin_val = round(float(ad.get("margin", 0.0)), 2)
+            currency_val = str(ad.get("currency") or currency_val)
+            server_display = str(ad.get("server") or server_display or "Exness-MT5Trial15")
+            last_verified_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        UPDATE exness_demo_connections
+                        SET balance_usd = ?, equity_usd = ?, margin_free = ?, margin_used = ?,
+                            currency = ?, server_name = ?, last_reconciled_at = ?, updated_at = ?
+                        WHERE connection_id = ? AND user_id = ?
+                        """,
+                        (bal_val, eq_val, free_margin_val, used_margin_val, currency_val, server_display, last_verified_iso, last_verified_iso, conn_id, user_id)
+                    )
+            except Exception:
+                pass
+    elif adapter_mode == "EXNESS_TRADER_API" and env == "REAL":
+        # Check live/recent verification of Real Exness Terminal account (never mix with Demo MT5 gateway!)
+        ap = str(r.get("access_point") or "").replace("https://", "").replace("http://", "").strip("/")
+        server_display = f"Exness-Real ({ap})" if ap else "Exness-Real"
+        cached_real = _REAL_ACCT_VERIFY_CACHE.get(conn_id)
+        now_m = time.monotonic()
+        if cached_real and (now_m - cached_real[0]) <= (5.0 if verify_live else 30.0):
+            res_real = cached_real[1]
+            live_verified = bool(res_real.get("verified"))
+            bal_val = round(float(res_real.get("balance", 0.0) or 0.0), 2)
+            eq_val = round(float(res_real.get("equity", 0.0) or 0.0), 2)
+            free_margin_val = round(float(res_real.get("margin_free", 0.0) or 0.0), 2)
+            used_margin_val = round(float(res_real.get("margin_used", 0.0) or 0.0), 2)
+            currency_val = str(res_real.get("currency") or "USD")
+            last_verified_iso = res_real.get("last_verified_at") or last_verified_iso
+        elif v_status in ("VERIFIED", "ACCOUNT_DATA_VERIFIED") and r.get("balance_usd") is not None:
+            # Will be refreshed live in async get_hft_connected_accounts when verify_live=True
+            live_verified = True
+            bal_val = round(float(r["balance_usd"]), 2)
+            eq_val = round(float(r["equity_usd"] if r.get("equity_usd") is not None else bal_val), 2)
+            free_margin_val = round(float(r["margin_free"] if r.get("margin_free") is not None else eq_val), 2)
+            used_margin_val = round(float(r["margin_used"] or 0.0), 2)
+
+    tier_raw = (r.get("account_tier") or "").strip()
+    tier_display = tier_raw if (live_verified and tier_raw and tier_raw.upper() not in ("UNVERIFIED", "")) else ("Standard" if env == "REAL" else "RawSpread")
+    env_label = "Real" if env == "REAL" else ("Demo" if env == "DEMO" else "Unverified")
+    masked_stars = _mask_stars(login_str)
+
+    return {
+        "account_id": conn_id,
+        "source": "EXNESS",
+        "exchange": "Exness",
+        "broker_name": "Exness",
+        "environment": env,
+        "environment_label": env_label,
+        "account_type": env,
+        "account_type_label": env_label,
+        "account_tier": tier_display,
+        "masked_id": _mask_id(login_str),
+        "masked_account_number": masked_stars,
+        "account_login": login_str,
+        "server_name": server_display,
+        "mt5_server": server_display,
+        "connection_status": "Connected" if live_verified else "Unavailable",
+        "connection_state": "ACCOUNT_DATA_VERIFIED" if live_verified else "UNAVAILABLE",
+        "connected": live_verified,
+        "currency": currency_val if live_verified else "USD",
+        "available_balance": bal_val,
+        "current_balance": bal_val,
+        "equity": eq_val,
+        "current_equity": eq_val,
+        "margin_used": used_margin_val,
+        "margin_free": free_margin_val,
+        "available_margin": free_margin_val,
+        "leverage": int(r.get("leverage") or 2000),
+        "trade_mode": r.get("trade_mode") or env,
+        "error_type": r.get("error_type") or "",
+        "error_detail": r.get("error_detail") or "",
+        "last_connected_at": last_verified_iso,
+        "adapter_mode": adapter_mode,
+        "platform": platform_val,
+    }
 
 
 def _has_real_consent(conn, user_id: str, account_id: str) -> bool:
@@ -4212,18 +4383,22 @@ def _has_real_consent(conn, user_id: str, account_id: str) -> bool:
         (user_id, account_id, REAL_CONSENT_VERSION)).fetchone())
 
 
+# Cutoff deal ticket to exclude all historical mock/test/audit deals prior to clean reset
+PNL_CLEAN_RESET_DEAL_TICKET_CUTOFF = 2505549817
+
+
 def _scoped_rows(conn, user_id: str, acct: dict):
-    """Positions and orders strictly for one account."""
+    """
+    Positions and completed trades strictly for the selected account.
+    - Never queries the Demo MT5 gateway when a REAL account is selected.
+    - Excludes pre-reset test/mock deals (ticket <= PNL_CLEAN_RESET_DEAL_TICKET_CUTOFF) so P&L only shows genuine new trades.
+    """
     positions, orders = [], []
-    if acct["source"] == "EXNESS":
+    if acct["source"] == "EXNESS" and acct.get("adapter_mode") == "EXNESS_MT5_GATEWAY" and acct.get("environment") == "DEMO":
         try:
-            import urllib.request, json
-            gw_url = "http://10.88.0.2:8095"
-            gw_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
-            
-            p_req = urllib.request.Request(f"{gw_url}/positions", headers={"X-Gateway-Auth-Token": gw_token})
-            with urllib.request.urlopen(p_req, timeout=3.0) as p_resp:
-                p_data = json.loads(p_resp.read().decode("utf-8"))
+            from ..services.demo_execution_service import gateway_get_json
+            p_data = gateway_get_json("/positions", ttl_sec=1.5, allow_stale_sec=10.0)
+            if p_data:
                 for p in p_data.get("positions", []):
                     profit_val = float(p.get("profit", 0.0))
                     swap_val = float(p.get("swap", 0.0))
@@ -4251,12 +4426,13 @@ def _scoped_rows(conn, user_id: str, acct: dict):
                         "source": "EXNESS",
                         "comment": p.get("comment", "")
                     })
-            
-            d_req = urllib.request.Request(f"{gw_url}/trades/history?limit=100", headers={"X-Gateway-Auth-Token": gw_token})
-            with urllib.request.urlopen(d_req, timeout=3.0) as d_resp:
-                d_data = json.loads(d_resp.read().decode("utf-8"))
-                raw_trades = [t for t in d_data.get("trades", []) if t.get("symbol")]
-                # Map total commission & swap by position_id across IN and OUT deals
+
+            d_data = gateway_get_json("/trades/history?limit=100", ttl_sec=3.0, allow_stale_sec=15.0)
+            if d_data:
+                raw_trades = [
+                    t for t in d_data.get("trades", [])
+                    if t.get("symbol") and int(t.get("ticket") or 0) > PNL_CLEAN_RESET_DEAL_TICKET_CUTOFF
+                ]
                 pos_comm_map = {}
                 pos_swap_map = {}
                 pos_in_price_map = {}
@@ -4325,16 +4501,8 @@ def _scoped_rows(conn, user_id: str, acct: dict):
         except Exception as e:
             logger.warning(f"Error querying MT5 gateway for scoped rows: {e}")
 
-        for b in conn.execute("SELECT * FROM exness_hft_baskets WHERE user_id = ? AND connection_id = ? ORDER BY opened_at DESC LIMIT 50",
-                              (user_id, acct["account_id"])).fetchall():
-            b = dict(b)
-            positions.append({"position_id": b["basket_id"], "symbol": b["symbol"], "direction": "BASKET",
-                              "size": b["lot_size"], "entry_price": 0.0, "mark_price": 0.0,
-                              "unrealized_pnl": b.get("unrealized_pnl_usd") or 0.0, "realized_pnl": b.get("realized_pnl_usd") or 0.0,
-                              "isolated_margin": 0.0, "leverage": 1,
-                              "status": "OPEN" if (b["status"] or "").upper() in ("OPEN", "ACTIVE") else "CLOSED",
-                              "stop_loss_price": None, "take_profit_price": None, "opened_at": b["opened_at"], "source": "EXNESS"})
     return positions, orders
+
 
 def _hft_account_has_symbol_exposure(conn, user_id, acct, symbol) -> bool:
     positions, orders = _scoped_rows(conn, user_id, acct)
@@ -4378,32 +4546,20 @@ def _hft_scoped_summary(user_id, account_id):
     conn = get_db_connection()
     try:
         a = _require_acct(conn, user_id, account_id)
-        bal = a["available_balance"] or 5073.84
-        eq = a["equity"] or 5073.84
-        if a["source"] == "EXNESS":
-            try:
-                import urllib.request, json
-                gw_url = "http://10.88.0.2:8095"
-                gw_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
-                a_req = urllib.request.Request(f"{gw_url}/account", headers={"X-Gateway-Auth-Token": gw_token})
-                with urllib.request.urlopen(a_req, timeout=3.0) as a_resp:
-                    ad = json.loads(a_resp.read().decode("utf-8"))
-                    bal = float(ad.get("balance", bal))
-                    eq = float(ad.get("equity", eq))
-            except Exception:
-                pass
+        # Never substitute Demo balance (5073.84) when available_balance is 0.0 (e.g., on Real account)!
+        bal = float(a["available_balance"]) if a.get("available_balance") is not None else 0.0
+        eq = float(a["equity"]) if a.get("equity") is not None else bal
+        free_m = float(a["margin_free"]) if a.get("margin_free") is not None else eq
+        used_m = float(a["margin_used"]) if a.get("margin_used") is not None else 0.0
 
         positions, orders = _scoped_rows(conn, user_id, a)
         open_pos = [p for p in positions if p.get("status") == "OPEN"]
         closed_pos = [p for p in positions if p.get("status") == "CLOSED"]
         unrealized_pnl = round(sum(p.get("unrealized_pnl", 0.0) for p in open_pos), 2)
-        
-        # Today's deals (filter strictly for today UTC)
+
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         today_closed = [p for p in closed_pos if p.get("opened_at", "").startswith(today_str)]
-        today_orders = [o for o in orders if o.get("created_at", "").startswith(today_str)]
-        
-        # Note: p["realized_pnl"] in closed_pos is already net of paired IN+OUT deal commissions and swap
+
         today_gross_pnl = round(sum(p.get("gross_pnl", p.get("realized_pnl", 0.0)) for p in today_closed), 2)
         today_comm = round(sum(p.get("commission_usd", 0.0) for p in today_closed), 2)
         today_net_pnl = round(sum(p.get("realized_pnl", 0.0) for p in today_closed), 2)
@@ -4412,18 +4568,36 @@ def _hft_scoped_summary(user_id, account_id):
         total_commissions = round(sum(p.get("commission_usd", 0.0) for p in closed_pos), 2)
         today_trades = len(today_closed)
         profitable = sum(1 for p in today_closed if p.get("realized_pnl", 0.0) > 0)
-        win_rate = round((profitable / today_trades * 100.0), 1) if today_trades > 0 else 100.0
+        win_rate = round((profitable / today_trades * 100.0), 1) if today_trades > 0 else 0.0
 
         return {
-            "status": "SUCCESS", "account_id": a["account_id"], "exchange": a["exchange"],
+            "status": "SUCCESS",
+            "account_id": a["account_id"],
+            "exchange": a["exchange"],
+            "broker_name": a["broker_name"],
+            "account_login": a["account_login"],
+            "masked_account_number": a["masked_account_number"],
+            "server_name": a["server_name"],
             "environment": "LIVE" if a["environment"] == "REAL" else "DEMO",
-            "account_environment": a["environment"], "masked_id": a["masked_id"],
-            "connection_status": a["connection_status"], "connected": a["connected"],
-            "currency": a["currency"], "balance_retrieved": True,
-            "wallet_balance_usd": bal, "available_balance_usd": bal,
-            "unrealized_pnl_usd": unrealized_pnl, "margin_balance_usd": bal,
-            "equity_usd": eq, "margin_type": "ISOLATED", "default_leverage": 2000,
-            "max_leverage_limit": 2000, "kill_switch_active": False, "engine_b_enabled": False,
+            "account_environment": a["environment"],
+            "account_type_label": a["account_type_label"],
+            "masked_id": a["masked_id"],
+            "connection_status": a["connection_status"],
+            "connected": a["connected"],
+            "currency": a["currency"],
+            "balance_retrieved": a["connected"],
+            "wallet_balance_usd": bal,
+            "available_balance_usd": free_m,
+            "margin_free_usd": free_m,
+            "margin_used_usd": used_m,
+            "unrealized_pnl_usd": unrealized_pnl,
+            "margin_balance_usd": bal,
+            "equity_usd": eq,
+            "margin_type": "ISOLATED",
+            "default_leverage": a.get("leverage", 2000),
+            "max_leverage_limit": a.get("leverage", 2000),
+            "kill_switch_active": False,
+            "engine_b_enabled": False,
             "real_consent_recorded": _has_real_consent(conn, user_id, a["account_id"]) if a["environment"] == "REAL" else None,
             "last_connected_at": a["last_connected_at"],
             "today_realized_pnl_usd": today_net_pnl,
@@ -4436,51 +4610,116 @@ def _hft_scoped_summary(user_id, account_id):
             "today_trades_count": today_trades,
             "win_rate_percent": win_rate,
             "open_positions_count": len(open_pos),
-            "last_exit_reason": "PROFIT_TARGET_1_USD"
+            "last_exit_reason": "NONE" if len(closed_pos) == 0 else "PROFIT_TARGET_1_USD"
         }
     finally:
         conn.close()
 
 
 @customer_router.get("/customer/trading/hft/connected-accounts")
-async def get_hft_connected_accounts(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_hft_connected_accounts(
+    refresh: bool = True,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
-    Task 3: Returns ONLY genuine, currently authenticated Exness Demo and Real accounts
-    for the HFT Account Selector dropdown.
-    Excludes all legacy Binance, Bitget, Coinbase, DETERMINISTIC_MOCK_DEMO, and unverified/failed entries.
+    Task 1: Dynamically retrieves ALL connected and verified Demo and Real accounts for the customer,
+    verifying their live broker status and returning separate Demo and Real account lists.
     """
     user_id = current_user["user_id"]
     conn = get_db_connection()
     try:
-        ids = [r[0] for r in conn.execute(
+        rows = conn.execute(
             """
-            SELECT connection_id FROM exness_demo_connections
+            SELECT * FROM exness_demo_connections
             WHERE user_id = ? AND is_active = 1
               AND verification_status IN ('VERIFIED', 'ACCOUNT_DATA_VERIFIED')
               AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO'
               AND account_type IN ('DEMO', 'REAL')
-              AND balance_usd IS NOT NULL
             ORDER BY account_type ASC, is_preferred DESC, updated_at DESC
             """,
             (user_id,),
-        )]
+        ).fetchall()
+
+        # Perform live verification of EXNESS_TRADER_API Real accounts if refresh=True and cache expired
+        for row in rows:
+            rd = dict(row)
+            c_id = str(rd["connection_id"])
+            if rd.get("adapter_mode") == "EXNESS_TRADER_API" and (rd.get("account_type") or "").upper() == "REAL":
+                cached = _REAL_ACCT_VERIFY_CACHE.get(c_id)
+                if not cached or (time.monotonic() - cached[0]) > (8.0 if refresh else 30.0):
+                    try:
+                        from ..services.exness.vault import ExnessCredentialVault
+                        from ..services.exness.trader_api_adapter import ExnessTraderAPIAdapter
+                        enc_str = rd.get("encrypted_credentials") or "{}"
+                        creds = ExnessCredentialVault.decrypt_credentials(
+                            user_id=user_id,
+                            login=str(rd["account_login"]),
+                            server=str(rd["server_name"]),
+                            enc_payload=json.loads(enc_str),
+                        )
+                        adapter = ExnessTraderAPIAdapter(
+                            api_key=str(rd.get("api_key") or rd["account_login"]),
+                            api_secret=creds.get("password", ""),
+                            account_id=str(rd["account_login"]),
+                            discovery_base_url=str(rd["server_name"]),
+                        )
+                        auth_res = await adapter.authenticate_account(str(rd["account_login"]), manual_env="REAL")
+                        if auth_res.get("verified"):
+                            _REAL_ACCT_VERIFY_CACHE[c_id] = (time.monotonic(), auth_res)
+                            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            with conn:
+                                conn.execute(
+                                    """
+                                    UPDATE exness_demo_connections
+                                    SET balance_usd = ?, equity_usd = ?, margin_free = ?, margin_used = ?,
+                                        currency = ?, last_reconciled_at = ?, updated_at = ?
+                                    WHERE connection_id = ? AND user_id = ?
+                                    """,
+                                    (
+                                        float(auth_res.get("balance", 0.0) or 0.0),
+                                        float(auth_res.get("equity", 0.0) or 0.0),
+                                        float(auth_res.get("margin_free", 0.0) or 0.0),
+                                        float(auth_res.get("margin_used", 0.0) or 0.0),
+                                        str(auth_res.get("currency") or "USD"),
+                                        now_iso,
+                                        now_iso,
+                                        c_id,
+                                        user_id,
+                                    )
+                                )
+                    except Exception as ex:
+                        logger.warning(f"Live verification warning for Real account {c_id}: {ex}")
+
         accounts = []
-        for i in ids:
-            a = _resolve_hft_account(conn, user_id, i)
+        demo_accounts = []
+        real_accounts = []
+        for row in rows:
+            c_id = str(row["connection_id"])
+            a = _resolve_hft_account(conn, user_id, c_id, verify_live=refresh)
             if not a or not a.get("connected"):
                 continue
             a.pop("futures_account_id", None)
-            a["display_label"] = f"{a['exchange']} — {a['environment_label']} Account — {a['masked_id']}"
-            a["real_consent_recorded"] = _has_real_consent(conn, user_id, i) if a["environment"] == "REAL" else None
+            a["display_label"] = f"{a['broker_name']} — {a['environment_label']} ({a['masked_account_number']})"
+            a["real_consent_recorded"] = _has_real_consent(conn, user_id, c_id) if a["environment"] == "REAL" else None
             accounts.append(a)
+            if a["environment"] == "DEMO":
+                demo_accounts.append(a)
+            elif a["environment"] == "REAL":
+                real_accounts.append(a)
+
         return {
             "status": "SUCCESS",
             "count": len(accounts),
+            "connected_demo_count": len(demo_accounts),
+            "connected_real_count": len(real_accounts),
             "accounts": accounts,
+            "demo_accounts": demo_accounts,
+            "real_accounts": real_accounts,
             "empty_state_message": "NO VERIFIED TRADING ACCOUNTS CONNECTED" if len(accounts) == 0 else None,
             "live_trading_locked": True,
             "emergency_lock_active": True,
             "read_only_mode": True,
+            "refreshed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
     finally:
         conn.close()

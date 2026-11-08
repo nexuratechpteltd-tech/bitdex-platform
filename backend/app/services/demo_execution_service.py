@@ -23,14 +23,114 @@ from fastapi import HTTPException, status
 import httpx
 
 # Persistent HTTP Keep-Alive client to Windows MT5 Gateway (eliminates ~442ms TCP handshake overhead per call)
-_GATEWAY_KEEPALIVE_CLIENT = httpx.Client(
-    base_url="http://10.88.0.2:8095",
-    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=120.0),
-    timeout=8.0,
-)
+import threading
 
-def get_gateway_client() -> httpx.Client:
+_GW_TOKEN = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
+_GW_BASE_URL = "http://10.88.0.2:8095"
+_GW_LOCK = threading.Lock()
+_GW_CACHE: Dict[str, Any] = {}
+
+
+def _build_httpx_gateway_client() -> httpx.Client:
+    # Uvicorn default timeout_keep_alive is 5.0s; keepalive_expiry=3.5s prevents reusing half-closed sockets
+    return httpx.Client(
+        base_url=_GW_BASE_URL,
+        limits=httpx.Limits(max_keepalive_connections=8, max_connections=20, keepalive_expiry=3.5),
+        timeout=httpx.Timeout(8.0, connect=4.0),
+    )
+
+
+class _GatewayResilientClient:
+    """
+    Wrapper around httpx.Client that automatically recovers from Uvicorn idle keep-alive socket resets
+    (httpx.RemoteProtocolError: Server disconnected without sending a response) and transient WireGuard jitter.
+    """
+    def __init__(self) -> None:
+        self._client = _build_httpx_gateway_client()
+        self._lock = threading.Lock()
+
+    def _reset_client(self) -> None:
+        with self._lock:
+            old = self._client
+            self._client = _build_httpx_gateway_client()
+        try:
+            old.close()
+        except Exception:
+            pass
+
+    def get(self, url: str, **kwargs) -> httpx.Response:
+        if "headers" not in kwargs or kwargs["headers"] is None:
+            kwargs["headers"] = {"X-Gateway-Auth-Token": _GW_TOKEN}
+        last_err = None
+        for attempt in range(2):
+            try:
+                return self._client.get(url, **kwargs)
+            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout) as exc:
+                last_err = exc
+                self._reset_client()
+                if attempt == 0:
+                    time.sleep(0.05)
+        raise last_err
+
+    def post(self, url: str, **kwargs) -> httpx.Response:
+        if "headers" not in kwargs or kwargs["headers"] is None:
+            kwargs["headers"] = {"X-Gateway-Auth-Token": _GW_TOKEN}
+        try:
+            return self._client.post(url, **kwargs)
+        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            # Safe to retry when connection failed before server processed request (or server reset idle keep-alive socket)
+            self._reset_client()
+            return self._client.post(url, **kwargs)
+
+
+_GATEWAY_KEEPALIVE_CLIENT = _GatewayResilientClient()
+
+
+def get_gateway_client() -> _GatewayResilientClient:
     return _GATEWAY_KEEPALIVE_CLIENT
+
+
+def invalidate_gateway_cache(prefix: Optional[str] = None) -> None:
+    with _GW_LOCK:
+        if not prefix:
+            _GW_CACHE.clear()
+        else:
+            for k in list(_GW_CACHE.keys()):
+                if k.startswith(prefix):
+                    _GW_CACHE.pop(k, None)
+
+
+def gateway_get_json(
+    path: str,
+    ttl_sec: float = 1.5,
+    allow_stale_sec: float = 15.0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Thread-safe cached GET helper to Windows MT5 Gateway (10.88.0.2:8095).
+    Prevents concurrent browser polling from flooding the 255ms WireGuard tunnel.
+    """
+    norm_path = path if path.startswith("/") else ("/" + path)
+    now_mono = time.monotonic()
+    if ttl_sec > 0:
+        with _GW_LOCK:
+            cached = _GW_CACHE.get(norm_path)
+            if cached and (now_mono - cached[0]) <= ttl_sec:
+                return cached[1]
+    try:
+        resp = _GATEWAY_KEEPALIVE_CLIENT.get(norm_path, headers={"X-Gateway-Auth-Token": _GW_TOKEN})
+        if resp.status_code == 200:
+            data = resp.json()
+            with _GW_LOCK:
+                _GW_CACHE[norm_path] = (time.monotonic(), data)
+            return data
+    except Exception as exc:
+        logger.warning(f"Gateway GET {norm_path} transient warning: {type(exc).__name__}: {exc}")
+    if allow_stale_sec > 0:
+        with _GW_LOCK:
+            cached = _GW_CACHE.get(norm_path)
+            if cached and (time.monotonic() - cached[0]) <= allow_stale_sec:
+                return cached[1]
+    return None
 
 
 logger = logging.getLogger("bitdex.demo_execution")
@@ -1563,7 +1663,7 @@ class DemoExecutionService:
             "volume": volume,
             "stop_loss_price": sl_price,
             "take_profit_price": tp_price,
-            "account_equity": 5073.84,
+            "account_equity": float((gateway_get_json("/account", ttl_sec=3.0) or {}).get("equity") or ex_row["equity_usd"] or 5072.87),
             "dry_run": False
         }
 
@@ -1786,28 +1886,27 @@ class DemoExecutionService:
             open_positions_count = int(override_open_positions_count)
             open_positions_list = []
         else:
-            pos_resp = client.get("/positions", headers=headers)
-            if pos_resp.status_code != 200:
-                raise HTTPException(status_code=502, detail="Failed to query broker open positions prior to automatic entry cycle.")
-            pos_json = pos_resp.json()
+            pos_json = gateway_get_json("/positions", ttl_sec=1.0, allow_stale_sec=10.0)
+            if pos_json is None:
+                raise HTTPException(status_code=502, detail="Broker connection unavailable. Trading is paused until the connection is restored.")
             open_positions_list = pos_json.get("positions", [])
             open_positions_count = int(pos_json.get("count", len(open_positions_list)))
 
         if override_tick is not None:
             tick_data = override_tick
         else:
-            tick_resp = client.get(f"/tick/{broker_sym}", headers=headers)
-            if tick_resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Failed to fetch live MT5 tick for {broker_sym}.")
-            tick_data = tick_resp.json().get("latest_tick", {})
+            tick_json = gateway_get_json(f"/tick/{broker_sym}", ttl_sec=0.8, allow_stale_sec=10.0)
+            if tick_json is None:
+                raise HTTPException(status_code=502, detail=f"Broker connection unavailable for {broker_sym}. Trading is paused until the connection is restored.")
+            tick_data = tick_json.get("latest_tick", {})
 
         if override_klines is not None:
             candles = override_klines
         else:
-            c_resp = client.get(f"/candles/{broker_sym}?timeframe=M1&count=45", headers=headers)
-            if c_resp.status_code != 200:
+            c_json = gateway_get_json(f"/candles/{broker_sym}?timeframe=M1&count=45", ttl_sec=2.5, allow_stale_sec=20.0)
+            if c_json is None:
                 raise HTTPException(status_code=502, detail=f"Failed to fetch M1 candles for {broker_sym}.")
-            candles = c_resp.json().get("candles", [])
+            candles = c_json.get("candles", [])
 
         current_bid = float(tick_data.get("bid", 0.0))
         current_ask = float(tick_data.get("ask", 0.0))
@@ -1914,7 +2013,7 @@ class DemoExecutionService:
                 "volume": proposed["volume"],
                 "stop_loss_price": proposed["stop_loss_price"],
                 "take_profit_price": proposed["take_profit_price"],
-                "account_equity": 5073.84,
+                "account_equity": float((gateway_get_json("/account", ttl_sec=3.0) or {}).get("equity") or ex_row["equity_usd"] or 5072.87),
                 "dry_run": True,
             }
             preflight_result = cls.dispatch_demo_order(
@@ -1934,7 +2033,7 @@ class DemoExecutionService:
                 "volume": proposed["volume"],
                 "stop_loss_price": proposed["stop_loss_price"],
                 "take_profit_price": proposed["take_profit_price"],
-                "account_equity": 5073.84,
+                "account_equity": float((gateway_get_json("/account", ttl_sec=3.0) or {}).get("equity") or ex_row["equity_usd"] or 5072.87),
                 "dry_run": False,
             }
             broker_execution_result = cls.dispatch_demo_order(
