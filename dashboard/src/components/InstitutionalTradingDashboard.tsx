@@ -1296,7 +1296,7 @@ export default function InstitutionalTradingDashboard({
                             {changePct.toFixed(2)}%
                           </>
                         ) : (
-                          <span className="text-[#10B981]">Live MT5</span>
+                          <span className="text-[#10B981]">Live Market</span>
                         )}
                       </span>
                     </div>
@@ -1330,7 +1330,7 @@ export default function InstitutionalTradingDashboard({
             </div>
           )}
 
-          {/* Live Broker Quote Bar (Real-Time Exness MT5 Bid, Ask & Spread) */}
+          {/* Live Broker Quote Bar (Real-Time Broker Bid, Ask & Spread) */}
           <div
             id="live-broker-quote-bar"
             className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3.5 rounded-xl bg-[#0D1117] border border-[#21262D]"
@@ -1338,7 +1338,7 @@ export default function InstitutionalTradingDashboard({
             <div className="flex items-center gap-2.5">
               <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] animate-pulse shrink-0" />
               <span className="text-xs font-semibold uppercase tracking-wide text-[#8B949E]">
-                Live Broker Quote (Exness MT5):
+                Live Broker Quote:
               </span>
               <span id="quote-selected-symbol" className="text-sm font-bold text-white">
                 {selectedPair}
@@ -1574,23 +1574,23 @@ export default function InstitutionalTradingDashboard({
                               </span>
                               <span
                                 className={`px-2 py-0.5 rounded font-medium ${
-                                  acct.mt5_account_connected
-                                    ? "bg-[#10B981]/15 text-[#10B981]"
+                                  acct.platform === "MT5"
+                                    ? "bg-purple-500/15 text-purple-300"
                                     : "bg-sky-500/15 text-sky-300"
                                 }`}
                               >
-                                {acct.mt5_account_connected ? "MT5: Connected" : "Terminal: Exness API"}
+                                {acct.platform || "Broker API"}
                               </span>
                               <span
                                 className={`px-2 py-0.5 rounded font-medium ${
-                                  acct.automated_execution_verified
+                                  acct.automated_execution_verified || acct.automated_execution_supported
                                     ? "bg-[#10B981]/15 text-[#10B981]"
                                     : "bg-amber-500/15 text-amber-300"
                                 }`}
                               >
-                                {acct.automated_execution_verified
-                                  ? "Auto-Execution: Verified"
-                                  : "Auto-Execution: MT5 Bridge Required"}
+                                {acct.automated_execution_verified || acct.automated_execution_supported
+                                  ? "Auto-Execution: Ready"
+                                  : "Auto-Execution: Inactive"}
                               </span>
                             </div>
                           </button>

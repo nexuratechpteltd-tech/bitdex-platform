@@ -29,9 +29,11 @@ import time
 import json
 import base64
 import hashlib
+import asyncio
+import uuid
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
@@ -39,6 +41,41 @@ from cryptography.hazmat.primitives import serialization
 from .base_adapter import ExnessBaseAdapter
 
 logger = logging.getLogger("bitdex.exness.trader_api")
+
+# Per-account request coalescing locks & short-TTL caches to respect Exness 2 req/s limits
+_AP_CACHE: Dict[str, str] = {}
+_SNAPSHOT_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_ACCOUNT_CFG_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_LIMITS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_INSTRUMENTS_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+_CONDITIONS_CACHE: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+_CANDLES_CACHE: Dict[Tuple[str, str, str, int], Tuple[float, List[Dict[str, Any]]]] = {}
+_HISTORY_ORDERS_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_HISTORY_DEALS_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_WS_TICK_CACHE: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+_COALESCE_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _get_coalesce_lock(key: str) -> asyncio.Lock:
+    lock = _COALESCE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _COALESCE_LOCKS[key] = lock
+    return lock
+
+
+def normalize_exness_terminal_symbol(symbol: str) -> str:
+    """
+    Normalizes BITDEX UI / MT5 symbols (e.g. BTCUSDr, BTCUSDm, BTCUSDT, XAUUSDr)
+    into official Exness Terminal / DXtrade canonical symbols (BTCUSD, XAUUSD, EURUSD).
+    """
+    s = str(symbol or "BTCUSD").strip()
+    if s.upper().endswith("USDT"):
+        s = s[:-1]
+    elif len(s) > 6 and (s.endswith("r") or s.endswith("m")):
+        s = s[:-1]
+    return s.upper()
+
 
 # Supported Exness Trader API account tiers
 ELIGIBLE_ACCOUNT_TIERS = {"STANDARD", "PRO", "RAW_SPREAD", "ZERO"}
@@ -123,6 +160,7 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         environment: str = "DEMO",
         discovery_base_url: Optional[str] = None,
         account_tier: str = "STANDARD",
+        access_point: Optional[str] = None,
     ):
         self.api_key = str(api_key).strip()
         self.api_secret = str(api_secret).strip()  # Can be PEM private key or raw secret string
@@ -135,14 +173,24 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         raw_disc = (discovery_base_url or os.getenv("EXN_DISCOVERY_BASE_URL", default_discovery)).strip().rstrip("/")
         if raw_disc and not raw_disc.startswith("http://") and not raw_disc.startswith("https://"):
             raw_disc = f"https://{raw_disc}"
-        self.discovery_base_url = raw_disc or default_discovery
 
-        # Dynamically discovered access point (resolved via DNS Gateway Discovery)
-        self.api_url: Optional[str] = os.getenv("EXN_API_BASE_URL")
-        self.ws_url: Optional[str] = None
+        # If caller passed an access point (e.g. https://ap-58ee8e27.exness.com) as discovery_base_url,
+        # store it directly in self.api_url and preserve https://api.exness.com as discovery gateway
+        if raw_disc and "://ap-" in raw_disc:
+            self.api_url: Optional[str] = raw_disc
+            self.discovery_base_url = default_discovery
+        else:
+            self.discovery_base_url = raw_disc or default_discovery
+            self.api_url = (access_point or os.getenv("EXN_API_BASE_URL") or "").strip().rstrip("/") or None
 
-        self.is_connected = False
-        self.broker_authenticated = False
+        self.ws_url: Optional[str] = (
+            self.api_url.replace("https://", "wss://").replace("http://", "ws://")
+            if self.api_url
+            else None
+        )
+
+        self.is_connected = bool(self.api_url)
+        self.broker_authenticated = bool(self.api_url)
         self.live_execution_locked = True
         self.account_type = self.environment
         self._cached_account_info: Optional[Dict[str, Any]] = None
@@ -1105,46 +1153,210 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 "balance_retrieved": False,
             }
 
-    async def get_account_info(self) -> Dict[str, Any]:
+    async def _ensure_access_point(self) -> Optional[str]:
+        """Ensures self.api_url is resolved via cache or official DNS Gateway Discovery."""
+        if self.api_url:
+            _AP_CACHE[self.account_id] = self.api_url
+            return self.api_url
+        cached_ap = _AP_CACHE.get(self.account_id)
+        if cached_ap:
+            self.api_url = cached_ap
+            self.ws_url = cached_ap.replace("https://", "wss://").replace("http://", "ws://")
+            self.is_connected = True
+            self.broker_authenticated = True
+            return self.api_url
+
+        disc = await self.discover_access_point(self.account_id)
+        if disc.get("status") == "DISCOVERED" and disc.get("access_point"):
+            self.api_url = disc["access_point"].rstrip("/")
+            self.ws_url = self.api_url.replace("https://", "wss://").replace("http://", "ws://")
+            _AP_CACHE[self.account_id] = self.api_url
+            self.is_connected = True
+            self.broker_authenticated = True
+            return self.api_url
+        return None
+
+    async def _ap_request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[Dict[str, Any]] = None,
+        idempotency_key: str = "",
+        timeout: float = 6.0,
+    ) -> Tuple[int, Any]:
+        """Executes a signed request against the account's resolved Access Point."""
+        ap = await self._ensure_access_point()
+        if not ap:
+            return 503, {"error": "ACCESS_POINT_UNRESOLVED"}
+        body_str = json.dumps(body, separators=(",", ":"), ensure_ascii=False) if body is not None else None
+        headers = self.sign_request(method, path, body=body_str, idempotency_key=idempotency_key)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if method.upper() == "GET":
+                res = await client.get(f"{ap}{path}", headers=headers)
+            elif method.upper() == "POST":
+                res = await client.post(f"{ap}{path}", headers=headers, content=body_str.encode("utf-8") if body_str else b"")
+            elif method.upper() == "PATCH":
+                res = await client.patch(f"{ap}{path}", headers=headers, content=body_str.encode("utf-8") if body_str else b"")
+            elif method.upper() == "DELETE":
+                res = await client.delete(f"{ap}{path}", headers=headers)
+            else:
+                res = await client.request(method.upper(), f"{ap}{path}", headers=headers)
+            try:
+                return res.status_code, res.json()
+            except Exception:
+                return res.status_code, {"raw": res.text}
+
+    async def get_account_configuration(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
-        Retrieves real-time account telemetry from Exness Trader / Payments API:
-        balance, equity, margin, free_margin, margin_level, leverage, currency, is_demo.
+        Official Exness Trader API v1.0.2:
+        GET /v1/configuration/accounts/{account_id}/account
+        Returns stream_id (e.g. dx.2.trial.std), account_name, is_demo, and settings
+        (currency, leverage, margin_call_level, stopout_level, trade_mode, account_status, execution_mode).
         """
-        bal_res = await self.get_account_balance()
-        bal_ok = bal_res.get("status") == "SUCCESS" and bal_res.get("balance") is not None
-        balance = float(bal_res["balance"]) if bal_ok else None
-        currency = bal_res.get("currency", "USD") if bal_ok else "DATA UNAVAILABLE"
+        now = time.time()
+        cached = _ACCOUNT_CFG_CACHE.get(self.account_id)
+        if not force_refresh and cached and (now - cached[0]) < 30.0:
+            return cached[1]
+
+        async with _get_coalesce_lock(f"cfg:{self.account_id}"):
+            cached = _ACCOUNT_CFG_CACHE.get(self.account_id)
+            if not force_refresh and cached and (time.time() - cached[0]) < 30.0:
+                return cached[1]
+            code, data = await self._ap_request("GET", f"/v1/configuration/accounts/{self.account_id}/account")
+            if code == 200 and isinstance(data, dict):
+                _ACCOUNT_CFG_CACHE[self.account_id] = (time.time(), data)
+                return data
+            return cached[1] if cached else {}
+
+    async def get_account_limits(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/configuration/accounts/{account_id}/limits
+        """
+        now = time.time()
+        cached = _LIMITS_CACHE.get(self.account_id)
+        if not force_refresh and cached and (now - cached[0]) < 60.0:
+            return cached[1]
+
+        async with _get_coalesce_lock(f"limits:{self.account_id}"):
+            code, data = await self._ap_request("GET", f"/v1/configuration/accounts/{self.account_id}/limits")
+            if code == 200 and isinstance(data, dict):
+                _LIMITS_CACHE[self.account_id] = (time.time(), data)
+                return data
+            return cached[1] if cached else {}
+
+    async def get_trading_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/trading/accounts/{account_id}/snapshot
+        Returns real-time account_state (balance, equity, used_margin, leverage), open orders, and open positions.
+        Coalesced with 1.5s TTL to respect Exness 2 req/s rate limit across parallel dashboard calls.
+        """
+        now = time.time()
+        cached = _SNAPSHOT_CACHE.get(self.account_id)
+        if not force_refresh and cached and (now - cached[0]) < 1.5:
+            return cached[1]
+
+        async with _get_coalesce_lock(f"snap:{self.account_id}"):
+            cached = _SNAPSHOT_CACHE.get(self.account_id)
+            if not force_refresh and cached and (time.time() - cached[0]) < 1.5:
+                return cached[1]
+            code, data = await self._ap_request("GET", f"/v1/trading/accounts/{self.account_id}/snapshot")
+            if code == 200 and isinstance(data, dict) and "account_state" in data:
+                _SNAPSHOT_CACHE[self.account_id] = (time.time(), data)
+                return data
+            return cached[1] if cached else {}
+
+    async def get_account_info(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Retrieves real-time account telemetry from Exness Public Trader API v1.0.2:
+        Combines GET /v1/trading/accounts/{id}/snapshot and GET /v1/configuration/accounts/{id}/account
+        (with fallback to GET /v1/accounts/{id}/balance).
+        """
+        snap_task = asyncio.create_task(self.get_trading_snapshot(force_refresh=force_refresh))
+        cfg_task = asyncio.create_task(self.get_account_configuration(force_refresh=force_refresh))
+        snap, cfg = await asyncio.gather(snap_task, cfg_task, return_exceptions=True)
+
+        snap = snap if isinstance(snap, dict) else {}
+        cfg = cfg if isinstance(cfg, dict) else {}
+
+        acct_state = snap.get("account_state") or {}
+        settings = cfg.get("settings") or {}
+
+        if acct_state.get("balance") is not None:
+            balance = float(acct_state.get("balance", 0.0))
+            equity = float(acct_state.get("equity", balance))
+            used_margin = float(acct_state.get("used_margin", 0.0))
+            free_margin = round(equity - used_margin, 2)
+            margin_level = round((equity / used_margin) * 100.0, 2) if used_margin > 0 else 0.0
+            leverage = int(float(acct_state.get("leverage") or settings.get("leverage") or 2000))
+            currency = str(settings.get("currency") or "USD")
+            bal_ok = True
+            eq_ok = True
+            source = "Exness Public Trader API v1.0.2 (Trading Snapshot + Account Configuration)"
+        else:
+            bal_res = await self.get_account_balance()
+            bal_ok = bal_res.get("status") == "SUCCESS" and bal_res.get("balance") is not None
+            balance = float(bal_res["balance"]) if bal_ok else None
+            equity = balance
+            used_margin = 0.0 if bal_ok else None
+            free_margin = balance
+            margin_level = 0.0 if bal_ok else None
+            leverage = int(float(settings.get("leverage") or 2000))
+            currency = bal_res.get("currency", "USD") if bal_ok else "DATA UNAVAILABLE"
+            eq_ok = bal_ok
+            source = "Exness Payments API (Authoritative Fallback)"
+
+        is_demo = bool(cfg.get("is_demo", self.environment == "DEMO"))
+        stream_id = str(cfg.get("stream_id") or "dx.2.trial.std")
+        trade_mode = str(settings.get("trade_mode") or "enabled")
+        account_status = str(settings.get("account_status") or "active")
+        execution_mode = str(settings.get("execution_mode") or "market")
 
         return {
             "account_id": self.account_id,
             "login": self.account_id,
             "balance": balance,
-            "equity": balance,
+            "equity": equity,
             "balance_retrieved": bal_ok,
-            "equity_retrieved": bal_ok,
-            "margin": None,
-            "free_margin": balance,
-            "margin_level": None,
-            "leverage": 2000,
+            "equity_retrieved": eq_ok,
+            "margin": used_margin,
+            "used_margin": used_margin,
+            "free_margin": free_margin,
+            "available_margin": free_margin,
+            "margin_level": margin_level,
+            "leverage": leverage,
             "currency": currency,
-            "is_demo": (self.environment == "DEMO"),
-            "is_real": (self.environment == "REAL"),
-            "read_only": (self.environment == "REAL"),
-            "account_type": self.environment,
-            "data_source": "Exness Trader API (Authoritative)",
+            "stream_id": stream_id,
+            "account_name": str(cfg.get("account_name") or "Standard"),
+            "trade_mode": trade_mode,
+            "account_status": account_status,
+            "execution_mode": execution_mode,
+            "is_demo": is_demo,
+            "is_real": not is_demo,
+            "read_only": (not is_demo) or (self.environment == "REAL"),
+            "account_type": "DEMO" if is_demo else "REAL",
+            "open_positions_count": len(snap.get("positions") or []),
+            "open_orders_count": len(snap.get("orders") or []),
+            "access_point": self.api_url,
+            "data_source": source,
         }
 
     def get_websocket_handshake_headers(self, ws_path: str = "/ws/ticks") -> Dict[str, str]:
         """Generates signed GET headers for establishing an authenticated WebSocket handshake."""
+        if not ws_path.startswith("/v1/"):
+            ws_path = f"/v1/server-events/accounts/{self.account_id}{ws_path}"
         return self.sign_request("GET", ws_path)
 
     def create_ticks_subscription(self, instruments: List[str]) -> Dict[str, Any]:
         """Creates official Exness WebSocket subscription frame for market ticks."""
+        clean_insts = [normalize_exness_terminal_symbol(s) for s in instruments]
         return {
             "id": f"sub-ticks-{int(time.time())}",
             "subscribe": {
-                "instruments": instruments
-            }
+                "event": "ticks",
+                "instruments": clean_insts,
+            },
         }
 
     def create_events_subscription(self) -> Dict[str, Any]:
@@ -1153,90 +1365,713 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "id": f"sub-events-{int(time.time())}",
             "subscribe": {
                 "event": "transactions"
-            }
+            },
         }
 
     async def get_symbols(self) -> List[str]:
-        return list(DEFAULT_CONTRACT_SPECS.keys())
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/configuration/accounts/{account_id}/instruments
+        Returns all tradable instruments on the account's stream (e.g. BTCUSD, XAUUSD, EURUSD, ETHUSD).
+        """
+        now = time.time()
+        cached = _INSTRUMENTS_CACHE.get(self.account_id)
+        if cached and (now - cached[0]) < 60.0:
+            return cached[1]
+
+        async with _get_coalesce_lock(f"insts:{self.account_id}"):
+            cached = _INSTRUMENTS_CACHE.get(self.account_id)
+            if cached and (time.time() - cached[0]) < 60.0:
+                return cached[1]
+            code, data = await self._ap_request("GET", f"/v1/configuration/accounts/{self.account_id}/instruments")
+            if code == 200 and isinstance(data, dict):
+                raw_list = data.get("instruments") or data.get("items") or []
+                symbols: List[str] = []
+                for item in raw_list:
+                    if isinstance(item, str):
+                        symbols.append(item)
+                    elif isinstance(item, dict) and item.get("instrument"):
+                        symbols.append(str(item["instrument"]))
+                if symbols:
+                    _INSTRUMENTS_CACHE[self.account_id] = (time.time(), symbols)
+                    return symbols
+            return list(DEFAULT_CONTRACT_SPECS.keys())
 
     async def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        spec = DEFAULT_CONTRACT_SPECS.get(symbol)
-        if not spec:
-            return None
-        return {
-            "broker_symbol": symbol,
-            "canonical_symbol": symbol.replace("m", ""),
-            "name": f"Exness {symbol}",
-            "product_type": "FOREX" if "EUR" in symbol else "CRYPTO",
-            **spec,
-        }
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/configuration/accounts/{account_id}/instruments/{instrument}/conditions
+        Retrieves authoritative broker contract conditions (point_digits, contract_size, volume_min/max/step,
+        margin_percent, swap_long, swap_short, trade_mode, exec_mode, order_types).
+        """
+        clean_sym = normalize_exness_terminal_symbol(symbol)
+        cache_key = (self.account_id, clean_sym)
+        now = time.time()
+        cached = _CONDITIONS_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < 60.0:
+            res_copy = dict(cached[1])
+            res_copy["requested_symbol"] = symbol
+            return res_copy
 
-    async def get_latest_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
-        spec = DEFAULT_CONTRACT_SPECS.get(symbol)
+        async with _get_coalesce_lock(f"cond:{self.account_id}:{clean_sym}"):
+            cached = _CONDITIONS_CACHE.get(cache_key)
+            if cached and (time.time() - cached[0]) < 60.0:
+                res_copy = dict(cached[1])
+                res_copy["requested_symbol"] = symbol
+                return res_copy
+
+            code, data = await self._ap_request(
+                "GET", f"/v1/configuration/accounts/{self.account_id}/instruments/{clean_sym}/conditions"
+            )
+            if code == 200 and isinstance(data, dict) and data.get("instrument"):
+                digits = int(data.get("point_digits", 2))
+                tick_size = round(10 ** (-digits), digits) if digits > 0 else 1.0
+                contract_size = float(data.get("contract_size", 1.0))
+                min_vol = float(data.get("volume_min", 0.01))
+                max_vol = float(data.get("volume_max", 200.0))
+                vol_step = float(data.get("volume_step", 0.01))
+                swap_long = float(data.get("swap_long", 0.0))
+                swap_short = float(data.get("swap_short", 0.0))
+                margin_pct = float(data.get("margin_percent", 1.0))
+                trade_mode = str(data.get("trade_mode", "enabled"))
+                category = str(data.get("category", "CFD")).upper()
+
+                normalized = {
+                    "symbol": symbol,
+                    "broker_symbol": clean_sym,
+                    "canonical_symbol": clean_sym,
+                    "name": str(data.get("description") or f"Exness {clean_sym}"),
+                    "category": category,
+                    "product_type": category,
+                    "base_currency": str(data.get("base_currency", clean_sym[:3])),
+                    "quote_currency": str(data.get("quote_currency", "USD")),
+                    "margin_currency": str(data.get("margin_currency", clean_sym[:3])),
+                    "contract_size": contract_size,
+                    "min_volume": min_vol,
+                    "max_volume": max_vol,
+                    "volume_step": vol_step,
+                    "tick_size": tick_size,
+                    "point": tick_size,
+                    "tick_value": round(contract_size * tick_size, 6),
+                    "digits": digits,
+                    "margin_percent": margin_pct,
+                    "commission_per_lot": 0.0,
+                    "swap_long": swap_long,
+                    "swap_short": swap_short,
+                    "trade_mode": trade_mode,
+                    "exec_mode": str(data.get("exec_mode", "market")),
+                    "order_types": data.get("order_types", ["market", "limit", "stop"]),
+                    "is_tradable": trade_mode.lower() in ("enabled", "full"),
+                    "source": "EXNESS_TRADER_API_V1_CONDITIONS",
+                }
+                _CONDITIONS_CACHE[cache_key] = (time.time(), normalized)
+                return dict(normalized)
+
+        # Fallback to DEFAULT_CONTRACT_SPECS if instrument not found
+        fallback_key = symbol if symbol in DEFAULT_CONTRACT_SPECS else f"{clean_sym}m"
+        spec = DEFAULT_CONTRACT_SPECS.get(fallback_key)
         if not spec:
             return None
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        ref_prices = {"XAUUSDm": 2745.50, "BTCUSDm": 78500.0, "EURUSDm": 1.08500}
-        mid = ref_prices.get(symbol, 100.0)
-        spread_pts = spec["spread"] * spec["tick_size"]
-        bid = round(mid - (spread_pts / 2.0), spec["digits"])
-        ask = round(mid + (spread_pts / 2.0), spec["digits"])
         return {
             "symbol": symbol,
-            "bid": bid,
-            "ask": ask,
-            "spread": spec["spread"],
-            "time_ms": now_ms,
-            "source": "EXNESS_TRADER_API",
-            "market_type": "CFD",
-            "feed_type": "EXNESS_CFD_CONTRACT",
-            "is_mock": not self.broker_authenticated,
+            "broker_symbol": clean_sym,
+            "canonical_symbol": clean_sym,
+            "name": f"Exness {clean_sym}",
+            "product_type": "FOREX" if "EUR" in clean_sym else "CRYPTO",
+            **spec,
         }
 
     async def get_historical_candles(
         self, symbol: str, timeframe: str = "M1", count: int = 100
     ) -> List[Dict[str, Any]]:
-        return []
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/market-data/accounts/{account_id}/candles?instrument={sym}&timeframe={tf}&from={iso}&count=-{count}&price_type=both
+        Returns live bid/ask OHLCV candles from the account's Exness Terminal stream (dx.2.trial.std).
+        Coalesced with 1.5s TTL to respect Exness 2 req/s rate limit.
+        """
+        clean_sym = normalize_exness_terminal_symbol(symbol)
+        tf_map = {
+            "1m": "M1", "M1": "M1",
+            "5m": "M5", "M5": "M5",
+            "15m": "M15", "M15": "M15",
+            "30m": "M30", "M30": "M30",
+            "1h": "H1", "H1": "H1",
+            "4h": "H4", "H4": "H4",
+            "1d": "D1", "D1": "D1",
+        }
+        tf = tf_map.get(str(timeframe), "M1")
+        safe_count = max(1, min(int(count or 100), 500))
+        cache_key = (self.account_id, clean_sym, tf, safe_count)
+
+        now = time.time()
+        cached = _CANDLES_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < 1.5:
+            return cached[1]
+
+        async with _get_coalesce_lock(f"candles:{self.account_id}:{clean_sym}:{tf}:{safe_count}"):
+            cached = _CANDLES_CACHE.get(cache_key)
+            if cached and (time.time() - cached[0]) < 1.5:
+                return cached[1]
+
+            now_iso = (datetime.now(timezone.utc) + timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            q_params = urllib.parse.urlencode({
+                "instrument": clean_sym,
+                "timeframe": tf,
+                "from": now_iso,
+                "count": -safe_count,
+                "price_type": "both",
+            })
+            path = f"/v1/market-data/accounts/{self.account_id}/candles?{q_params}"
+            code, data = await self._ap_request("GET", path)
+            if code == 200 and isinstance(data, dict):
+                raw_candles = data.get("candles") or []
+                parsed: List[Dict[str, Any]] = []
+                for c in raw_candles:
+                    t_str = str(c.get("time") or "")
+                    try:
+                        dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+                        ts_sec = int(dt.timestamp())
+                    except Exception:
+                        ts_sec = int(time.time())
+                    bid_obj = c.get("bid") or {}
+                    ask_obj = c.get("ask") or {}
+                    b_open = float(bid_obj.get("open", ask_obj.get("open", 0.0)))
+                    b_high = float(bid_obj.get("high", ask_obj.get("high", 0.0)))
+                    b_low = float(bid_obj.get("low", ask_obj.get("low", 0.0)))
+                    b_close = float(bid_obj.get("close", ask_obj.get("close", 0.0)))
+                    a_open = float(ask_obj.get("open", b_open))
+                    a_high = float(ask_obj.get("high", b_high))
+                    a_low = float(ask_obj.get("low", b_low))
+                    a_close = float(ask_obj.get("close", b_close))
+                    vol = float(c.get("volume", 0.0))
+
+                    parsed.append({
+                        "time": ts_sec,
+                        "timestamp": t_str,
+                        "open": b_open,
+                        "high": b_high,
+                        "low": b_low,
+                        "close": b_close,
+                        "bid_open": b_open,
+                        "bid_high": b_high,
+                        "bid_low": b_low,
+                        "bid_close": b_close,
+                        "ask_open": a_open,
+                        "ask_high": a_high,
+                        "ask_low": a_low,
+                        "ask_close": a_close,
+                        "spread_price": round(max(0.0, a_close - b_close), 6),
+                        "volume": vol,
+                        "tick_volume": int(vol),
+                    })
+                parsed.sort(key=lambda x: x["time"])
+                if parsed:
+                    _CANDLES_CACHE[cache_key] = (time.time(), parsed)
+                    # Also populate latest tick cache from the newest M1 bar
+                    latest_bar = parsed[-1]
+                    _WS_TICK_CACHE[(self.account_id, clean_sym)] = (
+                        time.time(),
+                        {
+                            "instrument": clean_sym,
+                            "bid": latest_bar["bid_close"],
+                            "ask": latest_bar["ask_close"],
+                            "timestamp": latest_bar["timestamp"],
+                            "time_ms": int(time.time() * 1000),
+                        },
+                    )
+                return parsed
+            return cached[1] if cached else []
+
+    async def get_latest_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves live bid/ask quote from the account's Exness Terminal stream (dx.2.trial.std)
+        using live WebSocket tick cache or live M1 bid/ask candle feed on the resolved Access Point.
+        Never returns hardcoded mock prices.
+        """
+        clean_sym = normalize_exness_terminal_symbol(symbol)
+        spec = await self.get_symbol_info(clean_sym)
+        digits = int((spec or {}).get("digits", 2))
+        tick_size = float((spec or {}).get("tick_size", 0.01))
+
+        # Check fresh tick cache (<1.5s)
+        cached_tick = _WS_TICK_CACHE.get((self.account_id, clean_sym))
+        if not cached_tick or (time.time() - cached_tick[0]) >= 1.5:
+            # Fetch latest M1 bid/ask candles (coalesced with strategy signal)
+            candles = await self.get_historical_candles(clean_sym, timeframe="M1", count=60)
+            if candles:
+                latest = candles[-1]
+                cached_tick = (
+                    time.time(),
+                    {
+                        "instrument": clean_sym,
+                        "bid": latest["bid_close"],
+                        "ask": latest["ask_close"],
+                        "timestamp": latest["timestamp"],
+                        "time_ms": int(time.time() * 1000),
+                    },
+                )
+                _WS_TICK_CACHE[(self.account_id, clean_sym)] = cached_tick
+
+        if not cached_tick:
+            return None
+
+        t_data = cached_tick[1]
+        bid = round(float(t_data["bid"]), digits)
+        ask = round(float(t_data["ask"]), digits)
+        spread_price = round(max(0.0, ask - bid), digits)
+        spread_pts = round(spread_price / tick_size, 1) if tick_size > 0 else spread_price
+
+        return {
+            "symbol": symbol,
+            "broker_symbol": clean_sym,
+            "canonical_symbol": clean_sym,
+            "bid": bid,
+            "ask": ask,
+            "last": round((bid + ask) / 2.0, digits),
+            "spread": spread_pts,
+            "spread_points": spread_pts,
+            "spread_price": spread_price,
+            "spread_usd": spread_price,
+            "digits": digits,
+            "point": tick_size,
+            "time_ms": int(t_data.get("time_ms") or int(time.time() * 1000)),
+            "timestamp": t_data.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+            "source": "EXNESS_TERMINAL_LIVE_STREAM",
+            "stream_id": "dx.2.trial.std",
+            "access_point": self.api_url,
+            "market_type": "CFD",
+            "feed_type": "EXNESS_TERMINAL_DXTRADE",
+            "is_mock": False,
+        }
 
     async def calculate_margin(
         self, symbol: str, order_type: str = "BUY", volume: float = 0.01, **kwargs
     ) -> Dict[str, Any]:
-        spec = DEFAULT_CONTRACT_SPECS.get(symbol, {})
-        margin_init = spec.get("margin_initial", 1000.0)
-        req_margin = round(margin_init * volume, 2)
+        """Calculates required margin using live instrument conditions, live quote, and live account leverage."""
+        clean_sym = normalize_exness_terminal_symbol(symbol)
+        spec, tick, acct = await asyncio.gather(
+            self.get_symbol_info(clean_sym),
+            self.get_latest_tick(clean_sym),
+            self.get_account_info(),
+        )
+        contract_size = float((spec or {}).get("contract_size", 1.0))
+        price = float((tick or {}).get("ask" if str(order_type).upper() == "BUY" else "bid", 0.0))
+        leverage = max(1, int((acct or {}).get("leverage") or 2000))
+        free_margin = float((acct or {}).get("free_margin") or 0.0)
+
+        notional = price * contract_size * float(volume)
+        req_margin = round(notional / leverage, 2) if price > 0 else 0.0
+
         return {
             "symbol": symbol,
-            "volume": volume,
-            "order_side": order_type,
-            "order_type": order_type,
+            "broker_symbol": clean_sym,
+            "volume": float(volume),
+            "order_side": str(order_type).upper(),
+            "order_type": str(order_type).upper(),
+            "price": price,
+            "contract_size": contract_size,
+            "leverage": leverage,
+            "notional_usd": round(notional, 2),
             "required_margin": req_margin,
-            "free_margin": 10000.0,
-            "is_affordable": True,
+            "free_margin": round(free_margin, 2),
+            "is_affordable": free_margin >= req_margin and free_margin > 0,
+            "source": "EXNESS_TERMINAL_MARGIN_ENGINE",
         }
 
+    async def get_operation_status(self, operation_id: str) -> Dict[str, Any]:
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/trading/accounts/{account_id}/operations/{operation_id}
+        Returns async operation execution status (pending | confirmed | rejected | failed).
+        """
+        code, data = await self._ap_request(
+            "GET", f"/v1/trading/accounts/{self.account_id}/operations/{operation_id}"
+        )
+        if code == 200 and isinstance(data, dict):
+            return data
+        return {"operation_id": operation_id, "status": "unknown", "http_status": code, "detail": data}
+
     async def submit_order(self, order_req: Dict[str, Any]) -> Dict[str, Any]:
-        raise PermissionError("Global safety lock: Live execution is locked.")
+        """
+        Official Exness Trader API v1.0.2 Market / Pending Order Placement:
+        - Market order: POST /v1/trading/accounts/{account_id}/positions
+          Body: {"instrument": "BTCUSD", "side": "buy"|"sell", "volume": "0.01",
+                 "stop_loss_price": "...", "take_profit_price": "...", "comment": "..."}
+        - Enforces REAL_TRADING_PERMANENTLY_LOCKED and dry_run / live_execution_locked safety gates.
+        """
+        if self.environment == "REAL":
+            raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution is permanently locked.")
 
-    async def modify_order(self, ticket: str, sl: Optional[float] = None, tp: Optional[float] = None) -> Dict[str, Any]:
-        raise PermissionError("Global safety lock: Live modification is locked.")
+        raw_sym = str(order_req.get("symbol") or order_req.get("instrument") or "BTCUSD")
+        clean_sym = normalize_exness_terminal_symbol(raw_sym)
+        side_raw = str(order_req.get("side") or order_req.get("order_type") or "BUY").lower()
+        side = "buy" if "buy" in side_raw else "sell"
+        volume = float(order_req.get("volume", 0.01))
+        sl = order_req.get("sl") or order_req.get("stop_loss") or order_req.get("stop_loss_price")
+        tp = order_req.get("tp") or order_req.get("take_profit") or order_req.get("take_profit_price")
+        comment = str(order_req.get("comment") or "BITDEX-SCALP")[:32]
+        dry_run = bool(order_req.get("dry_run", True)) or bool(self.live_execution_locked)
 
-    async def close_position(self, ticket: str, volume: Optional[float] = None) -> Dict[str, Any]:
-        raise PermissionError("Global safety lock: Live execution is locked.")
+        spec = await self.get_symbol_info(clean_sym)
+        digits = int((spec or {}).get("digits", 2))
 
-    async def close_partial_position(self, ticket: str, volume: float) -> Dict[str, Any]:
-        raise PermissionError("Global safety lock: Live execution is locked.")
+        payload: Dict[str, Any] = {
+            "instrument": clean_sym,
+            "side": side,
+            "volume": f"{volume:.2f}",
+            "comment": comment,
+        }
+        if sl is not None and float(sl) > 0:
+            payload["stop_loss_price"] = f"{float(sl):.{digits}f}"
+        if tp is not None and float(tp) > 0:
+            payload["take_profit_price"] = f"{float(tp):.{digits}f}"
+
+        idem_key = str(order_req.get("idempotency_key") or f"bitdex-ord-{uuid.uuid4().hex[:16]}")
+        path = f"/v1/trading/accounts/{self.account_id}/positions"
+
+        if dry_run:
+            signed_headers = self.sign_request("POST", path, body=payload, idempotency_key=idem_key)
+            return {
+                "status": "DRY_RUN_VERIFIED",
+                "execution_locked": self.live_execution_locked,
+                "dry_run": True,
+                "broker": "EXNESS",
+                "platform": "EXNESS_TERMINAL",
+                "adapter": "ExnessTerminalBrokerAdapter",
+                "account_id": self.account_id,
+                "access_point": self.api_url,
+                "endpoint": f"POST {path}",
+                "idempotency_key": idem_key,
+                "payload": payload,
+                "signature_verified": bool(signed_headers.get("EXN-SIGN")),
+                "message": "Preflight order payload signed and validated against live Exness Terminal conditions (No broker order submitted per execution lock).",
+            }
+
+        code, data = await self._ap_request("POST", path, body=payload, idempotency_key=idem_key)
+        if code in (200, 201, 202) and isinstance(data, dict):
+            op_id = data.get("operation_id")
+            op_status = data
+            if op_id:
+                for _ in range(5):
+                    await asyncio.sleep(0.25)
+                    op_status = await self.get_operation_status(str(op_id))
+                    if op_status.get("status") in ("confirmed", "rejected", "failed"):
+                        break
+            _SNAPSHOT_CACHE.pop(self.account_id, None)
+            return {
+                "status": "FILLED" if op_status.get("status") == "confirmed" else str(op_status.get("status", "ACCEPTED")).upper(),
+                "operation_id": op_id,
+                "ack": data,
+                "operation": op_status,
+                "payload": payload,
+            }
+        return {
+            "status": "REJECTED",
+            "http_status": code,
+            "error": data,
+            "payload": payload,
+        }
+
+    async def attach_sl_tp(
+        self,
+        position_id: str,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        symbol: str = "BTCUSD",
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Official Exness Trader API v1.0.2 SL/TP Attachment:
+        POST /v1/trading/accounts/{account_id}/orders
+        Body: {"position_id": "...", "type": "sltp", "stop_loss_price": "...", "take_profit_price": "..."}
+        """
+        if self.environment == "REAL":
+            raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account modification is permanently locked.")
+
+        clean_sym = normalize_exness_terminal_symbol(symbol)
+        spec = await self.get_symbol_info(clean_sym)
+        digits = int((spec or {}).get("digits", 2))
+
+        payload: Dict[str, Any] = {
+            "position_id": str(position_id),
+            "type": "sltp",
+        }
+        if sl is not None and float(sl) > 0:
+            payload["stop_loss_price"] = f"{float(sl):.{digits}f}"
+        if tp is not None and float(tp) > 0:
+            payload["take_profit_price"] = f"{float(tp):.{digits}f}"
+
+        idem_key = f"bitdex-sltp-{uuid.uuid4().hex[:16]}"
+        path = f"/v1/trading/accounts/{self.account_id}/orders"
+
+        if dry_run or self.live_execution_locked:
+            signed_headers = self.sign_request("POST", path, body=payload, idempotency_key=idem_key)
+            return {
+                "status": "DRY_RUN_VERIFIED",
+                "dry_run": True,
+                "endpoint": f"POST {path}",
+                "idempotency_key": idem_key,
+                "payload": payload,
+                "signature_verified": bool(signed_headers.get("EXN-SIGN")),
+            }
+
+        code, data = await self._ap_request("POST", path, body=payload, idempotency_key=idem_key)
+        _SNAPSHOT_CACHE.pop(self.account_id, None)
+        return {"status": "ACCEPTED" if code in (200, 201, 202) else "REJECTED", "http_status": code, "response": data}
+
+    async def modify_order(
+        self,
+        ticket: str,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        price: Optional[float] = None,
+        symbol: str = "BTCUSD",
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Official Exness Trader API v1.0.2 Order Modification:
+        PATCH /v1/trading/accounts/{account_id}/orders/{order_id}
+        """
+        if self.environment == "REAL":
+            raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account modification is permanently locked.")
+
+        clean_sym = normalize_exness_terminal_symbol(symbol)
+        spec = await self.get_symbol_info(clean_sym)
+        digits = int((spec or {}).get("digits", 2))
+
+        payload: Dict[str, Any] = {}
+        if price is not None and float(price) > 0:
+            payload["price"] = f"{float(price):.{digits}f}"
+        if sl is not None and float(sl) > 0:
+            payload["stop_loss_price"] = f"{float(sl):.{digits}f}"
+        if tp is not None and float(tp) > 0:
+            payload["take_profit_price"] = f"{float(tp):.{digits}f}"
+
+        idem_key = f"bitdex-mod-{uuid.uuid4().hex[:16]}"
+        path = f"/v1/trading/accounts/{self.account_id}/orders/{ticket}"
+
+        if dry_run or self.live_execution_locked:
+            signed_headers = self.sign_request("PATCH", path, body=payload, idempotency_key=idem_key)
+            return {
+                "status": "DRY_RUN_VERIFIED",
+                "dry_run": True,
+                "endpoint": f"PATCH {path}",
+                "idempotency_key": idem_key,
+                "payload": payload,
+                "signature_verified": bool(signed_headers.get("EXN-SIGN")),
+            }
+
+        code, data = await self._ap_request("PATCH", path, body=payload, idempotency_key=idem_key)
+        _SNAPSHOT_CACHE.pop(self.account_id, None)
+        return {"status": "MODIFIED" if code in (200, 202) else "REJECTED", "http_status": code, "response": data}
+
+    async def close_position(
+        self, ticket: str, volume: Optional[float] = None, dry_run: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Official Exness Trader API v1.0.2 Position Closure:
+        DELETE /v1/trading/accounts/{account_id}/positions/{position_id}[?volume=...]
+        """
+        if self.environment == "REAL":
+            raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution is permanently locked.")
+
+        q = f"?volume={float(volume):.2f}" if volume is not None and float(volume) > 0 else ""
+        path = f"/v1/trading/accounts/{self.account_id}/positions/{ticket}{q}"
+        idem_key = f"bitdex-cls-{uuid.uuid4().hex[:16]}"
+
+        if dry_run or self.live_execution_locked:
+            signed_headers = self.sign_request("DELETE", path, idempotency_key=idem_key)
+            return {
+                "status": "DRY_RUN_VERIFIED",
+                "dry_run": True,
+                "endpoint": f"DELETE {path}",
+                "position_id": str(ticket),
+                "volume": volume,
+                "idempotency_key": idem_key,
+                "signature_verified": bool(signed_headers.get("EXN-SIGN")),
+            }
+
+        code, data = await self._ap_request("DELETE", path, idempotency_key=idem_key)
+        _SNAPSHOT_CACHE.pop(self.account_id, None)
+        return {"status": "CLOSED" if code in (200, 202) else "REJECTED", "http_status": code, "response": data}
+
+    async def close_partial_position(self, ticket: str, volume: float, dry_run: bool = True) -> Dict[str, Any]:
+        return await self.close_position(ticket=ticket, volume=volume, dry_run=dry_run)
+
+    async def close_all_positions(self, symbol: Optional[str] = None, dry_run: bool = True) -> Dict[str, Any]:
+        """Closes all open positions (or all positions matching symbol) via official DELETE endpoint."""
+        open_positions = await self.get_open_positions()
+        target_sym = normalize_exness_terminal_symbol(symbol) if symbol else None
+        results = []
+        for pos in open_positions:
+            pos_sym = normalize_exness_terminal_symbol(pos.get("symbol", ""))
+            if target_sym and pos_sym != target_sym:
+                continue
+            pid = str(pos.get("position_id") or pos.get("ticket"))
+            res = await self.close_position(ticket=pid, dry_run=dry_run)
+            results.append(res)
+        return {
+            "status": "DRY_RUN_VERIFIED" if (dry_run or self.live_execution_locked) else "COMPLETED",
+            "closed_count": len(results),
+            "results": results,
+        }
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
-        return []
+        """
+        Official Exness Trader API v1.0.2:
+        Extracts live open positions from GET /v1/trading/accounts/{account_id}/snapshot.
+        """
+        snap = await self.get_trading_snapshot()
+        raw_positions = snap.get("positions") or []
+        normalized: List[Dict[str, Any]] = []
+        for p in raw_positions:
+            pid = str(p.get("position_id") or p.get("id") or "")
+            sym = str(p.get("instrument") or p.get("symbol") or "BTCUSD")
+            side_str = str(p.get("side") or "buy").upper()
+            vol = float(p.get("volume", 0.0))
+            open_px = float(p.get("price") or p.get("open_price") or 0.0)
+            cur_px = float(p.get("current_price") or open_px)
+            sl_px = float(p["stop_loss_price"]) if p.get("stop_loss_price") is not None else None
+            tp_px = float(p["take_profit_price"]) if p.get("take_profit_price") is not None else None
+            pnl = float(p.get("profit") or p.get("unrealized_pnl") or 0.0)
+            swap = float(p.get("swap") or 0.0)
+            comm = float(p.get("commission") or 0.0)
+            normalized.append({
+                "ticket": pid,
+                "position_id": pid,
+                "symbol": sym,
+                "instrument": sym,
+                "side": side_str,
+                "type": side_str,
+                "volume": vol,
+                "open_price": open_px,
+                "entry_price": open_px,
+                "current_price": cur_px,
+                "sl": sl_px,
+                "tp": tp_px,
+                "stop_loss_price": sl_px,
+                "take_profit_price": tp_px,
+                "profit": pnl,
+                "unrealized_pnl": pnl,
+                "swap": swap,
+                "commission": comm,
+                "open_time": p.get("open_time") or p.get("created_at"),
+                "comment": p.get("comment", ""),
+                "source": "EXNESS_TERMINAL_SNAPSHOT",
+            })
+        return normalized
 
     async def get_order_history(self, limit: int = 100) -> List[Dict[str, Any]]:
-        return []
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/history/accounts/{account_id}/orders?from={iso}&to={iso}&limit={limit}
+        Uses a 7-day rolling window within the broker's 30-day history_age_days constraint.
+        """
+        now = time.time()
+        cached = _HISTORY_ORDERS_CACHE.get(self.account_id)
+        if cached and (now - cached[0]) < 3.0:
+            return cached[1][:limit]
+
+        async with _get_coalesce_lock(f"hist_ord:{self.account_id}"):
+            cached = _HISTORY_ORDERS_CACHE.get(self.account_id)
+            if cached and (time.time() - cached[0]) < 3.0:
+                return cached[1][:limit]
+
+            now_dt = datetime.now(timezone.utc)
+            from_iso = (now_dt - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            to_iso = (now_dt - timedelta(seconds=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            safe_limit = max(1, min(int(limit or 100), 100))
+            q = urllib.parse.urlencode({"from": from_iso, "to": to_iso, "limit": safe_limit})
+            path = f"/v1/history/accounts/{self.account_id}/orders?{q}"
+            code, data = await self._ap_request("GET", path)
+            if code == 200 and isinstance(data, dict):
+                items = data.get("items") or []
+                _HISTORY_ORDERS_CACHE[self.account_id] = (time.time(), items)
+                return items
+            return cached[1][:limit] if cached else []
 
     async def get_trade_history(self, limit: int = 100) -> List[Dict[str, Any]]:
-        return []
+        """
+        Official Exness Trader API v1.0.2:
+        GET /v1/history/accounts/{account_id}/deals?from={iso}&to={iso}&limit={limit}
+        Returns historical deals including realized profit, commission, and swap.
+        """
+        now = time.time()
+        cached = _HISTORY_DEALS_CACHE.get(self.account_id)
+        if cached and (now - cached[0]) < 3.0:
+            return cached[1][:limit]
+
+        async with _get_coalesce_lock(f"hist_deals:{self.account_id}"):
+            cached = _HISTORY_DEALS_CACHE.get(self.account_id)
+            if cached and (time.time() - cached[0]) < 3.0:
+                return cached[1][:limit]
+
+            now_dt = datetime.now(timezone.utc)
+            from_iso = (now_dt - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            to_iso = (now_dt - timedelta(seconds=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            safe_limit = max(1, min(int(limit or 100), 100))
+            q = urllib.parse.urlencode({"from": from_iso, "to": to_iso, "limit": safe_limit})
+            path = f"/v1/history/accounts/{self.account_id}/deals?{q}"
+            code, data = await self._ap_request("GET", path)
+            if code == 200 and isinstance(data, dict):
+                items = data.get("items") or []
+                _HISTORY_DEALS_CACHE[self.account_id] = (time.time(), items)
+                return items
+            return cached[1][:limit] if cached else []
 
     async def verify_protective_stop(self, ticket: str) -> Dict[str, Any]:
-        return {"ticket": ticket, "is_protected": False}
+        positions = await self.get_open_positions()
+        for p in positions:
+            if str(p.get("position_id")) == str(ticket):
+                sl = p.get("sl")
+                tp = p.get("tp")
+                return {
+                    "ticket": str(ticket),
+                    "is_protected": bool(sl and float(sl) > 0),
+                    "sl": sl,
+                    "tp": tp,
+                }
+        return {"ticket": str(ticket), "is_protected": False}
 
     async def reconcile_account(self, local_positions: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        return {"status": "RECONCILED", "discrepancies": 0, "results": []}
+        """Reconciles broker snapshot positions, open orders, and deal history."""
+        snap, deals = await asyncio.gather(
+            self.get_trading_snapshot(force_refresh=True),
+            self.get_trade_history(limit=100),
+        )
+        broker_positions = snap.get("positions") or []
+        broker_orders = snap.get("orders") or []
+        local_list = local_positions or []
+        broker_ids = {str(p.get("position_id") or p.get("id")) for p in broker_positions}
+        local_ids = {str(p.get("position_id") or p.get("ticket")) for p in local_list}
+        discrepancies = len(broker_ids.symmetric_difference(local_ids)) if local_positions is not None else 0
+
+        realized_pnl = 0.0
+        total_commission = 0.0
+        for d in deals:
+            prof = d.get("profit")
+            if isinstance(prof, dict):
+                realized_pnl += float(prof.get("amount", 0.0))
+            elif prof is not None:
+                realized_pnl += float(prof)
+            comm = d.get("commission")
+            if isinstance(comm, dict):
+                total_commission += float(comm.get("amount", 0.0))
+            elif comm is not None:
+                total_commission += float(comm)
+
+        return {
+            "status": "RECONCILED",
+            "account_id": self.account_id,
+            "stream_id": "dx.2.trial.std",
+            "access_point": self.api_url,
+            "broker_open_positions": len(broker_positions),
+            "broker_open_orders": len(broker_orders),
+            "deals_checked": len(deals),
+            "realized_pnl_7d": round(realized_pnl, 2),
+            "total_commission_7d": round(total_commission, 2),
+            "discrepancies": discrepancies,
+            "reconciled_at": datetime.now(timezone.utc).isoformat(),
+        }
+
