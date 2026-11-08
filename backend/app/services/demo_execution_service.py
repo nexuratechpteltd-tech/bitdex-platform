@@ -1063,3 +1063,270 @@ class DemoExecutionService:
             },
             "message": "Full end-to-end Demo execution pathway verified through Windows Gateway in non-mutating preflight mode. Zero orders submitted to broker. Awaiting explicit user sign-off."
         }
+
+    @classmethod
+    def close_demo_position(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: Optional[str],
+        ticket: str,
+        close_reason: str = "PROFIT_TARGET_1_USD"
+    ) -> Dict[str, Any]:
+        """
+        Closes an open Demo position via Windows MT5 Gateway.
+        Enforces tenant isolation and rejects any Real account.
+        """
+        import httpx
+        now_str = now_utc_iso()
+        
+        # Hard security check: verify user owns an Exness Demo account
+        row = conn.execute(
+            """
+            SELECT * FROM exness_demo_connections
+            WHERE user_id = ? AND is_active = 1 AND account_type = 'DEMO'
+            """,
+            (user_id,)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=403, detail="DEMO_ACCOUNT_REQUIRED: Only authorized Demo accounts may close positions through this route.")
+
+        broker_login = str(row["account_login"])
+        server_name = row["server_name"]
+
+        if broker_login != "474861031" or server_name != "Exness-MT5Trial15":
+            raise HTTPException(status_code=403, detail="TARGET_UNAUTHORIZED: Genuine Demo execution is strictly restricted to account 474861031.")
+
+        gateway_url = "http://10.88.0.2:8095/demo/position/close"
+        gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
+
+        payload = {
+            "account_login": broker_login,
+            "server_name": server_name,
+            "environment": "DEMO",
+            "ticket": str(ticket),
+            "symbol": "BTCUSDr",
+            "close_reason": close_reason
+        }
+
+        try:
+            with httpx.Client(timeout=8.0) as client:
+                r = client.post(gateway_url, headers={"X-Gateway-Auth-Token": gateway_token, "Content-Type": "application/json"}, json=payload)
+                res_data = r.json()
+        except Exception as e:
+            logger.error(f"Error communicating with MT5 Gateway on close: {e}")
+            raise HTTPException(status_code=502, detail=f"Windows MT5 Gateway close communication error: {e}")
+
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=res_data.get("detail", "Position close failed on broker"))
+
+        # Write audit trail
+        log_id = f"AUD-{secrets.token_hex(6).upper()}"
+        conn.execute(
+            """
+            INSERT INTO audit_logs (log_id, actor_id, action, target_user_id, details_json, created_at)
+            VALUES (?, ?, 'DEMO_POSITION_CLOSED', ?, ?, ?)
+            """,
+            (
+                log_id,
+                user_id,
+                user_id,
+                json.dumps({
+                    "ticket": str(ticket),
+                    "close_reason": close_reason,
+                    "broker_login": broker_login,
+                    "response": res_data,
+                    "timestamp_utc": now_str
+                }),
+                now_str
+            )
+        )
+        conn.commit()
+
+        return {
+            "status": "SUCCESS",
+            "close_reason": close_reason,
+            "ticket": str(ticket),
+            "broker_result": res_data,
+            "message": f"Position #{ticket} closed successfully on broker ({close_reason})."
+        }
+
+    @classmethod
+    def monitor_and_exit_profit_targets(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        profit_target_usd: float = 1.0
+    ) -> Dict[str, Any]:
+        """
+        Inspects live MT5 positions and triggers immediate full closure for any position
+        that has reached or exceeded the configured net profit target ($1.00 USD default).
+        Net profit = profit + swap - abs(commission).
+        """
+        import httpx
+        now_str = now_utc_iso()
+        gateway_url = "http://10.88.0.2:8095/positions"
+        gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
+
+        try:
+            with httpx.Client(timeout=4.0) as client:
+                r = client.get(gateway_url, headers={"X-Gateway-Auth-Token": gateway_token})
+                if r.status_code != 200:
+                    return {"status": "GATEWAY_UNAVAILABLE", "closed_positions": []}
+                pos_data = r.json()
+        except Exception as e:
+            logger.error(f"Position monitor fetch error: {e}")
+            return {"status": "ERROR", "error": str(e), "closed_positions": []}
+
+        positions = pos_data.get("positions", [])
+        closed_results = []
+
+        for p in positions:
+            ticket = str(p.get("ticket"))
+            profit = float(p.get("profit", 0.0))
+            swap = float(p.get("swap", 0.0))
+            comm = abs(float(p.get("commission", 0.0)))
+            net_pnl = round(profit + swap - comm, 2)
+
+            if net_pnl >= profit_target_usd:
+                logger.info(f"PROFIT TARGET REACHED: Position #{ticket} net P&L=${net_pnl} >= ${profit_target_usd}. Executing exit.")
+                try:
+                    close_res = cls.close_demo_position(
+                        conn=conn,
+                        user_id=user_id,
+                        account_id="EXN-CONN-A4E7BE39D276",
+                        ticket=ticket,
+                        close_reason="PROFIT_TARGET_1_USD"
+                    )
+                    closed_results.append({
+                        "ticket": ticket,
+                        "net_pnl": net_pnl,
+                        "profit_target": profit_target_usd,
+                        "close_status": "SUCCESS",
+                        "detail": close_res
+                    })
+                except Exception as ex:
+                    logger.error(f"Failed closing position #{ticket} on profit target: {ex}")
+                    closed_results.append({
+                        "ticket": ticket,
+                        "net_pnl": net_pnl,
+                        "close_status": "FAILED",
+                        "error": str(ex)
+                    })
+
+        return {
+            "status": "SUCCESS",
+            "positions_monitored": len(positions),
+            "closed_count": len(closed_results),
+            "closed_positions": closed_results,
+            "timestamp_utc": now_str
+        }
+
+    @classmethod
+    def execute_portal_demo_order(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: Optional[str] = None,
+        symbol: str = "BTCUSDr",
+        direction: str = "BUY",
+        volume: float = 0.01,
+        profit_target_usd: float = 1.0,
+        stop_loss_usd: float = 1.0
+    ) -> Dict[str, Any]:
+        """
+        Executes a controlled Demo scalp trade directly from the BITDEX website portal.
+        Enforces tenant isolation, calculates parameters from fresh MT5 tick,
+        dispatches to broker, and ensures zero token leakage.
+        """
+        import httpx
+        now_str = now_utc_iso()
+
+        # 1. Resolve Account
+        if not account_id:
+            account_id = "EXN-CONN-A4E7BE39D276"
+        
+        row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE (connection_id = ? OR account_login = ?) AND user_id = ?",
+            (account_id, account_id, user_id)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Demo trading account not found or unauthorized for this user.")
+
+        if row["account_type"].upper() != "DEMO":
+            raise HTTPException(status_code=403, detail="REAL_TRADING_PERMANENTLY_LOCKED: Live real execution is strictly forbidden.")
+
+        # 2. Duplicate order barrier: Check broker open positions
+        gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
+        with httpx.Client(timeout=4.0) as client:
+            pos_resp = client.get("http://10.88.0.2:8095/positions", headers={"X-Gateway-Auth-Token": gateway_token})
+            if pos_resp.status_code == 200:
+                pos_count = pos_resp.json().get("count", 0)
+                if pos_count > 0:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"DUPLICATE_ORDER_PREVENTED: Account already has {pos_count} active position(s) on broker. Close open position first or wait for $1.00 profit exit."
+                    )
+
+            # 3. Fetch fresh tick
+            tick_resp = client.get(f"http://10.88.0.2:8095/tick/{symbol}", headers={"X-Gateway-Auth-Token": gateway_token})
+            if tick_resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Failed to fetch live MT5 quote for {symbol}")
+            tick_data = tick_resp.json().get("latest_tick", {})
+
+        bid = float(tick_data.get("bid", 75850.0))
+        ask = float(tick_data.get("ask", 75851.0))
+
+        # 4. Calculate Entry, SL, TP based on $1 profit target and $1 stop loss
+        stop_dist = (stop_loss_usd / volume)
+        tp_dist = ((profit_target_usd * 1.5) / volume)
+
+        dir_clean = direction.upper().strip()
+        if dir_clean == "BUY":
+            entry_price = ask
+            sl_price = round(entry_price - stop_dist, 2)
+            tp_price = round(entry_price + tp_dist, 2)
+        else:
+            entry_price = bid
+            sl_price = round(entry_price + stop_dist, 2)
+            tp_price = round(entry_price - tp_dist, 2)
+
+        # 5. Authorize Demo Execution internally
+        auth_res = cls.authorize_demo_execution(
+            conn=conn,
+            user_id=user_id,
+            account_id=account_id,
+            symbol=symbol,
+            confirm_demo_only=True
+        )
+        auth_token = auth_res["authorization"]["auth_token"]
+
+        order_spec = {
+            "auth_token": auth_token,
+            "symbol": symbol,
+            "direction": dir_clean,
+            "entry_price": entry_price,
+            "volume": volume,
+            "stop_loss_price": sl_price,
+            "take_profit_price": tp_price,
+            "account_equity": 5073.84,
+            "dry_run": False
+        }
+
+        # 6. Dispatch genuine Demo order
+        try:
+            exec_res = cls.dispatch_demo_order(
+                conn=conn,
+                user_id=user_id,
+                auth_token=auth_token,
+                order_spec=order_spec,
+                dry_run=False
+            )
+        finally:
+            # Auto-disarm single-use token immediately
+            cls.emergency_disarm(conn, user_id, account_id=account_id, reason="PORTAL_ORDER_DISPATCHED_TOKEN_DISARMED")
+
+        return exec_res
+

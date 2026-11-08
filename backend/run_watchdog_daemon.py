@@ -97,6 +97,19 @@ def main():
                 if not res.get("protected"):
                     discrepancies += 1
 
+            # Phase 7M: Automated Demo Profit Target Monitor & Auto-Exit ($1.00 net P&L)
+            try:
+                from app.services.demo_execution_service import DemoExecutionService
+                profit_res = DemoExecutionService.monitor_and_exit_profit_targets(
+                    conn=conn,
+                    user_id="USR-ADM-B022F490",
+                    profit_target_usd=1.0
+                )
+                if profit_res.get("closed_count", 0) > 0:
+                    logger.info("Phase 7M: Profit target monitor executed exits: %s", profit_res)
+            except Exception as pe:
+                logger.debug("Phase 7M profit monitor check: %s", pe)
+
             conn.commit()
             conn.close()
         except Exception as ex:

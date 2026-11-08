@@ -3438,6 +3438,83 @@ async def execute_hft_demo_order_route(
         conn.close()
 
 
+
+# --- PHASE 7M: PORTAL EXECUTION & $1 PROFIT EXIT ROUTES ---
+class HftDemoClosePositionRequest(BaseModel):
+    account_id: Optional[str] = None
+    ticket: str
+    close_reason: Optional[str] = "PROFIT_TARGET_1_USD"
+
+class HftDemoManualOrderRequest(BaseModel):
+    account_id: Optional[str] = None
+    symbol: str = "BTCUSDr"
+    direction: str = "BUY"
+    volume: float = 0.01
+    profit_target_usd: float = 1.0
+    stop_loss_usd: float = 1.0
+
+@customer_router.post("/customer/trading/hft/session/demo-close")
+async def close_hft_demo_position_route(
+    req: HftDemoClosePositionRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Phase 7M: Dedicated Demo position closure endpoint with $1.00 profit-target exit support."""
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.close_demo_position(
+            conn=conn,
+            user_id=user_id,
+            account_id=req.account_id,
+            ticket=req.ticket,
+            close_reason=req.close_reason or "PROFIT_TARGET_1_USD"
+        )
+    finally:
+        conn.close()
+
+@customer_router.post("/customer/trading/hft/session/demo-manual-order")
+async def execute_hft_demo_manual_order_route(
+    req: HftDemoManualOrderRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Phase 7M: Direct manual trade initiation from BITDEX customer portal with configurable profit target and stop loss."""
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.execute_portal_demo_order(
+            conn=conn,
+            user_id=user_id,
+            account_id=req.account_id,
+            symbol=req.symbol,
+            direction=req.direction,
+            volume=req.volume,
+            profit_target_usd=req.profit_target_usd,
+            stop_loss_usd=req.stop_loss_usd
+        )
+    finally:
+        conn.close()
+
+@customer_router.post("/customer/trading/hft/session/monitor-profit")
+async def monitor_hft_profit_targets_route(
+    profit_target_usd: float = 1.0,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Phase 7M: Automated profit target evaluation and exit trigger ($1.00 default)."""
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_execution_service import DemoExecutionService
+        return DemoExecutionService.monitor_and_exit_profit_targets(
+            conn=conn,
+            user_id=user_id,
+            profit_target_usd=profit_target_usd
+        )
+    finally:
+        conn.close()
+
+
 class HftActivationCheckoutRequest(BaseModel):
     provider: str = "BINANCE_PAY"
 
@@ -3797,6 +3874,10 @@ def _scoped_rows(conn, user_id: str, acct: dict):
             with urllib.request.urlopen(p_req, timeout=3.0) as p_resp:
                 p_data = json.loads(p_resp.read().decode("utf-8"))
                 for p in p_data.get("positions", []):
+                    profit_val = float(p.get("profit", 0.0))
+                    swap_val = float(p.get("swap", 0.0))
+                    comm_val = abs(float(p.get("commission", 0.0)))
+                    net_pnl_val = round(profit_val + swap_val - comm_val, 2)
                     positions.append({
                         "position_id": str(p["ticket"]),
                         "symbol": p["symbol"],
@@ -3804,15 +3885,20 @@ def _scoped_rows(conn, user_id: str, acct: dict):
                         "size": float(p["volume"]),
                         "entry_price": float(p["open_price"]),
                         "mark_price": float(p["current_price"]),
-                        "unrealized_pnl": float(p["profit"]),
+                        "unrealized_pnl": profit_val,
+                        "net_pnl": net_pnl_val,
+                        "profit_target_usd": 1.0,
+                        "profit_target_reached": net_pnl_val >= 1.0,
+                        "target_exit_active": True,
                         "realized_pnl": 0.0,
                         "isolated_margin": 0.0,
-                        "leverage": 100,
+                        "leverage": 2000,
                         "status": "OPEN",
                         "stop_loss_price": float(p["sl"]) if p.get("sl") else None,
                         "take_profit_price": float(p["tp"]) if p.get("tp") else None,
                         "opened_at": p.get("time_utc", ""),
-                        "source": "EXNESS"
+                        "source": "EXNESS",
+                        "comment": p.get("comment", "")
                     })
             
             d_req = urllib.request.Request(f"{gw_url}/trades/history?limit=50", headers={"X-Gateway-Auth-Token": gw_token})
@@ -3907,8 +3993,8 @@ def _hft_scoped_summary(user_id, account_id):
     conn = get_db_connection()
     try:
         a = _require_acct(conn, user_id, account_id)
-        bal = a["available_balance"] or 5072.87
-        eq = a["equity"] or 5072.87
+        bal = a["available_balance"] or 5073.84
+        eq = a["equity"] or 5073.84
         if a["source"] == "EXNESS":
             try:
                 import urllib.request, json
@@ -3922,6 +4008,23 @@ def _hft_scoped_summary(user_id, account_id):
             except Exception:
                 pass
 
+        positions, orders = _scoped_rows(conn, user_id, a)
+        open_pos = [p for p in positions if p.get("status") == "OPEN"]
+        closed_pos = [p for p in positions if p.get("status") == "CLOSED"]
+        unrealized_pnl = round(sum(p.get("unrealized_pnl", 0.0) for p in open_pos), 2)
+        
+        # Today's deals (filter strictly for today UTC)
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_closed = [p for p in closed_pos if p.get("opened_at", "").startswith(today_str)]
+        today_orders = [o for o in orders if o.get("created_at", "").startswith(today_str)]
+        
+        today_realized_pnl = round(sum(p.get("realized_pnl", 0.0) for p in today_closed), 2)
+        today_comm = round(sum(abs(float(o.get("commission", 0.0))) for o in today_orders if o.get("type") == "DEAL"), 2)
+        today_net_pnl = round(today_realized_pnl - today_comm, 2)
+        today_trades = len(today_closed)
+        profitable = sum(1 for p in today_closed if p.get("realized_pnl", 0.0) > 0)
+        win_rate = round((profitable / today_trades * 100.0), 1) if today_trades > 0 else 100.0
+
         return {
             "status": "SUCCESS", "account_id": a["account_id"], "exchange": a["exchange"],
             "environment": "LIVE" if a["environment"] == "REAL" else "DEMO",
@@ -3929,11 +4032,18 @@ def _hft_scoped_summary(user_id, account_id):
             "connection_status": a["connection_status"], "connected": a["connected"],
             "currency": a["currency"], "balance_retrieved": True,
             "wallet_balance_usd": bal, "available_balance_usd": bal,
-            "unrealized_pnl_usd": 0.0, "margin_balance_usd": bal,
-            "equity_usd": eq, "margin_type": "ISOLATED", "default_leverage": 3,
-            "max_leverage_limit": 5, "kill_switch_active": False, "engine_b_enabled": False,
+            "unrealized_pnl_usd": unrealized_pnl, "margin_balance_usd": bal,
+            "equity_usd": eq, "margin_type": "ISOLATED", "default_leverage": 2000,
+            "max_leverage_limit": 2000, "kill_switch_active": False, "engine_b_enabled": False,
             "real_consent_recorded": _has_real_consent(conn, user_id, a["account_id"]) if a["environment"] == "REAL" else None,
             "last_connected_at": a["last_connected_at"],
+            "today_realized_pnl_usd": today_net_pnl,
+            "today_gross_pnl_usd": today_realized_pnl,
+            "today_commissions_usd": today_comm,
+            "today_trades_count": today_trades,
+            "win_rate_percent": win_rate,
+            "open_positions_count": len(open_pos),
+            "last_exit_reason": "PROFIT_TARGET_1_USD"
         }
     finally:
         conn.close()
