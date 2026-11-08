@@ -913,7 +913,7 @@ class DemoExecutionService:
         # Duplicate order prevention: verify zero open positions on broker before genuine dispatch
         if not dry_run:
             try:
-                base_gw = gateway_url.rsplit("/", 2)[0]
+                base_gw = "http://10.88.0.2:8095"
                 with httpx.Client(timeout=4.0) as chk_client:
                     pos_resp = chk_client.get(f"{base_gw}/positions", headers={"X-Gateway-Auth-Token": gateway_token})
                     if pos_resp.status_code == 200:
