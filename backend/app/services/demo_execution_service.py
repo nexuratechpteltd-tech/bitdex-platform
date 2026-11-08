@@ -885,6 +885,50 @@ class DemoExecutionService:
         gateway_url = "http://10.88.0.2:8095/demo/order/submit"
         gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
 
+        # PHASE 7I NARROW DEMO EXECUTION GOVERNANCE:
+        if str(auth_row["broker_login"]).strip() != "474861031" or auth_row["server_name"] != "Exness-MT5Trial15":
+            raise HTTPException(
+                status_code=403,
+                detail="TARGET_UNAUTHORIZED: Genuine Demo execution is strictly restricted to account 474861031 on Exness-MT5Trial15."
+            )
+
+        if auth_row["environment"] != "DEMO":
+            raise HTTPException(
+                status_code=403,
+                detail="REAL_TRADING_PERMANENTLY_LOCKED: Live real execution is strictly forbidden."
+            )
+
+        if preflight["proposed_order"]["volume"] != 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"VOLUME_RESTRICTED: Phase 7I initial volume must be exactly 0.01 lot. Got: {preflight['proposed_order']['volume']}"
+            )
+
+        if preflight["proposed_order"]["max_monetary_risk_usd"] > 1.05:
+            raise HTTPException(
+                status_code=400,
+                detail=f"RISK_LIMIT_EXCEEDED: Maximum monetary risk (${preflight['proposed_order']['max_monetary_risk_usd']:.2f}) exceeds $1.00 USD limit."
+            )
+
+        # Duplicate order prevention: verify zero open positions on broker before genuine dispatch
+        if not dry_run:
+            try:
+                base_gw = gateway_url.rsplit("/", 2)[0]
+                with httpx.Client(timeout=4.0) as chk_client:
+                    pos_resp = chk_client.get(f"{base_gw}/positions", headers={"X-Gateway-Auth-Token": gateway_token})
+                    if pos_resp.status_code == 200:
+                        pos_json = pos_resp.json()
+                        pos_count = pos_json.get("count", len(pos_json.get("positions", [])))
+                        if pos_count > 0:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=f"DUPLICATE_ORDER_PREVENTED: Account 474861031 already has {pos_count} active position(s) on broker. Only ONE position is permitted."
+                            )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.warning(f"Pre-dispatch broker position verification check: {e}")
+
         gateway_payload = {
             "account_login": auth_row["broker_login"],
             "server_name": auth_row["server_name"],

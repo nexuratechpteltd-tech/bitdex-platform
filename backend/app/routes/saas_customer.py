@@ -2415,12 +2415,8 @@ async def get_hft_strategy_signal_route(
         leverage = int(cfg.get("leverage", 3)) if cfg else 3
         equity = float(sel_acct.get("equity", 5072.87) or 5072.87) if sel_acct else 5072.87
 
-        broker_sym = clean_symbol
-        if broker_sym == "BTCUSD": broker_sym = "BTCUSDr"
-        elif broker_sym == "ETHUSD": broker_sym = "ETHUSDr"
-        elif broker_sym == "XAUUSD": broker_sym = "XAUUSDr"
-        elif broker_sym == "EURUSD": broker_sym = "EURUSDm"
-        elif broker_sym == "GBPUSD": broker_sym = "GBPUSDm"
+        from ..services.demo_execution_service import normalize_broker_symbol
+        broker_sym = normalize_broker_symbol(clean_symbol)
 
         current_bid = 75700.0
         current_ask = 75701.0

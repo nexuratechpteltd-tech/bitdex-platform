@@ -352,6 +352,7 @@ export default function InstitutionalTradingDashboard({
   const [preflightLoading, setPreflightLoading] = useState<boolean>(false);
   const [preflightReceipt, setPreflightReceipt] = useState<any>(null);
   const [showPreflightDetails, setShowPreflightDetails] = useState<boolean>(false);
+  const [liveExecutionReceipt, setLiveExecutionReceipt] = useState<any>(null);
 
   // Continuous MT5 quote tick polling
   const fetchLiveTick = useCallback(async (symToFetch?: string) => {
@@ -1123,14 +1124,14 @@ export default function InstitutionalTradingDashboard({
     }
   };
 
-  // Phase 7H: Explicit Operator Approval & Session 2 Worker Preflight Dispatch
-  const handleApproveDemoScalp = async (proposedSide: string = "BUY") => {
+  // Phase 7I: Explicit Operator Approval & Session 2 Worker Dispatch
+  const handleApproveDemoScalp = async (proposedSide: string = "BUY", isLiveDispatch: boolean = false) => {
     setPreflightLoading(true);
     setFeedback(null);
     try {
       const authToken = getAuthToken();
       if (!authToken) {
-        throw new Error("Authentication required to preflight Demo scalp.");
+        throw new Error("Authentication required to execute Demo scalp.");
       }
 
       // 1. Ensure Active Demo Authorization Token
@@ -1157,16 +1158,31 @@ export default function InstitutionalTradingDashboard({
         setIsDemoAuthorized(true);
       }
 
-      // 2. Derive Current Reference Prices & Mandatory Institutional R:R (>= 1.5:1)
-      const refBid = liveTick?.bid || scalpSignal?.bid || 75840.0;
-      const refAsk = liveTick?.ask || scalpSignal?.ask || 75841.0;
+      // 2. Fetch Fresh Live MT5 Quotes
+      let refBid = liveTick?.bid || scalpSignal?.bid || 75865.0;
+      let refAsk = liveTick?.ask || scalpSignal?.ask || 75866.0;
+      try {
+        const tickRes = await fetch(`/api/backend/saas/customer/trading/hft/tick?symbol=${encodeURIComponent(selectedPair || 'BTCUSDr')}`, {
+          headers: { Authorization: "Bearer " + authToken }
+        });
+        if (tickRes.ok) {
+          const tData = await tickRes.json();
+          if (tData.bid && tData.ask) {
+            refBid = tData.bid;
+            refAsk = tData.ask;
+          }
+        }
+      } catch {
+        // Non-blocking fallback
+      }
+
       const entryPrice = proposedSide === "BUY" ? refAsk : refBid;
-      const stopDist = 100.0; // 100 USD stop distance ($1.00 USD risk on 0.01 Lot)
-      const tpDist = 150.0;   // 150 USD target distance (1.5:1 R:R)
+      const stopDist = 100.0; // Exactly 100 USD stop distance ($1.00 USD risk on 0.01 Lot)
+      const tpDist = 150.0;   // Exactly 150 USD target distance (1.5:1 R:R)
       const slPrice = proposedSide === "BUY" ? entryPrice - stopDist : entryPrice + stopDist;
       const tpPrice = proposedSide === "BUY" ? entryPrice + tpDist : entryPrice - tpDist;
 
-      // 3. Dispatch Non-Mutating Preflight to Session 2 Worker via WireGuard
+      // 3. Dispatch to Session 2 Worker via WireGuard
       const execRes = await fetch("/api/backend/saas/customer/trading/hft/session/demo-execute", {
         method: "POST",
         headers: {
@@ -1181,22 +1197,32 @@ export default function InstitutionalTradingDashboard({
           volume: 0.01,
           stop_loss_price: slPrice,
           take_profit_price: tpPrice,
-          account_equity: 5076.03,
-          dry_run: true
+          account_equity: 5072.87,
+          dry_run: !isLiveDispatch
         }),
       });
 
       const execJson = await execRes.json();
       if (!execRes.ok) {
-        throw new Error(execJson.detail || "Failed to execute worker preflight.");
+        throw new Error(execJson.detail || "Failed to execute worker order.");
       }
 
-      setPreflightReceipt(execJson);
-      setShowPreflightDetails(true);
-      setFeedback({
-        type: "success",
-        message: "Operator Approval Verified: Session 2 Worker non-mutating preflight PASSED on Exness MT5 Demo #474861031. Zero orders dispatched to broker."
-      });
+      if (isLiveDispatch && execJson.execution_mode === "GENUINE_BROKER_EXECUTION") {
+        setLiveExecutionReceipt(execJson);
+        setFeedback({
+          type: "success",
+          message: `FIRST DEMO TRADE EXECUTED on Exness MT5 Demo #474861031! Order #${execJson.broker_execution?.order_id}, Deal #${execJson.broker_execution?.deal_id} at $${execJson.broker_execution?.execution_price} USD.`
+        });
+        fetchOverview();
+        runValidation(selectedPair || "BTCUSDr");
+      } else {
+        setPreflightReceipt(execJson);
+        setShowPreflightDetails(true);
+        setFeedback({
+          type: "success",
+          message: "Operator Approval Verified: Session 2 Worker non-mutating preflight PASSED on Exness MT5 Demo #474861031. Zero orders dispatched to broker."
+        });
+      }
     } catch (err: any) {
       setFeedback({ type: "error", message: err.message });
     } finally {
@@ -1868,6 +1894,80 @@ export default function InstitutionalTradingDashboard({
                       </div>
                       <div className="text-[10px] text-[#10B981] pt-1 border-t border-[#263147]/50">
                         ✓ {preflightReceipt.message || "Session 2 Interactive Worker non-mutating preflight PASSED. Zero orders dispatched to broker."}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Phase 7I: Final Explicit Operator Confirmation & Live Order Dispatch */}
+                  {preflightReceipt && !liveExecutionReceipt && (
+                    <div className="p-3.5 rounded-xl bg-gradient-to-br from-emerald-950/40 via-[#0B0F17] to-cyan-950/40 border border-emerald-500/50 space-y-2.5 font-mono">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-white font-bold text-xs">
+                          <span className="text-emerald-400">⚡</span>
+                          <span>PHASE 7I: READY FOR GENUINE DEMO TRADE DISPATCH</span>
+                        </div>
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-500/30 font-bold">
+                          1 ORDER PERMITTED
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-black/50 border border-emerald-500/20 text-[11px] text-[#94A3B8] space-y-1">
+                        <div>Account &amp; Server: <strong className="text-white">Exness MT5 Demo #474861031 (Exness-MT5Trial15)</strong></div>
+                        <div>Contract &amp; Lot: <strong className="text-cyan-400">{preflightReceipt.order_details?.broker_symbol || "BTCUSDr"} · 0.01 Lot</strong></div>
+                        <div>Order Direction: <strong className={preflightReceipt.order_details?.direction === "BUY" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>{preflightReceipt.order_details?.direction || dir}</strong></div>
+                        <div>Entry Reference: <strong className="text-white">${preflightReceipt.order_details?.entry_price?.toFixed(2) || entry.toFixed(2)} USD</strong></div>
+                        <div>Protective Stop Loss: <strong className="text-rose-400">${preflightReceipt.order_details?.stop_loss?.toFixed(2) || sl.toFixed(2)} USD</strong> (Max Monetary Risk: $1.00 USD)</div>
+                        <div>Profit Target: <strong className="text-emerald-400">${preflightReceipt.order_details?.take_profit?.toFixed(2) || tp.toFixed(2)} USD</strong> (Target Profit: $1.50 USD · R:R 1:1.50)</div>
+                        <div>Estimated Margin: <strong className="text-white">~$0.38 USD</strong> (at 1:2000 leverage)</div>
+                        <div>Execution Route: <strong className="text-[#00E5FF]">Windows Session 2 Interactive Worker IPC -&gt; mt5.order_send()</strong></div>
+                      </div>
+                      <button
+                        type="button"
+                        id="btn-execute-live-demo-scalp"
+                        onClick={() => handleApproveDemoScalp(dir, true)}
+                        disabled={preflightLoading}
+                        className="w-full py-3 px-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 text-xs text-white shadow-xl cursor-pointer bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 shadow-emerald-500/25 border border-emerald-400/40"
+                      >
+                        {preflightLoading ? (
+                          <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                        ) : (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                        )}
+                        <span>
+                          {preflightLoading
+                            ? "Dispatching Order to Exness MT5 Terminal..."
+                            : `Submit Genuine 0.01 Lot Demo ${dir} Order to Exness MT5 (#474861031)`}
+                        </span>
+                      </button>
+                      <div className="text-[10px] text-amber-400/80 text-center">
+                        ⚠️ Live Demo Dispatch: Clicking above will submit ONE real order to Exness MT5 Demo #474861031 with broker-side SL/TP. Real accounts remain permanently blocked.
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Confirmed Live Broker Execution Receipt */}
+                  {liveExecutionReceipt && (
+                    <div className="p-4 rounded-xl bg-[#04140D] border-2 border-emerald-500/80 text-xs font-mono space-y-2.5 shadow-2xl">
+                      <div className="flex items-center justify-between border-b border-emerald-500/40 pb-2">
+                        <div className="flex items-center gap-2 text-emerald-400 font-bold">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                          <span className="text-sm">GENUINE DEMO TRADE EXECUTED ON EXNESS MT5</span>
+                        </div>
+                        <span className="text-[10px] text-emerald-300 font-bold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-500/50">
+                          BROKER CONFIRMED
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-[#94A3B8]">
+                        <div>Broker Order Ticket: <strong className="text-white text-xs">#{liveExecutionReceipt.broker_execution?.order_id}</strong></div>
+                        <div>Broker Deal Ticket: <strong className="text-white text-xs">#{liveExecutionReceipt.broker_execution?.deal_id}</strong></div>
+                        <div>Executed Price: <strong className="text-emerald-400 text-xs">${liveExecutionReceipt.broker_execution?.execution_price} USD</strong></div>
+                        <div>Volume: <strong className="text-white">{liveExecutionReceipt.broker_execution?.volume} Lot ({liveExecutionReceipt.broker_execution?.symbol})</strong></div>
+                        <div>Broker Stop Loss (SL): <strong className="text-rose-400">${liveExecutionReceipt.broker_execution?.stop_loss} USD</strong></div>
+                        <div>Broker Take Profit (TP): <strong className="text-emerald-400">${liveExecutionReceipt.broker_execution?.take_profit} USD</strong></div>
+                        <div>Execution Latency: <strong className="text-cyan-400">{liveExecutionReceipt.broker_execution?.dispatch_latency_ms} ms</strong></div>
+                        <div>Confirmed Open Position: <strong className="text-emerald-400">Ticket #{liveExecutionReceipt.broker_execution?.confirmed_position?.ticket}</strong></div>
+                      </div>
+                      <div className="p-2 rounded bg-black/60 border border-emerald-500/30 text-[10px] text-emerald-300">
+                        ✓ {liveExecutionReceipt.message || "First genuine Demo scalp trade executed successfully."}
                       </div>
                     </div>
                   )}
