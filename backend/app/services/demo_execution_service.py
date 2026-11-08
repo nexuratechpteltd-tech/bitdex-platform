@@ -22,7 +22,40 @@ from fastapi import HTTPException, status
 
 logger = logging.getLogger("bitdex.demo_execution")
 
-ALLOWED_EXNESS_SYMBOLS = {"BTCUSD", "ETHUSD", "XAUUSD", "EURUSD", "GBPUSD"}
+ALLOWED_EXNESS_BASE_SYMBOLS = {"BTCUSD", "ETHUSD", "XAUUSD", "EURUSD", "GBPUSD"}
+ALLOWED_EXNESS_SYMBOLS = {
+    "BTCUSD", "BTCUSDR", "ETHUSD", "ETHUSDR",
+    "XAUUSD", "XAUUSDR", "EURUSD", "EURUSDM", "GBPUSD", "GBPUSDM"
+}
+
+def is_allowed_exness_symbol(symbol_str: str) -> bool:
+    clean = symbol_str.upper().replace("/", "").replace(":", "").replace("-", "")
+    if clean in ALLOWED_EXNESS_BASE_SYMBOLS or clean in ALLOWED_EXNESS_SYMBOLS:
+        return True
+    for sfx in ("R", "M", "C"):
+        if clean.endswith(sfx) and clean[:-len(sfx)] in ALLOWED_EXNESS_BASE_SYMBOLS:
+            return True
+    return False
+
+def normalize_broker_symbol(symbol_str: str) -> str:
+    clean = symbol_str.upper().replace("/", "").replace(":", "").replace("-", "")
+    if clean.endswith("R"):
+        return clean[:-1] + "r"
+    elif clean.endswith("M"):
+        return clean[:-1] + "m"
+    elif clean.endswith("C"):
+        return clean[:-1] + "c"
+    elif "BTC" in clean:
+        return "BTCUSDr"
+    elif "ETH" in clean:
+        return "ETHUSDr"
+    elif "XAU" in clean:
+        return "XAUUSDr"
+    elif "EUR" in clean:
+        return "EURUSDm"
+    elif "GBP" in clean:
+        return "GBPUSDm"
+    return clean + "r"
 DEMO_AUTH_TTL_SECONDS = 3600  # 1 hour authorization window
 MAX_SIMULTANEOUS_POSITIONS = 3
 MAX_ENTRIES_PER_INSTRUMENT = 2
@@ -209,7 +242,7 @@ class DemoExecutionService:
             )
 
         # 4. Instrument Validation
-        if "EXNESS" in adapter_name and clean_symbol not in ALLOWED_EXNESS_SYMBOLS:
+        if "EXNESS" in adapter_name and not is_allowed_exness_symbol(clean_symbol):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"UNSUPPORTED_BROKER_SYMBOL: Instrument {clean_symbol} is not a valid Exness CFD pair. Supported: {', '.join(sorted(ALLOWED_EXNESS_SYMBOLS))}."
@@ -771,7 +804,7 @@ class DemoExecutionService:
         raw_symbol = str(order_spec.get("symbol", auth_row["symbol"])).upper()
 
         # Map symbol for Exness RawSpread: BTCUSD -> BTCUSDr
-        broker_symbol = "BTCUSDr" if "BTC" in raw_symbol else (raw_symbol + "r" if not raw_symbol.endswith("r") else raw_symbol)
+        broker_symbol = normalize_broker_symbol(raw_symbol)
 
         # Calculate exact monetary risk
         direction = sim_res["order"]["direction"]
