@@ -171,6 +171,7 @@ interface LiveQuoteTick {
 
 interface ConnectedAccountItem {
   account_id: string;
+  user_id?: string;
   source: string;
   exchange: string;
   broker_name?: string;
@@ -186,6 +187,15 @@ interface ConnectedAccountItem {
   mt5_server?: string;
   connection_status: string;
   connected: boolean;
+  api_connected?: boolean;
+  broker_account_authenticated?: boolean;
+  mt5_account_connected?: boolean;
+  automated_execution_verified?: boolean;
+  execution_readiness_status?: string;
+  execution_readiness_detail?: string;
+  last_connected_at?: string;
+  adapter_mode?: string;
+  stream_id?: string;
   currency: string;
   available_balance: number | null;
   current_balance?: number | null;
@@ -307,6 +317,8 @@ export default function InstitutionalTradingDashboard({
   // ─── Step 2: Account Selection State (Dynamic Demo & Real Dropdowns) ──────
   const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccountItem[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState<boolean>(true);
+  const [currentUserId, setCurrentUserId] = useState<string>("");
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string>("");
   const [selectedAccountMode, setSelectedAccountMode] = useState<"DEMO" | "REAL">("DEMO");
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [openAccountDropdown, setOpenAccountDropdown] = useState<"DEMO" | "REAL" | null>("DEMO");
@@ -403,7 +415,8 @@ export default function InstitutionalTradingDashboard({
     return connectedAccounts[0] || null;
   }, [connectedAccounts, selectedAccountId, selectedAccountMode, demoAccountsList, realAccountsList]);
 
-  const activeAccountId = selectedAccountObj?.account_id || selectedAccountId || "";
+  // Strict multi-tenant guard: only pass an account_id verified to belong to connectedAccounts
+  const activeAccountId = selectedAccountObj?.account_id || "";
   const safetyStatusSeqRef = useRef(0);
 
   // ─── 1. Fetch System & Safety Status ──────────────────────────────────────
@@ -465,28 +478,48 @@ export default function InstitutionalTradingDashboard({
 
   // ─── 2. Fetch Connected Accounts (Dynamic Demo & Real Verification) ───────
   const fetchConnectedAccounts = useCallback(
-    async (refresh = true) => {
+    async (refresh = true, manualTrigger = false) => {
       setLoadingAccounts(true);
       const authToken = getAuthToken();
       const res = await safeApiFetch<{
+        user_id?: string;
+        refreshed_at?: string;
         accounts: ConnectedAccountItem[];
         demo_accounts?: ConnectedAccountItem[];
         real_accounts?: ConnectedAccountItem[];
       }>(
-        `/api/backend/saas/customer/trading/hft/connected-accounts?refresh=${refresh ? "true" : "false"}`,
+        `/api/backend/saas/customer/trading/hft/connected-accounts?refresh=${refresh ? "true" : "false"}&_t=${Date.now()}`,
         {
+          cache: "no-store",
           headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         }
       );
       if (res.ok && res.data && Array.isArray(res.data.accounts)) {
         const list = res.data.accounts;
+        const uid = String(res.data.user_id || list[0]?.user_id || "");
+        if (uid) setCurrentUserId(uid);
+        if (res.data.refreshed_at) setLastRefreshedAt(res.data.refreshed_at);
         setConnectedAccounts(list);
         setSelectedAccountId((prev) => {
           if (prev && list.some((a) => a.account_id === prev)) return prev;
+          if (typeof window !== "undefined" && uid) {
+            const savedForUser = localStorage.getItem(`bitdex_hft_account_${uid}`);
+            if (savedForUser && list.some((a) => a.account_id === savedForUser)) {
+              return savedForUser;
+            }
+          }
           const firstDemo = list.find((a) => a.environment === "DEMO" && a.connected);
           if (firstDemo) return firstDemo.account_id;
           return list[0]?.account_id || "";
         });
+        if (manualTrigger) {
+          const demoCnt = list.filter((a) => a.environment === "DEMO" && a.connected).length;
+          const realCnt = list.filter((a) => a.environment === "REAL" && a.connected).length;
+          setActionFeedback({
+            type: "success",
+            message: `Broker accounts refreshed live (${demoCnt} Demo, ${realCnt} Real connected).`,
+          });
+        }
       }
       setLoadingAccounts(false);
     },
@@ -607,14 +640,15 @@ export default function InstitutionalTradingDashboard({
     return () => clearInterval(timer);
   }, [selectedPair, fetchLiveQuote, fetchPerformanceAndPositions]);
 
-  // Poll system status & symbol prices every 12 seconds
+  // Poll system status, symbol prices & connected accounts every 12 seconds
   useEffect(() => {
     const timer = setInterval(() => {
       fetchSystemSafetyStatus(selectedPair);
       fetchBrokerPairs();
+      fetchConnectedAccounts(false);
     }, 12000);
     return () => clearInterval(timer);
-  }, [selectedPair, fetchSystemSafetyStatus, fetchBrokerPairs]);
+  }, [selectedPair, fetchSystemSafetyStatus, fetchBrokerPairs, fetchConnectedAccounts]);
 
   // When customer selects a pair, immediately fetch its live MT5 quote
   const handleSelectPair = (sym: string) => {
@@ -697,8 +731,9 @@ export default function InstitutionalTradingDashboard({
     setSelectedAccountMode("DEMO");
     setSelectedAccountId(acct.account_id);
     setRealConsentNotice(null);
-    if (typeof window !== "undefined") {
-      localStorage.setItem("bitdex_hft_account", acct.account_id);
+    const uid = currentUserId || acct.user_id || "";
+    if (typeof window !== "undefined" && uid) {
+      localStorage.setItem(`bitdex_hft_account_${uid}`, acct.account_id);
     }
   };
 
@@ -794,6 +829,30 @@ export default function InstitutionalTradingDashboard({
 
     const d = res.data;
     safetyStatusSeqRef.current += 1;
+
+    if (d.customer_status === "MT5_EXECUTION_BRIDGE_REQUIRED") {
+      setStrategyArmed(false);
+      setExecutionStatusBanner({
+        status: "WAITING",
+        headline:
+          d.customer_headline ||
+          `Account ${selectedAccountObj?.masked_account_number || ""} is API-verified — MT5 execution terminal required for automated order dispatch.`,
+        detail:
+          d.customer_detail ||
+          "Your Exness Trader API account is authenticated and synchronized, but runs on Exness Terminal rather than MetaTrader 5 (MT5).",
+        timestamp: d.timestamp_utc,
+      });
+      setActionFeedback({
+        type: "info",
+        message:
+          d.customer_headline ||
+          "Account API-verified. Connect an Exness MT5 account or enable the Exness Terminal execution bridge for automated order dispatch.",
+      });
+      fetchPerformanceAndPositions(targetAcctId);
+      fetchSystemSafetyStatus(selectedPair, targetAcctId);
+      return;
+    }
+
     const isNowArmed = Boolean(d.strategy_armed);
     setStrategyArmed(isNowArmed);
     setSystemStatus((prev) => ({
@@ -1333,7 +1392,7 @@ export default function InstitutionalTradingDashboard({
             className="bg-[#161B22] border border-[#21262D] rounded-2xl p-5 sm:p-6 flex flex-col justify-between space-y-4"
           >
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <div>
                   <span className="text-xs font-semibold uppercase tracking-wider text-[#10B981]">
                     Step 2
@@ -1342,15 +1401,25 @@ export default function InstitutionalTradingDashboard({
                     Select Account Type
                   </h2>
                 </div>
-                <button
-                  id="btn-refresh-connected-accounts"
-                  type="button"
-                  onClick={() => fetchConnectedAccounts(true)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-[11px] font-medium text-[#8B949E] hover:text-white transition-colors"
-                >
-                  <RefreshCw className={`w-3 h-3 ${loadingAccounts ? "animate-spin text-[#10B981]" : ""}`} />
-                  Refresh Accounts
-                </button>
+                <div className="flex items-center gap-2">
+                  {lastRefreshedAt && (
+                    <span
+                      id="accounts-last-refreshed-ts"
+                      className="text-[10px] font-mono text-[#8B949E] hidden sm:inline"
+                    >
+                      Synced {lastRefreshedAt.slice(11, 19)} UTC
+                    </span>
+                  )}
+                  <button
+                    id="btn-refresh-connected-accounts"
+                    type="button"
+                    onClick={() => fetchConnectedAccounts(true, true)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-[11px] font-medium text-[#8B949E] hover:text-white transition-colors"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${loadingAccounts ? "animate-spin text-[#10B981]" : ""}`} />
+                    Refresh Accounts
+                  </button>
+                </div>
               </div>
 
               {/* 1. DEMO ACCOUNT DROPDOWN TRIGGER & LIST */}
@@ -1463,7 +1532,7 @@ export default function InstitutionalTradingDashboard({
                                   {acct.account_type_label || "Demo"}
                                 </span>
                               </div>
-                              <div>
+                              <div className="col-span-2 sm:col-span-1">
                                 <span className="text-[#8B949E]">Server: </span>
                                 <span className="font-semibold text-white">
                                   {acct.mt5_server || acct.server_name || "Exness-MT5Trial15"}
@@ -1493,6 +1562,36 @@ export default function InstitutionalTradingDashboard({
                                   {formatUsdExact(freeM)}
                                 </span>
                               </div>
+                            </div>
+
+                            {/* 4-Layer Connection & Execution Readiness Distinction */}
+                            <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-[#21262D]/80 text-[10px]">
+                              <span className="px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-medium">
+                                API: {acct.api_connected !== false ? "Connected" : "Offline"}
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-medium">
+                                Broker Auth: {acct.broker_account_authenticated !== false ? "Verified" : "Unverified"}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded font-medium ${
+                                  acct.mt5_account_connected
+                                    ? "bg-[#10B981]/15 text-[#10B981]"
+                                    : "bg-sky-500/15 text-sky-300"
+                                }`}
+                              >
+                                {acct.mt5_account_connected ? "MT5: Connected" : "Terminal: Exness API"}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded font-medium ${
+                                  acct.automated_execution_verified
+                                    ? "bg-[#10B981]/15 text-[#10B981]"
+                                    : "bg-amber-500/15 text-amber-300"
+                                }`}
+                              >
+                                {acct.automated_execution_verified
+                                  ? "Auto-Execution: Verified"
+                                  : "Auto-Execution: MT5 Bridge Required"}
+                              </span>
                             </div>
                           </button>
                         );
@@ -1613,7 +1712,7 @@ export default function InstitutionalTradingDashboard({
                                   {acct.account_type_label || "Real"}
                                 </span>
                               </div>
-                              <div>
+                              <div className="col-span-2 sm:col-span-1">
                                 <span className="text-[#8B949E]">Server: </span>
                                 <span className="font-semibold text-white">
                                   {acct.mt5_server || acct.server_name || "Exness-Real"}
@@ -1643,6 +1742,19 @@ export default function InstitutionalTradingDashboard({
                                   {formatUsdExact(freeM)}
                                 </span>
                               </div>
+                            </div>
+
+                            {/* 4-Layer Connection & Execution Readiness Distinction */}
+                            <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-[#21262D]/80 text-[10px]">
+                              <span className="px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-medium">
+                                API: {acct.api_connected !== false ? "Connected" : "Offline"}
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] font-medium">
+                                Broker Auth: {acct.broker_account_authenticated !== false ? "Verified" : "Unverified"}
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 font-medium">
+                                Real Execution: Locked (Safety Governance)
+                              </span>
                             </div>
                           </button>
                         );
@@ -2367,7 +2479,9 @@ export default function InstitutionalTradingDashboard({
                 This will immediately request the broker to close all{" "}
                 <strong className="text-white">{openTradesCount}</strong> open position(s) for{" "}
                 <strong className="text-[#10B981]">
-                  Demo Account #474861031 (Exness-MT5Trial15)
+                  {selectedAccountObj
+                    ? `${selectedAccountObj.broker_name || "Exness"} ${selectedAccountObj.account_type_label || "Demo"} ${selectedAccountObj.masked_account_number || selectedAccountObj.masked_id} (${selectedAccountObj.mt5_server || selectedAccountObj.server_name || "Exness"})`
+                    : "Selected Account"}
                 </strong>
                 .
               </p>

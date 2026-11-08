@@ -1,3 +1,4 @@
+import logging
 """
 Tauric Platform — Staging API Authentication & Transport Security Boundary (P0 Remediation)
 Enforces:
