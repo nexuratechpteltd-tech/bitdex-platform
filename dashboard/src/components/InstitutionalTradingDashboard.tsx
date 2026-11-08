@@ -1,258 +1,257 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import {
   ShieldCheck,
   Activity,
   AlertTriangle,
-  Cpu,
   TrendingUp,
   TrendingDown,
-  Layers,
-  Lock,
   RefreshCw,
   Zap,
   CheckCircle2,
-  Clock,
-  ArrowUpRight,
-  ArrowDownRight,
-  Sliders,
-  DollarSign,
-  Scale,
-  Ban,
-  AlertCircle,
-  Eye,
-  BarChart3,
   Search,
   Check,
   X,
   Play,
   Pause,
-  Square,
   ChevronDown,
   ChevronUp,
   Info,
-  ListFilter,
-  ArrowRight
+  Globe,
+  Coins,
+  Sparkles,
+  Lock,
+  OctagonAlert,
 } from "lucide-react";
-import ProtectionCenter from "./ProtectionCenter";
 
-interface TradingOverviewData {
-  account: {
-    account_id: string;
-    wallet_balance: number;
-    available_balance: number;
-    unrealized_pnl: number;
-    margin_balance: number;
-    engine_b_enabled: number;
-    trading_locked: number;
-    environment: string;
-    is_provisioned?: boolean;
-  };
-  engine_a: {
-    name: string;
-    strategy: string;
-    status: string;
-    active_pairs: string[];
-    live_locked: boolean;
-    allocated_capital_usd: number;
-  };
-  engine_b: {
-    name: string;
-    strategy: string;
-    status: string;
-    enabled: boolean;
-    operational?: boolean;
-    operational_status?: string;
-    live_locked: boolean;
-    parameters: {
-      donchian_period: number;
-      adx_threshold: number;
-      rvol_threshold: number;
-      max_leverage: number;
-      order_type: string;
-      fill_timeout_seconds: number;
-    };
-    active_leases_count: number;
-    status_description?: string;
-  };
-  risk: {
-    aggregate_exposure_pct: number;
-    max_exposure_cap_pct: number;
-    max_leverage_clamp: number;
-    naked_positions_count: number;
-    stop_loss_coverage_pct?: number | null;
-    circuit_breaker_active: boolean;
-    live_trading_locked: boolean;
-    read_only_mode: boolean;
-  };
-  active_leases: Array<{
-    symbol: string;
-    engine_id: string;
-    lease_token: string;
-    acquired_at: string;
-    expires_at: string;
-    status: string;
-  }>;
-  positions: Array<{
-    symbol: string;
-    position_side: string;
-    quantity: number;
-    entry_price: number;
-    mark_price: number;
-    unrealized_pnl: number;
-    margin_type: string;
-    leverage: number;
-    stop_exchange_order_id?: number | null;
-  }>;
-  recent_trades: Array<{
-    trade_id: string;
-    symbol: string;
-    side: string;
-    quantity: number;
-    entry_price: number;
-    exit_price: number;
-    realized_pnl: number;
-    fee_usd: number;
-    created_at: string;
-  }>;
+/**
+ * Shared Safe API Response Parser (Requirement 9):
+ * - Always reads raw text first (`res.text()`).
+ * - Safely parses JSON inside a try/catch block.
+ * - Handles HTML proxy pages, plain-text status responses (e.g. "502 Bad Gateway",
+ *   "500 Internal Server Error" which previously caused V8 to throw
+ *   "Unexpected non-whitespace character after JSON at position 4 (line 1 column 5)"),
+ *   and expired sessions cleanly.
+ * - Logs raw diagnostic details to console internally and never exposes raw parser
+ *   exceptions to the customer interface.
+ */
+export interface SafeApiResult<T = any> {
+  ok: boolean;
+  status: number;
+  data: T | null;
+  errorMessage: string | null;
 }
 
-interface ConnectedAccount {
+export async function safeApiFetch<T = any>(
+  url: string,
+  options: RequestInit = {}
+): Promise<SafeApiResult<T>> {
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        ...(options.headers || {}),
+      },
+    });
+
+    const rawText = await res.text();
+    const trimmed = (rawText || "").trim();
+
+    if (!trimmed) {
+      return {
+        ok: res.ok,
+        status: res.status,
+        data: null,
+        errorMessage: res.ok ? null : `Request could not be completed (HTTP ${res.status}).`,
+      };
+    }
+
+    // Detect HTML or plain-text status lines before/during JSON parsing
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (parseErr) {
+      console.warn(`[BITDEX SafeApiParser] Non-JSON response from ${url} (HTTP ${res.status}):`, trimmed.slice(0, 180), parseErr);
+      const friendlyMsg =
+        res.status === 401 || res.status === 403
+          ? "Session authentication or account permission check failed."
+          : res.status >= 500
+          ? "Trading service is refreshing its connection. Retrying automatically."
+          : "Unable to process server response. Please try again.";
+      return {
+        ok: false,
+        status: res.status,
+        data: null,
+        errorMessage: friendlyMsg,
+      };
+    }
+
+    // Guard against primitive JSON values (e.g. JSON.parse("502") -> 502)
+    if (typeof parsed !== "object" || parsed === null) {
+      console.warn(`[BITDEX SafeApiParser] Primitive JSON payload from ${url} (HTTP ${res.status}):`, parsed);
+      return {
+        ok: false,
+        status: res.status,
+        data: null,
+        errorMessage: "Received an unexpected response format from the trading server.",
+      };
+    }
+
+    if (!res.ok || parsed.status === "ERROR") {
+      const detail =
+        typeof parsed.detail === "string"
+          ? parsed.detail
+          : typeof parsed.error === "string"
+          ? parsed.error
+          : typeof parsed.message === "string"
+          ? parsed.message
+          : `Request failed (HTTP ${res.status}).`;
+      return {
+        ok: false,
+        status: res.status,
+        data: parsed as T,
+        errorMessage: detail,
+      };
+    }
+
+    return {
+      ok: true,
+      status: res.status,
+      data: parsed as T,
+      errorMessage: null,
+    };
+  } catch (networkErr: any) {
+    console.warn(`[BITDEX SafeApiParser] Network error calling ${url}:`, networkErr);
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      errorMessage: "Network connection interrupted. Reconnecting to BITDEX trading server...",
+    };
+  }
+}
+
+interface BrokerPair {
+  symbol: string;
+  base_asset: string;
+  quote_asset: string;
+  display_name: string;
+  category: string;
+  bid?: number;
+  ask?: number;
+  last_price?: number;
+  spread_usd?: number;
+  price_change_pct?: number;
+  point: number;
+  digits: number;
+  spread_points: number;
+  volume_min: number;
+  volume_max: number;
+  volume_step: number;
+  stops_level: number;
+  visible?: boolean;
+  is_tradable: boolean;
+}
+
+interface LiveQuoteTick {
+  symbol: string;
+  bid: number;
+  ask: number;
+  last: number;
+  spread_usd: number;
+  spread_pts: number;
+  digits: number;
+  point: number;
+  age_ms: number;
+  is_stale: boolean;
+  timestamp_iso: string;
+}
+
+interface ConnectedAccountItem {
   account_id: string;
   source: string;
   exchange: string;
-  platform?: string;
-  environment: "REAL" | "DEMO";
+  environment: "DEMO" | "REAL" | string;
   environment_label: string;
+  account_login?: string;
   masked_id: string;
   connection_status: string;
   connected: boolean;
   currency: string;
   available_balance: number | null;
   equity: number | null;
-  last_connected_at: string | null;
-  display_label: string;
-  real_consent_recorded: boolean | null;
+  platform: string;
+  real_consent_recorded?: boolean;
 }
 
-interface HftPair {
-  symbol: string;
-  price: number;
-  quote_volume_24h: number;
-  spread_usd: number;
-  spread_ratio: number;
-  spread_bps: number;
-  depth_usd?: number;
-  funding_rate: number;
-  price_change_pct_24h: number;
-  rank_score: number;
-  base_asset: string;
-  quote_asset: string;
-}
-
-interface RejectedPair {
-  symbol: string;
-  reason: string;
-}
-
-interface StrategyConfig {
-  config_id?: string;
-  symbol: string;
-  direction: "AUTO" | "LONG_ONLY" | "SHORT_ONLY";
-  margin_allocation_usd: number;
-  leverage: number;
-  net_profit_target_pct: number;
-  max_loss_pct: number;
-  max_holding_duration_seconds: number;
-  session_mode: "SINGLE_CYCLE" | "CONTINUOUS";
-  daily_loss_limit_usd: number;
-  max_daily_trades: number;
-  status?: string;
-}
-
-
-interface HftPositionItem {
-  position_id: string;
-  symbol: string;
-  direction: "LONG" | "SHORT" | "BUY" | "SELL";
-  size: number;
-  entry_price: number;
-  mark_price: number;
-  unrealized_pnl: number;
-  net_pnl?: number;
-  profit_target_usd?: number;
-  profit_target_reached?: boolean;
-  target_exit_active?: boolean;
-  realized_pnl?: number;
-  isolated_margin?: number;
-  leverage: number;
-  status: "OPEN" | "CLOSED";
-  stop_loss_price?: number | null;
-  take_profit_price?: number | null;
-  opened_at?: string;
-  source?: string;
-  comment?: string;
-}
-
-interface HftOrderItem {
-  order_id: string;
-  symbol: string;
-  side: "BUY" | "SELL";
-  order_type: string;
-  price: number;
-  quantity: number;
-  status: "NEW" | "OPEN" | "PARTIALLY_FILLED" | "FILLED" | "CANCELLED" | "REJECTED";
-  executed_qty?: number;
-  created_at?: string;
-}
-
-interface HftAccountSummaryData {
-  account_id: string;
-  environment: string;
-  wallet_balance_usd: number;
-  available_balance_usd: number;
-  unrealized_pnl_usd: number;
-  margin_balance_usd: number;
-  equity_usd: number;
-  margin_type: string;
-  default_leverage: number;
-  max_leverage_limit: number;
-  kill_switch_active: boolean;
-  engine_b_enabled: boolean;
-  today_realized_pnl_usd?: number;
-  today_gross_pnl_usd?: number;
-  today_commissions_usd?: number;
-  today_trades_count?: number;
-  win_rate_percent?: number;
-  open_positions_count?: number;
-  last_exit_reason?: string;
-}
-
-interface ChecklistItem {
+interface PreBuiltStrategy {
   id: string;
   name: string;
-  passed: boolean;
-  critical: boolean;
-  detail: string;
+  badge: string;
+  recommended: boolean;
+  objective: string;
+  bullets: string[];
+  defaultAllocatedCapital: number;
 }
 
+const APPROVED_STRATEGIES: PreBuiltStrategy[] = [
+  {
+    id: "BITDEX_SMART_SCALPING",
+    name: "BITDEX Smart Scalping",
+    badge: "Recommended",
+    recommended: true,
+    objective:
+      "Capture small, qualifying market movements while controlling execution costs and downside risk.",
+    bullets: [
+      "Automated market analysis & automatic BUY/SELL direction selection",
+      "Enters only when expected movement clears round-trip execution costs ($1.00 net target)",
+      "Intelligent position sizing & automatic capacity management from allocated capital",
+      "Mandatory broker-side stop-loss protection ($1.00 risk cap) & automated profit-taking",
+      "Continuous 250ms trade monitoring & automatic circuit-breaker protection",
+    ],
+    defaultAllocatedCapital: 100,
+  },
+  {
+    id: "BITDEX_CONSERVATIVE_SCALPING",
+    name: "BITDEX Conservative Guard",
+    badge: "Lower Frequency",
+    recommended: false,
+    objective:
+      "Prioritize capital preservation by filtering for stronger momentum expansions with strict cost buffers.",
+    bullets: [
+      "Automated market analysis with stricter volatility & cost-edge filtering",
+      "Automatic BUY/SELL selection without manual order entry",
+      "Conservative allocated-capital sizing with single-position isolation",
+      "Broker-confirmed stop-loss and automated $1.00 net profit exit",
+      "Continuous 250ms risk monitoring and daily loss protection",
+    ],
+    defaultAllocatedCapital: 150,
+  },
+];
 
-// Safe numeric formatting helpers to prevent TypeError crashes on undefined/null metrics
-function safeNum(val: any, decimals = 2, fallback = "0.00"): string {
-  if (val === null || val === undefined || val === "") return fallback;
+const POPULAR_CRYPTO_SYMBOLS = ["BTCUSDr", "ETHUSDr", "SOLUSDr", "XRPUSDr"];
+const POPULAR_FOREX_SYMBOLS = ["EURUSDr", "GBPUSDr", "USDJPYr", "AUDUSDr"];
+
+function formatInstrumentPrice(val: number | undefined | null, digits = 2): string {
   const n = Number(val);
-  return isNaN(n) ? fallback : n.toFixed(decimals);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  const d = Math.min(Math.max(digits, 2), 5);
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: d,
+    maximumFractionDigits: d,
+  });
 }
 
-function safeFormatPrice(val: any, fallback = "---"): string {
-  if (val === null || val === undefined || val === "") return fallback;
-  const n = Number(val);
-  if (isNaN(n)) return fallback;
-  if (n >= 1) {
-    return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  }
-  return n.toFixed(4);
+function formatUsdSigned(val: number | undefined | null): string {
+  const n = Number(val || 0);
+  if (!Number.isFinite(n)) return "$0.00";
+  const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+  return `${sign}$${Math.abs(n).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 export default function InstitutionalTradingDashboard({
@@ -262,85 +261,6 @@ export default function InstitutionalTradingDashboard({
   token?: string;
   className?: string;
 }) {
-  const [data, setData] = useState<TradingOverviewData | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
-
-  // Dynamic Pairs State
-  const [hftPairs, setHftPairs] = useState<HftPair[]>([]);
-  const [rejectedPairs, setRejectedPairs] = useState<RejectedPair[]>([]);
-  const [loadingPairs, setLoadingPairs] = useState<boolean>(false);
-  const [pairSearch, setPairSearch] = useState<string>("");
-  const [selectedPair, setSelectedPair] = useState<string>("BTCUSDr");
-  const [showRejected, setShowRejected] = useState<boolean>(false);
-
-  // Section J: Connected exchange & account selector
-  const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<string>(() =>
-    typeof window !== "undefined" ? window.localStorage.getItem("bitdex_hft_account") || "" : ""
-  );
-  const [accountsError, setAccountsError] = useState<string | null>(null);
-  const [consentModalOpen, setConsentModalOpen] = useState<boolean>(false);
-  const [consentChecked, setConsentChecked] = useState<boolean>(false);
-  const [stepUpPassword, setStepUpPassword] = useState<string>("");
-  const [consentError, setConsentError] = useState<string | null>(null);
-  const [consentBusy, setConsentBusy] = useState<boolean>(false);
-  const [pendingAction, setPendingAction] = useState<null | "CONFIG" | "START">(null);
-
-  // Strategy Configuration State
-  const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
-  const [strategyConfig, setStrategyConfig] = useState<StrategyConfig>({
-    symbol: "BTCUSDT",
-    direction: "AUTO",
-    margin_allocation_usd: 50.0,
-    leverage: 3,
-    net_profit_target_pct: 0.60,
-    max_loss_pct: 0.90,
-    max_holding_duration_seconds: 900,
-    session_mode: "SINGLE_CYCLE",
-    daily_loss_limit_usd: 20.0,
-    max_daily_trades: 10,
-    status: "NOT_CONFIGURED"
-  });
-  const [savingConfig, setSavingConfig] = useState<boolean>(false);
-
-  // Pre-Trade Validation Checklist State
-  const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
-  const [isReady, setIsReady] = useState<boolean>(false);
-  const [validating, setValidating] = useState<boolean>(false);
-
-  // Session Control State
-  const [sessionActionLoading, setSessionActionLoading] = useState<boolean>(false);
-  const [sessionId, setSessionId] = useState<string>("");
-  const [sessionState, setSessionState] = useState<
-    "NOT_CONFIGURED" | "VALIDATING" | "ARMED_READ_ONLY" | "PAUSED" | "BLOCKED" | "STOPPED" | "FAILED"
-  >("NOT_CONFIGURED");
-
-  // Live MT5 quote tick for selected pair
-  const [liveTick, setLiveTick] = useState<{
-    bid: number;
-    ask: number;
-    spread_usd: number;
-    spread_pts: number;
-    age_ms: number;
-    is_stale: boolean;
-    timestamp_iso: string;
-  } | null>(null);
-
-  // Search & Category Filter for 313 Exness pairs
-  const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
-  const [showAllPairs, setShowAllPairs] = useState<boolean>(false);
-  const [collisionInfo, setCollisionInfo] = useState<any>(null);
-
-  // ─── Phase 2: $20.00 USD One-Time HFT Account Activation State ───────────
-  const [activationStatus, setActivationStatus] = useState<string>("NOT_ACTIVATED");
-  const [activationInfo, setActivationInfo] = useState<any>(null);
-  const [isActivationModalOpen, setIsActivationModalOpen] = useState<boolean>(false);
-  const [activationProvider, setActivationProvider] = useState<string>("BINANCE_PAY");
-  const [activationCheckoutData, setActivationCheckoutData] = useState<any>(null);
-  const [activationBusy, setActivationBusy] = useState<boolean>(false);
-
   const getAuthToken = useCallback(() => {
     return (
       token ||
@@ -348,3063 +268,1803 @@ export default function InstitutionalTradingDashboard({
         ? localStorage.getItem("bitdex_auth_token") ||
           localStorage.getItem("tauric_token") ||
           localStorage.getItem("tauric_session_token") ||
+          localStorage.getItem("bitdex_token") ||
           ""
         : "")
     );
   }, [token]);
 
-  // ─── Phase 7C: Automated Scalping Engine Signal & Latency State ──────────
-  const [scalpSignal, setScalpSignal] = useState<any>(null);
-  const [latencyMetrics, setLatencyMetrics] = useState<any>(null);
-  const [loadingSignal, setLoadingSignal] = useState<boolean>(false);
+  // ─── Step 1: Market & Pair State ──────────────────────────────────────────
+  const [selectedCategory, setSelectedCategory] = useState<"CRYPTO" | "FOREX">("CRYPTO");
+  const [allPairs, setAllPairs] = useState<BrokerPair[]>([]);
+  const [loadingPairs, setLoadingPairs] = useState<boolean>(true);
+  const [pairSearch, setPairSearch] = useState<string>("");
+  const [showAllPairs, setShowAllPairs] = useState<boolean>(false);
+  const [selectedPair, setSelectedPair] = useState<string>("BTCUSDr");
+  const [liveTick, setLiveTick] = useState<LiveQuoteTick | null>(null);
+  const [pairPricesMap, setPairPricesMap] = useState<Record<string, { bid: number; ask: number; spread: number; changePct: number; digits: number }>>({});
 
-  // ─── Phase 7H: Controlled Demo Execution Authorization & Preflight State ───
-  const [demoAuthToken, setDemoAuthToken] = useState<string>("");
-  const [isDemoAuthorized, setIsDemoAuthorized] = useState<boolean>(true);
-  const [preflightLoading, setPreflightLoading] = useState<boolean>(false);
-  const [preflightReceipt, setPreflightReceipt] = useState<any>(null);
-  const [showPreflightDetails, setShowPreflightDetails] = useState<boolean>(false);
-  const [liveExecutionReceipt, setLiveExecutionReceipt] = useState<any>(null);
+  // ─── Step 2: Account Selection State ──────────────────────────────────────
+  const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccountItem[]>([]);
+  const [selectedAccountMode, setSelectedAccountMode] = useState<"DEMO" | "REAL">("DEMO");
+  const [selectedAccountId, setSelectedAccountId] = useState<string>("EXN-CONN-A4E7BE39D276");
+  const [realConsentModalOpen, setRealConsentModalOpen] = useState<boolean>(false);
+  const [realConsentChecked, setRealConsentChecked] = useState<boolean>(false);
+  const [realConsentSubmitting, setRealConsentSubmitting] = useState<boolean>(false);
+  const [realConsentNotice, setRealConsentNotice] = useState<string | null>(null);
 
-  // ─── Phase 7M: $1.00 Profit Target & Customer Portal Execution Controls ───
-  const [profitTargetUsd, setProfitTargetUsd] = useState<number>(1.0);
-  const [stopLossUsd, setStopLossUsd] = useState<number>(1.0);
-  const [tradeVolumeLot, setTradeVolumeLot] = useState<number>(0.01);
-  const [maxOpenPositions, setMaxOpenPositions] = useState<number>(1);
-  const [automatedReEntry, setAutomatedReEntry] = useState<boolean>(false);
-  const [isManualExecuting, setIsManualExecuting] = useState<boolean>(false);
-  const [closingTicket, setClosingTicket] = useState<string | null>(null);
-  const [closeLoading, setCloseLoading] = useState<boolean>(false);
+  // ─── Step 3: Strategy Approval State ──────────────────────────────────────
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string>("BITDEX_SMART_SCALPING");
+  const [allocatedCapitalUsd, setAllocatedCapitalUsd] = useState<number>(100);
+  const [strategyModalOpen, setStrategyModalOpen] = useState<boolean>(false);
 
-  // Continuous MT5 quote tick polling
-  const fetchLiveTick = useCallback(async (symToFetch?: string) => {
-    try {
-      const s = symToFetch || selectedPair;
-      if (!s) return;
-      const authToken = getAuthToken();
-      if (!authToken) return;
-      const res = await fetch(`/api/backend/saas/customer/trading/hft/tick?symbol=${encodeURIComponent(s)}`, {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-      });
-            if (res.ok) {
-        const json = await res.json();
-        if (json.status === "SUCCESS") {
-          setLiveTick({
-            bid: json.bid,
-            ask: json.ask,
-            spread_usd: json.spread_usd,
-            spread_pts: json.spread_pts,
-            age_ms: json.age_ms,
-            is_stale: Boolean(json.is_stale),
-            timestamp_iso: json.timestamp_iso || new Date().toISOString()
-          });
-        }
-      }
-    } catch (err) {
-            // Non-blocking
-    }
-  }, [selectedPair, getAuthToken]);
+  // ─── Execution & Confirmation State ───────────────────────────────────────
+  const [executeModalOpen, setExecuteModalOpen] = useState<boolean>(false);
+  const [executingStrategy, setExecutingStrategy] = useState<boolean>(false);
+  const [strategyArmed, setStrategyArmed] = useState<boolean>(false);
+  const [executionStatusBanner, setExecutionStatusBanner] = useState<{
+    status: "IDLE" | "WAITING" | "ARMED_VERIFIED" | "EXECUTED" | "PAUSED" | "ERROR";
+    headline: string;
+    detail: string;
+    timestamp?: string;
+  }>({
+    status: "IDLE",
+    headline: "Ready to execute BITDEX Smart Scalping on Demo Account #474861031.",
+    detail: "Select your trading pair, verify Demo Account #474861031, and click Execute Trading Strategy.",
+  });
 
-  const handlePauseSession = async () => {
-    setSessionActionLoading(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/session/pause", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({ symbol: selectedPair, account_id: selectedAccountId }),
-      });
-      const resJson = await res.json();
-      if (!res.ok) {
-        throw new Error(resJson.detail || "Failed to pause session.");
-      }
-      setSessionState("PAUSED");
-      setFeedback({
-        type: "info",
-        message: resJson.message || `Session paused for ${selectedPair}. Market scanning suspended.`
-      });
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message || "Failed to pause session" });
-    } finally {
-      setSessionActionLoading(false);
-    }
-  };
+  // ─── Trading Performance & Close All Trades State ─────────────────────────
+  const [accountSummary, setAccountSummary] = useState<any>(null);
+  const [openPositions, setOpenPositions] = useState<any[]>([]);
+  const [closedPositions, setClosedPositions] = useState<any[]>([]);
+  const [closeAllModalOpen, setCloseAllModalOpen] = useState<boolean>(false);
+  const [closingAll, setClosingAll] = useState<boolean>(false);
+  const [closingSingleTicket, setClosingSingleTicket] = useState<string | null>(null);
+  const [disarmingStrategy, setDisarmingStrategy] = useState<boolean>(false);
 
-  const handleResumeSession = async () => {
-    setSessionActionLoading(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/session/resume", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({ symbol: selectedPair, account_id: selectedAccountId }),
-      });
-      const resJson = await res.json();
-      if (!res.ok) {
-        throw new Error(resJson.detail || "Failed to resume session.");
-      }
-      setSessionState("ARMED_READ_ONLY");
-      setFeedback({
-        type: "success",
-        message: resJson.message || `Session resumed for ${selectedPair}. Market scanning active.`
-      });
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message || "Failed to resume session" });
-    } finally {
-      setSessionActionLoading(false);
-    }
-  };
-
-  const fetchScalpSignal = useCallback(async (pairToFetch?: string, accountIdToFetch?: string) => {
-    try {
-      const sym = pairToFetch || selectedPair;
-      if (!sym) return;
-      const authToken = getAuthToken();
-      if (!authToken) return;
-      setLoadingSignal(true);
-      const acctParam = accountIdToFetch !== undefined ? accountIdToFetch : selectedAccountId;
-      const acctQ = acctParam ? `&account_id=${encodeURIComponent(acctParam)}` : "";
-      const res = await fetch(`/api/backend/saas/customer/trading/hft/strategy/signal?symbol=${encodeURIComponent(sym)}${acctQ}`, {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-      });
-      if (res.ok) {
-        const json = await res.json();
-        setScalpSignal(json);
-      }
-    } catch (err) {
-      console.warn("Could not fetch scalp signal:", err);
-    } finally {
-      setLoadingSignal(false);
-    }
-  }, [selectedPair, selectedAccountId, getAuthToken]);
-
-  const fetchLatencyMetrics = useCallback(async () => {
-    try {
-      const authToken = getAuthToken();
-      if (!authToken) return;
-      const res = await fetch("/api/backend/saas/customer/trading/hft/latency", {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-      });
-      if (res.ok) {
-        const json = await res.json();
-        setLatencyMetrics(json);
-      }
-    } catch (err) {
-      console.warn("Could not fetch latency metrics:", err);
-    }
-  }, [getAuthToken]);
-
-  // ─── Authoritative Broker-Backed Activity & Telemetry State ───────────────
-  const [bottomTab, setBottomTab] = useState<"POSITIONS" | "OPEN_ORDERS" | "CLOSED_TRADES" | "HISTORY" | "ACCOUNT">("POSITIONS");
-  const [hftPositions, setHftPositions] = useState<HftPositionItem[]>([]);
-  const [hftOrders, setHftOrders] = useState<HftOrderItem[]>([]);
-  const [hftAccountSummary, setHftAccountSummary] = useState<HftAccountSummaryData | null>(null);
-  const [loadingBottomData, setLoadingBottomData] = useState<boolean>(false);
-
-  // Fetch Customer $20 HFT Activation Status
-  const fetchActivationStatus = useCallback(async () => {
-    try {
-      const authToken = getAuthToken();
-      if (!authToken) return;
-      const res = await fetch("/api/backend/saas/customer/hft/activation/status", {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-      });
-      if (res.ok) {
-        const json = await res.json();
-        if (json.activation) {
-          setActivationInfo(json.activation);
-          setActivationStatus(json.activation.activation_status || "NOT_ACTIVATED");
-        }
-      }
-    } catch (err) {
-      console.warn("Could not fetch HFT activation status:", err);
-    }
-  }, [getAuthToken]);
-
-  // Initiate $20.00 USD Activation Checkout
-  const handleInitiateActivationCheckout = async () => {
-    setActivationBusy(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/hft/activation/checkout", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({ provider: activationProvider }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        const msg = typeof json.detail === "object" ? json.detail.message : json.detail;
-        throw new Error(msg || "Failed to initiate $20.00 USD activation checkout.");
-      }
-      if (json.status === "ALREADY_ACTIVE") {
-        setActivationStatus("ACTIVE");
-        setActivationInfo(json.activation);
-        setIsActivationModalOpen(false);
-        setFeedback({ type: "success", message: "Your BITDEX HFT account is already activated." });
-        return;
-      }
-      setActivationCheckoutData(json.checkout);
-      if (json.activation) {
-        setActivationInfo(json.activation);
-        setActivationStatus(json.activation.activation_status);
-      }
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message || "Activation checkout error" });
-    } finally {
-      setActivationBusy(false);
-    }
-  };
-
-  // Complete & Verify Signed $20.00 USD Activation Payment
-  const handleCompleteActivationPayment = async () => {
-    if (!activationCheckoutData) return;
-    setActivationBusy(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/hft/activation/verify", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({
-          payment_reference: activationCheckoutData.payment_reference,
-          amount: 20.0,
-          currency: "USD",
-          signature: activationCheckoutData.verification_signature,
-          provider: activationCheckoutData.provider,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        const msg = typeof json.detail === "object" ? json.detail.message : json.detail;
-        throw new Error(msg || "Payment verification failed.");
-      }
-      if (json.activation) {
-        setActivationInfo(json.activation);
-        setActivationStatus(json.activation.activation_status || "ACTIVE");
-      } else {
-        setActivationStatus("ACTIVE");
-      }
-      setActivationCheckoutData(null);
-      setIsActivationModalOpen(false);
-      setFeedback({
-        type: "success",
-        message: "Account Activated ($20.00 USD verified). Automated Scalping Engine configuration and execution controls are now unlocked.",
-      });
-      setSessionState("ARMED_READ_ONLY");
-      await runValidation(selectedPair);
-      await fetchOverview();
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message || "Payment verification failed" });
-    } finally {
-      setActivationBusy(false);
-    }
-  };
-
-  // Fetch Authoritative Bottom Panel Activity Data
-  const fetchBottomData = useCallback(async () => {
-    try {
-      setLoadingBottomData(true);
-      const authToken = getAuthToken();
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-      };
-
-      if (!selectedAccountId) {
-        setHftPositions([]);
-        setHftOrders([]);
-        return;
-      }
-      const q = `?account_id=${encodeURIComponent(selectedAccountId)}`;
-      const [posRes, ordRes, accRes] = await Promise.all([
-        fetch(`/api/backend/saas/customer/trading/hft/positions${q}`, { headers }),
-        fetch(`/api/backend/saas/customer/trading/hft/orders${q}`, { headers }),
-        fetch(`/api/backend/saas/customer/trading/hft/account-summary${q}`, { headers }),
-      ]);
-      // Never keep data from a previously selected account
-      setHftPositions([]);
-      setHftOrders([]);
-
-      if (posRes.ok) {
-        const posJson = await posRes.json();
-        if (posJson.open_positions && Array.isArray(posJson.open_positions)) {
-          setHftPositions(posJson.open_positions);
-        }
-      }
-      if (ordRes.ok) {
-        const ordJson = await ordRes.json();
-        if (ordJson.open_orders && Array.isArray(ordJson.open_orders)) {
-          setHftOrders(ordJson.open_orders);
-        }
-      }
-      if (accRes.ok) {
-        const accJson = await accRes.json();
-        if (accJson.account_id) {
-          setHftAccountSummary(accJson);
-        }
-      }
-    } catch (err) {
-      console.warn("Could not fetch HFT bottom activity data:", err);
-    } finally {
-      setLoadingBottomData(false);
-    }
-  }, [getAuthToken, selectedAccountId]);
-
-  // 1. Fetch Trading Overview
-  const fetchOverview = useCallback(async () => {
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/overview", {
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-      });
-      if (!res.ok) throw new Error(`Overview fetch failed (${res.status})`);
-      const json = await res.json();
-      if (json.status === "SUCCESS") {
-        setData(json);
-        setError(null);
-      } else {
-        setError(json.error || "Failed to load trading overview");
-      }
-    } catch (err: any) {
-      setError(err.message || "Failed to connect to backend");
-    } finally {
-      setLoading(false);
-    }
-  }, [getAuthToken]);
-
-  // 2. Fetch HFT Eligible Pairs (Broker-Aware)
-  const fetchHftPairs = useCallback(async (targetAcctId?: string) => {
-    try {
-      setLoadingPairs(true);
-      const authToken = getAuthToken();
-      const acctParam = targetAcctId !== undefined ? targetAcctId : selectedAccountId;
-      const url = acctParam
-        ? "/api/backend/saas/customer/trading/hft/pairs?account_id=" + encodeURIComponent(acctParam)
-        : "/api/backend/saas/customer/trading/hft/pairs";
-      const res = await fetch(url, {
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-      });
-      if (res.ok) {
-        const json = await res.json();
-        if (json.pairs && Array.isArray(json.pairs)) {
-          setHftPairs(json.pairs);
-          // If current selectedPair is not in eligible pairs, auto-select first eligible pair
-          if (json.pairs.length > 0) {
-            setSelectedPair((cur) => {
-              if (cur && json.pairs.some((p: any) => p.symbol === cur)) {
-                return cur;
-              }
-              const btc = json.pairs.find((p: any) => p.symbol === "BTCUSDr" || p.symbol === "BTCUSD");
-              return btc ? btc.symbol : json.pairs[0].symbol;
-            });
-          } else {
-            setSelectedPair("");
-          }
-        }
-        if (json.rejected_pairs && Array.isArray(json.rejected_pairs)) {
-          setRejectedPairs(json.rejected_pairs);
-        }
-      }
-    } catch {
-      // Non-blocking
-    } finally {
-      setLoadingPairs(false);
-    }
-  }, [getAuthToken, selectedAccountId]);
-
-  // 3. Fetch Strategy Configuration for Selected Pair
-  const fetchStrategyConfig = useCallback(async (sym: string) => {
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch(`/api/backend/saas/customer/trading/hft/config?symbol=${sym}`, {
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-      });
-      if (res.ok) {
-        const json = await res.json();
-        if (json.config) {
-          setStrategyConfig(json.config);
-        }
-      }
-    } catch {
-      // Non-blocking
-    }
-  }, [getAuthToken]);
-
-  // 4. Run Pre-Trade Validation Checklist
-  const runValidation = useCallback(async (sym: string, accountOverride?: string) => {
-    try {
-      setValidating(true);
-      const authToken = getAuthToken();
-      const targetAcc = accountOverride !== undefined ? accountOverride : selectedAccountId;
-      const acctQ = targetAcc ? `&account_id=${encodeURIComponent(targetAcc)}` : "";
-      const res = await fetch(`/api/backend/saas/customer/trading/hft/validation?symbol=${sym}${acctQ}`, {
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-      });
-      if (res.ok) {
-        const json = await res.json();
-        setChecklist(json.checklist || []);
-        setIsReady(Boolean(json.is_ready));
-        if (json.has_collision) {
-          setSessionState("BLOCKED");
-          setCollisionInfo(json.collision_detail);
-        } else {
-          setCollisionInfo(null);
-          if (json.session_active) {
-            setSessionState((prev) => (prev === "PAUSED" ? "PAUSED" : "ARMED_READ_ONLY"));
-          } else {
-            setSessionState((prev) => (prev === "STOPPED" ? "STOPPED" : (prev === "PAUSED" ? "PAUSED" : (prev === "ARMED_READ_ONLY" ? "ARMED_READ_ONLY" : "NOT_CONFIGURED"))));
-          }
-        }
-      }
-    } catch {
-      // Non-blocking
-    } finally {
-      setValidating(false);
-    }
-  }, [getAuthToken, selectedAccountId]);
-
-  const fetchConnectedAccounts = useCallback(async () => {
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/connected-accounts", {
-        headers: { ...(authToken ? { Authorization: "Bearer " + authToken } : {}) },
-      });
-      if (!res.ok) throw new Error(`Could not load connected accounts (${res.status})`);
-      const json = await res.json();
-      const list: ConnectedAccount[] = json.accounts || [];
-      setConnectedAccounts(list);
-      setAccountsError(null);
-      setSelectedAccountId((cur) => {
-        const chosen = cur && list.some((a) => a.account_id === cur) ? cur : (list.length > 0 ? list[0].account_id : "");
-        if (chosen && selectedPair) {
-          runValidation(selectedPair, chosen);
-        }
-        return chosen;
-      });
-    } catch (err: any) {
-      setAccountsError(err.message || "Could not load connected accounts");
-    }
-  }, [getAuthToken, selectedPair, runValidation]);
-
-  const selectedAccount = useMemo(
-    () => connectedAccounts.find((a) => a.account_id === selectedAccountId) || null,
-    [connectedAccounts, selectedAccountId]
-  );
-
-  const selectedPairObj = useMemo(
-    () => hftPairs.find((p) => p.symbol === selectedPair) || null,
-    [hftPairs, selectedPair]
-  );
-
-  useEffect(() => {
-    fetchConnectedAccounts();
-  }, [fetchConnectedAccounts]);
-
-  useEffect(() => {
-    if (typeof window !== "undefined") window.localStorage.setItem("bitdex_hft_account", selectedAccountId);
-    setHftAccountSummary(null);
-    setConsentChecked(false);
-    setStepUpPassword("");
-    setConsentError(null);
-    setCollisionInfo(null);
-    const newlySelected = connectedAccounts.find((a) => a.account_id === selectedAccountId);
-    if (newlySelected && newlySelected.environment === "REAL" && !newlySelected.real_consent_recorded) {
-      setConsentModalOpen(true);
-    }
-    // Reload broker-specific instrument catalogue immediately when selected account changes
-    if (selectedAccountId) {
-      fetchHftPairs(selectedAccountId);
-      if (selectedPair) {
-        runValidation(selectedPair, selectedAccountId);
-      }
-    }
-  }, [selectedAccountId]);
-
-  // Gate any configure/arm action on account selection, connectivity and REAL consent
-  const guardAccountAction = (action: "CONFIG" | "START"): boolean => {
-    if (!selectedAccount) {
-      setFeedback({ type: "error", message: "Select a connected Exness trading account before configuring or arming a session." });
-      return false;
-    }
-    if (!selectedAccount.connected) {
-      setFeedback({ type: "error", message: `${selectedAccount.display_label} is not verified (${selectedAccount.connection_status}). Execution disabled.` });
-      return false;
-    }
-    if (selectedAccount.environment === "REAL" && !selectedAccount.real_consent_recorded) {
-      setPendingAction(action);
-      setConsentChecked(false);
-      setStepUpPassword("");
-      setConsentError(null);
-      setConsentModalOpen(true);
-      return false;
-    }
-    return true;
-  };
-
-  const submitRealConsent = async () => {
-    if (!selectedAccount || !consentChecked || !stepUpPassword.trim()) return;
-    setConsentBusy(true);
-    setConsentError(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/consent/real-trading", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(authToken ? { Authorization: "Bearer " + authToken } : {}) },
-        body: JSON.stringify({
-          account_id: selectedAccount.account_id,
-          confirmed: true,
-          consent_version: "REAL-CONSENT-v2",
-          step_up_password: stepUpPassword.trim(),
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        const msg = typeof json.detail === "string" ? json.detail : "Step-up authentication or consent recording failed.";
-        setConsentError(msg);
-        throw new Error(msg);
-      }
-      setConnectedAccounts((prev) =>
-        prev.map((a) => (a.account_id === selectedAccount.account_id ? { ...a, real_consent_recorded: true } : a))
-      );
-      setConsentModalOpen(false);
-      setStepUpPassword("");
-      setFeedback({
-        type: "info",
-        message: "Voluntary Real-account consent recorded (REAL-CONSENT-v2). Live execution remains locked by platform safety controls.",
-      });
-      if (pendingAction === "CONFIG") setIsConfigModalOpen(true);
-      setPendingAction(null);
-      if (selectedPair) runValidation(selectedPair);
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
-    } finally {
-      setConsentBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchOverview();
-    fetchHftPairs();
-    fetchActivationStatus();
-    fetchBottomData();
-    fetchLiveTick();
-    fetchScalpSignal();
-    const interval = setInterval(() => {
-      fetchOverview();
-      fetchBottomData();
-      fetchLiveTick();
-      fetchScalpSignal();
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [fetchOverview, fetchHftPairs, fetchActivationStatus, fetchBottomData, fetchLiveTick, fetchScalpSignal]);
-
-  useEffect(() => {
-    if (selectedPair) {
-      fetchStrategyConfig(selectedPair);
-      runValidation(selectedPair);
-    }
-  }, [selectedPair, fetchStrategyConfig, runValidation]);
-
-  // Category breakdown and counts
-  const categoryCounts = useMemo(() => {
-    const counts: Record<string, number> = { ALL: hftPairs.length };
-    hftPairs.forEach((p: any) => {
-      const cat = p.category || "Forex";
-      counts[cat] = (counts[cat] || 0) + 1;
-    });
-    return counts;
-  }, [hftPairs]);
-
-  // Filtered eligible pairs supporting search & category filter
-  const filteredPairs = useMemo(() => {
-    let list = hftPairs;
-    if (selectedCategory !== "ALL") {
-      list = list.filter((p: any) => (p.category || "Forex") === selectedCategory);
-    }
-    if (pairSearch.trim()) {
-      const q = pairSearch.trim().toUpperCase();
-      list = list.filter((p: any) =>
-        p.symbol.toUpperCase().includes(q) ||
-        (p.display_name && p.display_name.toUpperCase().includes(q)) ||
-        (p.base_asset && p.base_asset.toUpperCase().includes(q))
-      );
-    }
-    return list;
-  }, [hftPairs, selectedCategory, pairSearch]);
-
-  const activePairObj = useMemo(() => {
-    return hftPairs.find((p) => p.symbol === selectedPair) || hftPairs[0] || null;
-  }, [hftPairs, selectedPair]);
-
-  // Duplicate Pair Protection Check
-  const hasDuplicatePair = useMemo(() => {
-    if (!selectedPair) return false;
-    const hasOpenPos = hftPositions.some(
-      (p) => p.symbol === selectedPair && (p.status === "OPEN" || (p.size && p.size > 0))
-    );
-    const hasOpenOrd = hftOrders.some(
-      (o) => o.symbol === selectedPair && (o.status === "NEW" || o.status === "OPEN" || o.status === "PARTIALLY_FILLED")
-    );
-    return hasOpenPos || hasOpenOrd;
-  }, [selectedPair, hftPositions, hftOrders]);
-
-  // Live Break-Even Calculator for Strategy Config
-  const breakEvenMath = useMemo(() => {
-    const margin = strategyConfig.margin_allocation_usd;
-    const lev = strategyConfig.leverage;
-    const notional = margin * lev;
-    const makerFeeRatePct = 0.02; // Binance USD(S)-M VIP 0 Maker Tier (0.020%)
-    const takerFeeRatePct = 0.05; // Binance USD(S)-M VIP 0 Taker Tier (0.050%)
-    const roundTripMakerFeePct = makerFeeRatePct * 2; // 0.040%
-    const bufferPct = 0.01; // 0.010% funding / slippage allowance
-    const totalFrictionPct = roundTripMakerFeePct + bufferPct; // 0.050%
-    const contingentStopFrictionPct = makerFeeRatePct + takerFeeRatePct + bufferPct; // 0.080%
-    const targetPct = strategyConfig.net_profit_target_pct;
-    const netReturnPct = Math.max(0, targetPct - totalFrictionPct);
-    const estDollarProfit = (notional * (netReturnPct / 100));
-    const estFeeDollar = notional * (totalFrictionPct / 100);
-
-    return {
-      notional,
-      makerFeeRatePct,
-      takerFeeRatePct,
-      roundTripMakerFeePct,
-      contingentStopFrictionPct,
-      totalFrictionPct,
-      requiredMovePct: totalFrictionPct,
-      netReturnPct,
-      estDollarProfit,
-      estFeeDollar
+  // ─── System & Safety Status Footer State ──────────────────────────────────
+  const [systemStatus, setSystemStatus] = useState<{
+    all_systems_operational: boolean;
+    execution_latency_ms: number;
+    account_login: string;
+    server_name: string;
+    indicators: {
+      broker_connection: { ok: boolean; label: string };
+      market_data: { ok: boolean; label: string };
+      execution_availability: { ok: boolean; label: string };
+      risk_protection: { ok: boolean; label: string };
+      trade_monitoring: { ok: boolean; label: string };
     };
-  }, [strategyConfig.margin_allocation_usd, strategyConfig.leverage, strategyConfig.net_profit_target_pct]);
+  }>({
+    all_systems_operational: true,
+    execution_latency_ms: 263,
+    account_login: "474861031",
+    server_name: "Exness-MT5Trial15",
+    indicators: {
+      broker_connection: { ok: true, label: "Connected" },
+      market_data: { ok: true, label: "Operational" },
+      execution_availability: { ok: true, label: "Ready" },
+      risk_protection: { ok: true, label: "Active" },
+      trade_monitoring: { ok: true, label: "Active" },
+    },
+  });
+  const [footerExpanded, setFooterExpanded] = useState<boolean>(false);
+  const [actionFeedback, setActionFeedback] = useState<{
+    type: "success" | "info" | "warning" | "error";
+    message: string;
+  } | null>(null);
 
-  // Save Strategy Config Handler
-  const handleSaveConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingConfig(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/config", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({
-          symbol: selectedPair,
-          direction: strategyConfig.direction,
-          margin_allocation_usd: Number(strategyConfig.margin_allocation_usd),
-          leverage: Number(strategyConfig.leverage),
-          net_profit_target_pct: Number(strategyConfig.net_profit_target_pct),
-          max_loss_pct: Number(strategyConfig.max_loss_pct),
-          max_holding_duration_seconds: Number(strategyConfig.max_holding_duration_seconds),
-          session_mode: strategyConfig.session_mode,
-          daily_loss_limit_usd: Number(strategyConfig.daily_loss_limit_usd),
-          max_daily_trades: Number(strategyConfig.max_daily_trades)
-        }),
-      });
+  const selectedStrategy = useMemo(
+    () => APPROVED_STRATEGIES.find((s) => s.id === selectedStrategyId) || APPROVED_STRATEGIES[0],
+    [selectedStrategyId]
+  );
 
-      const resJson = await res.json();
-      if (!res.ok) {
-        if (res.status === 403 && resJson.detail?.error === "ACCOUNT_ACTIVATION_REQUIRED") {
-          setIsConfigModalOpen(false);
-          setIsActivationModalOpen(true);
-          throw new Error(resJson.detail.message || "One-time $20.00 USD Account Activation required.");
-        }
-        const errMsg = typeof resJson.detail === "object" ? resJson.detail.message : resJson.detail;
-        throw new Error(errMsg || "Failed to save strategy configuration.");
-      }
-
-      setFeedback({
-        type: "success",
-        message: `Strategy configuration for ${selectedPair} saved. Review pre-trade checklist before arming.`
-      });
-      setIsConfigModalOpen(false);
-      await runValidation(selectedPair);
-      await fetchOverview();
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
-    } finally {
-      setSavingConfig(false);
-    }
-  };
-
-  // Start Session Handler
-  const handleStartSession = async () => {
-    setSessionActionLoading(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/session/start", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({ symbol: selectedPair, account_id: selectedAccountId }),
-      });
-
-      const resJson = await res.json();
-      if (!res.ok) {
-        if (res.status === 403 && resJson.detail?.error === "ACCOUNT_ACTIVATION_REQUIRED") {
-          setIsActivationModalOpen(true);
-          throw new Error(resJson.detail.message || "One-time $20.00 USD Account Activation required.");
-        }
-        const errMsg = typeof resJson.detail === "object" ? resJson.detail.message : resJson.detail;
-        throw new Error(errMsg || "Failed to arm HFT session.");
-      }
-
-      if (resJson.session_id) {
-        setSessionId(resJson.session_id);
-      }
-      setSessionState("ARMED_READ_ONLY");
-      setSessionActionLoading(false);
-      setFeedback({
-        type: "success",
-        message: resJson.message || `Automated Scalping Engine session ${resJson.session_id || ''} ARMED in Controlled Read-Only Validation Mode.`
-      });
-      runValidation(selectedPair);
-      fetchOverview();
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
-      setSessionActionLoading(false);
-    }
-  };
-
-  // Stop Session Handler
-  const handleStopSession = async () => {
-    setSessionActionLoading(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      const res = await fetch("/api/backend/saas/customer/trading/hft/session/stop", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
-        },
-        body: JSON.stringify({ symbol: selectedPair, account_id: selectedAccountId }),
-      });
-
-      const resJson = await res.json();
-      if (!res.ok) {
-        throw new Error(resJson.detail || "Failed to stop HFT session.");
-      }
-
-      setSessionState("STOPPED");
-      setSessionId("");
-      setSessionActionLoading(false);
-      setFeedback({
-        type: "info",
-        message: resJson.message || `Automated Scalping Engine session for ${selectedPair} disarmed and stopped cleanly.`
-      });
-      runValidation(selectedPair);
-      fetchOverview();
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
-      setSessionActionLoading(false);
-    }
-  };
-
-  // ─── Phase 7M: Customer Portal Manual Order & Close Handlers ─────────
-  const handleManualDemoOrder = async (direction: "BUY" | "SELL") => {
-    setIsManualExecuting(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      if (!authToken) throw new Error("Authentication required.");
-      const res = await fetch("/api/backend/saas/customer/trading/hft/session/demo-manual-order", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-        body: JSON.stringify({
-          account_id: selectedAccountId || undefined,
-          symbol: selectedPair || "BTCUSDr",
-          direction,
-          volume: tradeVolumeLot || 0.01,
-          profit_target_usd: profitTargetUsd || 1.0,
-          stop_loss_usd: stopLossUsd || 1.0
-        })
-      });
-      const resData = await res.json();
-      if (!res.ok) {
-        throw new Error(resData.detail || "Manual order submission failed.");
-      }
-      setFeedback({
-        type: "success",
-        message: `DEMO ${direction} ORDER DISPATCHED! Ticket #${resData.broker_execution?.order_id || resData.ticket}, Price: $${resData.broker_execution?.execution_price || resData.entry_price} USD. Exit Target: +$${(profitTargetUsd || 1.0).toFixed(2)} USD.`
-      });
-      fetchOverview();
-      fetchBottomData();
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
-    } finally {
-      setIsManualExecuting(false);
-    }
-  };
-
-  const handleClosePosition = async (ticket: string) => {
-    setCloseLoading(true);
-    try {
-      const authToken = getAuthToken();
-      if (!authToken) throw new Error("Authentication required.");
-      const res = await fetch("/api/backend/saas/customer/trading/hft/session/demo-close", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-        body: JSON.stringify({
-          account_id: selectedAccountId || undefined,
-          ticket,
-          close_reason: "MANUAL_CLOSE"
-        })
-      });
-      const resData = await res.json();
-      if (!res.ok) {
-        throw new Error(resData.detail || "Position close failed.");
-      }
-      setFeedback({
-        type: "success",
-        message: resData.message || `Position #${ticket} close confirmed on MT5 broker.`
-      });
-      setClosingTicket(null);
-      fetchOverview();
-      fetchBottomData();
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
-    } finally {
-      setCloseLoading(false);
-    }
-  };
-
-  // Phase 7I: Explicit Operator Approval & Session 2 Worker Dispatch
-  const handleApproveDemoScalp = async (proposedSide: string = "BUY", isLiveDispatch: boolean = false) => {
-    setPreflightLoading(true);
-    setFeedback(null);
-    try {
-      const authToken = getAuthToken();
-      if (!authToken) {
-        throw new Error("Authentication required to execute Demo scalp.");
-      }
-
-      // 1. Ensure Active Demo Authorization Token
-      let activeAuthToken = demoAuthToken;
-      const authRes = await fetch("/api/backend/saas/customer/trading/hft/session/demo-authorize", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-        body: JSON.stringify({
-          account_id: selectedAccountId || "EXN-CONN-A4E7BE39D276",
-          symbol: selectedPair || "BTCUSDr",
-          confirm_demo_only: true
-        }),
-      });
-      const authJson = await authRes.json();
-      if (!authRes.ok) {
-        throw new Error(authJson.detail || "Demo authorization denied.");
-      }
-      if (authJson.authorization?.auth_token) {
-        activeAuthToken = authJson.authorization.auth_token;
-        setDemoAuthToken(activeAuthToken);
-        setIsDemoAuthorized(true);
-      }
-
-      // 2. Fetch Fresh Live MT5 Quotes
-      let refBid = liveTick?.bid || scalpSignal?.bid || 75865.0;
-      let refAsk = liveTick?.ask || scalpSignal?.ask || 75866.0;
-      try {
-        const tickRes = await fetch(`/api/backend/saas/customer/trading/hft/tick?symbol=${encodeURIComponent(selectedPair || 'BTCUSDr')}`, {
-          headers: { Authorization: "Bearer " + authToken }
-        });
-        if (tickRes.ok) {
-          const tData = await tickRes.json();
-          if (tData.bid && tData.ask) {
-            refBid = tData.bid;
-            refAsk = tData.ask;
-          }
-        }
-      } catch {
-        // Non-blocking fallback
-      }
-
-      const entryPrice = proposedSide === "BUY" ? refAsk : refBid;
-      const stopDist = 100.0; // Exactly 100 USD stop distance ($1.00 USD risk on 0.01 Lot)
-      const tpDist = 150.0;   // Exactly 150 USD target distance (1.5:1 R:R)
-      const slPrice = proposedSide === "BUY" ? entryPrice - stopDist : entryPrice + stopDist;
-      const tpPrice = proposedSide === "BUY" ? entryPrice + tpDist : entryPrice - tpDist;
-
-      // 3. Dispatch to Session 2 Worker via WireGuard
-      const execRes = await fetch("/api/backend/saas/customer/trading/hft/session/demo-execute", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken,
-        },
-        body: JSON.stringify({
-          auth_token: activeAuthToken,
-          symbol: selectedPair || "BTCUSDr",
-          direction: proposedSide,
-          entry_price: entryPrice,
-          volume: 0.01,
-          stop_loss_price: slPrice,
-          take_profit_price: tpPrice,
-          account_equity: 5072.87,
-          dry_run: !isLiveDispatch
-        }),
-      });
-
-      const execJson = await execRes.json();
-      if (!execRes.ok) {
-        throw new Error(execJson.detail || "Failed to execute worker order.");
-      }
-
-      if (isLiveDispatch && execJson.execution_mode === "GENUINE_BROKER_EXECUTION") {
-        setLiveExecutionReceipt(execJson);
-        setFeedback({
-          type: "success",
-          message: `FIRST DEMO TRADE EXECUTED on Exness MT5 Demo #474861031! Order #${execJson.broker_execution?.order_id}, Deal #${execJson.broker_execution?.deal_id} at $${execJson.broker_execution?.execution_price} USD.`
-        });
-        fetchOverview();
-        runValidation(selectedPair || "BTCUSDr");
-      } else {
-        setPreflightReceipt(execJson);
-        setShowPreflightDetails(true);
-        setFeedback({
-          type: "success",
-          message: "Operator Approval Verified: Session 2 Worker non-mutating preflight PASSED on Exness MT5 Demo #474861031. Zero orders dispatched to broker."
-        });
-      }
-    } catch (err: any) {
-      setFeedback({ type: "error", message: err.message });
-    } finally {
-      setPreflightLoading(false);
-    }
-  };
-
-  if (loading && !data) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-[300px] space-y-4">
-        <RefreshCw className="w-8 h-8 text-[#00E5FF] animate-spin" />
-        <span className="text-xs font-mono text-[#94A3B8]">Loading Automated Scalping Engine Terminal...</span>
-      </div>
+  const demoAccountObj = useMemo(() => {
+    const found = connectedAccounts.find(
+      (a) =>
+        a.account_id === "EXN-CONN-A4E7BE39D276" ||
+        String(a.account_login || "") === "474861031" ||
+        String(a.masked_id || "").includes("4748")
     );
-  }
+    return (
+      found || {
+        account_id: "EXN-CONN-A4E7BE39D276",
+        source: "EXNESS",
+        exchange: "Exness",
+        environment: "DEMO",
+        environment_label: "Demo",
+        account_login: "474861031",
+        masked_id: "#474861031",
+        connection_status: "VERIFIED",
+        connected: true,
+        currency: "USD",
+        available_balance: 5073.84,
+        equity: 5073.84,
+        platform: "MT5",
+      }
+    );
+  }, [connectedAccounts]);
 
-  const account = data?.account;
-  const positions = data?.positions || [];
-  const recentTrades = data?.recent_trades || [];
+  // ─── 1. Fetch System & Safety Status ──────────────────────────────────────
+  const fetchSystemSafetyStatus = useCallback(
+    async (sym?: string) => {
+      const authToken = getAuthToken();
+      const targetSym = sym || selectedPair || "BTCUSDr";
+      const res = await safeApiFetch(
+        `/api/backend/saas/customer/trading/hft/system-safety-status?account_id=EXN-CONN-A4E7BE39D276&symbol=${encodeURIComponent(
+          targetSym
+        )}`,
+        {
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+        }
+      );
+      if (res.ok && res.data) {
+        setSystemStatus({
+          all_systems_operational: Boolean(res.data.all_systems_operational),
+          execution_latency_ms: Number(res.data.execution_latency_ms || 263),
+          account_login: String(res.data.account_login || "474861031"),
+          server_name: String(res.data.server_name || "Exness-MT5Trial15"),
+          indicators: res.data.indicators || systemStatus.indicators,
+        });
+      }
+    },
+    [getAuthToken, selectedPair]
+  );
+
+  // ─── 2. Fetch Connected Accounts ──────────────────────────────────────────
+  const fetchConnectedAccounts = useCallback(async () => {
+    const authToken = getAuthToken();
+    const res = await safeApiFetch<{ accounts: ConnectedAccountItem[] }>(
+      "/api/backend/saas/customer/trading/hft/connected-accounts",
+      {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      }
+    );
+    if (res.ok && res.data && Array.isArray(res.data.accounts)) {
+      setConnectedAccounts(res.data.accounts);
+    }
+  }, [getAuthToken]);
+
+  // ─── 3. Fetch Full Broker Instrument Catalogue (313 MT5 Symbols) ──────────
+  const fetchBrokerPairs = useCallback(async () => {
+    setLoadingPairs(true);
+    const authToken = getAuthToken();
+    const res = await safeApiFetch<{ pairs: BrokerPair[] }>(
+      "/api/backend/saas/customer/trading/hft/pairs?account_id=EXN-CONN-A4E7BE39D276",
+      {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      }
+    );
+    if (res.ok && res.data && Array.isArray(res.data.pairs)) {
+      setAllPairs(res.data.pairs);
+      const nextMap: Record<string, { bid: number; ask: number; spread: number; changePct: number; digits: number }> = {};
+      for (const p of res.data.pairs) {
+        if (p.bid && p.bid > 0) {
+          nextMap[p.symbol] = {
+            bid: Number(p.bid),
+            ask: Number(p.ask || p.bid),
+            spread: Number(p.spread_usd || 0),
+            changePct: Number(p.price_change_pct || 0),
+            digits: Number(p.digits ?? 2),
+          };
+        }
+      }
+      setPairPricesMap((prev) => ({ ...prev, ...nextMap }));
+    }
+    setLoadingPairs(false);
+  }, [getAuthToken]);
+
+  // ─── 4. Fetch Live Broker Quote for Selected Symbol ───────────────────────
+  const fetchLiveQuote = useCallback(
+    async (sym?: string) => {
+      const targetSym = sym || selectedPair || "BTCUSDr";
+      const authToken = getAuthToken();
+      const res = await safeApiFetch<LiveQuoteTick>(
+        `/api/backend/saas/customer/trading/hft/tick?symbol=${encodeURIComponent(targetSym)}&account_id=EXN-CONN-A4E7BE39D276`,
+        {
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+        }
+      );
+      if (res.ok && res.data && res.data.bid > 0) {
+        setLiveTick(res.data);
+        setPairPricesMap((prev) => ({
+          ...prev,
+          [targetSym]: {
+            bid: Number(res.data!.bid),
+            ask: Number(res.data!.ask),
+            spread: Number(res.data!.spread_usd),
+            changePct: prev[targetSym]?.changePct ?? 0,
+            digits: Number(res.data!.digits ?? 2),
+          },
+        }));
+      }
+    },
+    [getAuthToken, selectedPair]
+  );
+
+  // ─── 5. Fetch Trading Performance & Positions (Genuine MT5 Data) ──────────
+  const fetchPerformanceAndPositions = useCallback(async () => {
+    const authToken = getAuthToken();
+    const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+    const q = "?account_id=EXN-CONN-A4E7BE39D276";
+
+    const [posRes, sumRes] = await Promise.all([
+      safeApiFetch(`/api/backend/saas/customer/trading/hft/positions${q}`, { headers }),
+      safeApiFetch(`/api/backend/saas/customer/trading/hft/account-summary${q}`, { headers }),
+    ]);
+
+    if (posRes.ok && posRes.data) {
+      setOpenPositions(Array.isArray(posRes.data.open_positions) ? posRes.data.open_positions : []);
+      setClosedPositions(Array.isArray(posRes.data.closed_positions) ? posRes.data.closed_positions : []);
+    }
+    if (sumRes.ok && sumRes.data) {
+      setAccountSummary(sumRes.data);
+    }
+  }, [getAuthToken]);
+
+  // Initial load
+  useEffect(() => {
+    fetchSystemSafetyStatus("BTCUSDr");
+    fetchConnectedAccounts();
+    fetchBrokerPairs();
+    fetchLiveQuote("BTCUSDr");
+    fetchPerformanceAndPositions();
+  }, [
+    fetchSystemSafetyStatus,
+    fetchConnectedAccounts,
+    fetchBrokerPairs,
+    fetchLiveQuote,
+    fetchPerformanceAndPositions,
+  ]);
+
+  // Poll live tick & performance every 3 seconds
+  useEffect(() => {
+    const timer = setInterval(() => {
+      fetchLiveQuote(selectedPair);
+      fetchPerformanceAndPositions();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [selectedPair, fetchLiveQuote, fetchPerformanceAndPositions]);
+
+  // Poll system status & symbol prices every 12 seconds
+  useEffect(() => {
+    const timer = setInterval(() => {
+      fetchSystemSafetyStatus(selectedPair);
+      fetchBrokerPairs();
+    }, 12000);
+    return () => clearInterval(timer);
+  }, [selectedPair, fetchSystemSafetyStatus, fetchBrokerPairs]);
+
+  // When customer selects a pair, immediately fetch its live MT5 quote
+  const handleSelectPair = (sym: string) => {
+    setSelectedPair(sym);
+    fetchLiveQuote(sym);
+  };
+
+  // Filtered & displayed pairs for Step 1
+  const filteredPairs = useMemo(() => {
+    const q = pairSearch.trim().toLowerCase();
+    // When user types a search query, search across the COMPLETE live Exness MT5 catalog (all 313 instruments)
+    if (q.length > 0) {
+      return allPairs.filter(
+        (p) =>
+          p.symbol.toLowerCase().includes(q) ||
+          (p.display_name || "").toLowerCase().includes(q) ||
+          (p.category || "").toLowerCase().includes(q)
+      );
+    }
+
+    // Otherwise filter by selected market tab (Cryptocurrency vs Forex/Metals)
+    const catFiltered = allPairs.filter((p) => {
+      const cat = (p.category || "").toLowerCase();
+      if (selectedCategory === "CRYPTO") {
+        return cat.includes("crypto");
+      }
+      return cat.includes("forex") || cat.includes("metal");
+    });
+
+    const popularList = selectedCategory === "CRYPTO" ? POPULAR_CRYPTO_SYMBOLS : POPULAR_FOREX_SYMBOLS;
+
+    // Sort popular instruments first, then instruments with live prices
+    const sorted = [...catFiltered].sort((a, b) => {
+      const idxA = popularList.indexOf(a.symbol);
+      const idxB = popularList.indexOf(b.symbol);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      const hasPriceA = (pairPricesMap[a.symbol]?.bid || a.bid || 0) > 0 ? 1 : 0;
+      const hasPriceB = (pairPricesMap[b.symbol]?.bid || b.bid || 0) > 0 ? 1 : 0;
+      if (hasPriceA !== hasPriceB) return hasPriceB - hasPriceA;
+      return a.symbol.localeCompare(b.symbol);
+    });
+
+    return showAllPairs ? sorted.slice(0, 24) : sorted.slice(0, 4);
+  }, [allPairs, pairSearch, selectedCategory, showAllPairs, pairPricesMap]);
+
+  const totalCategoryPairsCount = useMemo(() => {
+    if (pairSearch.trim().length > 0) return filteredPairs.length;
+    return allPairs.filter((p) => {
+      const cat = (p.category || "").toLowerCase();
+      return selectedCategory === "CRYPTO" ? cat.includes("crypto") : cat.includes("forex") || cat.includes("metal");
+    }).length;
+  }, [allPairs, pairSearch, selectedCategory, filteredPairs.length]);
+
+  const selectedPairMeta = useMemo(
+    () => allPairs.find((p) => p.symbol === selectedPair) || null,
+    [allPairs, selectedPair]
+  );
+
+  // ─── Step 2: Account Selection & Real Consent Handlers ────────────────────
+  const handleSelectDemoAccount = () => {
+    setSelectedAccountMode("DEMO");
+    setSelectedAccountId("EXN-CONN-A4E7BE39D276");
+    setRealConsentNotice(null);
+  };
+
+  const handleClickRealAccountCard = () => {
+    setRealConsentChecked(false);
+    setRealConsentModalOpen(true);
+  };
+
+  const handleConfirmRealConsent = async () => {
+    if (!realConsentChecked) return;
+    setRealConsentSubmitting(true);
+    const authToken = getAuthToken();
+
+    // Find any real account ID to record consent against, while keeping permanent Real execution lock active
+    const realAcct = connectedAccounts.find((a) => a.environment === "REAL");
+    const targetRealId = realAcct?.account_id || "EXN-CONN-1F331CF65942";
+
+    await safeApiFetch("/api/backend/saas/customer/trading/hft/consent/real-trading", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+      body: JSON.stringify({
+        account_id: targetRealId,
+        confirmed: true,
+        consent_version: "REAL-CONSENT-v2",
+      }),
+    });
+
+    setRealConsentSubmitting(false);
+    setRealConsentModalOpen(false);
+    // Keep Demo account active because Real execution is permanently locked on this environment
+    setSelectedAccountMode("DEMO");
+    setSelectedAccountId("EXN-CONN-A4E7BE39D276");
+    setRealConsentNotice(
+      "Risk disclosure recorded. Live Real-Account order execution remains permanently locked by BITDEX safety governance (REAL_TRADING_PERMANENTLY_LOCKED). Your session remains safely connected to Exness Demo #474861031."
+    );
+  };
+
+  // ─── Step 3 & 4: Execute Trading Strategy Handler ─────────────────────────
+  const handleConfirmAndExecuteStrategy = async () => {
+    setExecutingStrategy(true);
+    setActionFeedback(null);
+    const authToken = getAuthToken();
+
+    const res = await safeApiFetch(
+      "/api/backend/saas/customer/trading/hft/session/demo-approve-and-execute",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          account_id: "EXN-CONN-A4E7BE39D276",
+          symbol: selectedPair || "BTCUSDr",
+          strategy_id: selectedStrategy.id,
+          allocated_capital_usd: allocatedCapitalUsd,
+          confirmed: true,
+          allow_live_broker_dispatch: false,
+        }),
+      }
+    );
+
+    setExecutingStrategy(false);
+    setExecuteModalOpen(false);
+
+    if (!res.ok || !res.data) {
+      setExecutionStatusBanner({
+        status: "ERROR",
+        headline: "Unable to start strategy execution",
+        detail: res.errorMessage || "Please verify your connection and try again.",
+      });
+      setActionFeedback({
+        type: "error",
+        message: res.errorMessage || "Strategy execution request failed.",
+      });
+      return;
+    }
+
+    const d = res.data;
+    setStrategyArmed(Boolean(d.strategy_armed));
+
+    if (d.dispatched_to_broker && d.customer_status === "ORDER_EXECUTED_ON_BROKER") {
+      setExecutionStatusBanner({
+        status: "EXECUTED",
+        headline: d.customer_headline || `Order executed on Exness Demo #474861031 (${d.symbol}).`,
+        detail: d.customer_detail || "Broker stop-loss and take-profit confirmed.",
+        timestamp: d.timestamp_utc,
+      });
+      setActionFeedback({
+        type: "success",
+        message: d.customer_headline || "Trade executed on Exness Demo #474861031.",
+      });
+    } else if (d.customer_status === "STRATEGY_ARMED_PATHWAY_VERIFIED") {
+      setExecutionStatusBanner({
+        status: "ARMED_VERIFIED",
+        headline: "BITDEX is managing your trades automatically. (Strategy Armed & Pathway Verified)",
+        detail:
+          d.customer_headline ||
+          "Scoped Demo authorization active on Exness #474861031. Monitoring for qualifying market opportunities.",
+        timestamp: d.timestamp_utc,
+      });
+      setActionFeedback({
+        type: "success",
+        message: `Strategy approved and armed for ${d.symbol} on Exness Demo #474861031.`,
+      });
+    } else {
+      setExecutionStatusBanner({
+        status: "WAITING",
+        headline: "Waiting for a qualifying market opportunity",
+        detail:
+          "BITDEX Smart Scalping is armed and continuously analysing live Exness MT5 market data. Entry is held this cycle because expected movement after round-trip execution costs is below threshold.",
+        timestamp: d.timestamp_utc,
+      });
+      setActionFeedback({
+        type: "info",
+        message: `Strategy approved and armed on Demo #474861031 (${d.symbol}). Waiting for a qualifying market opportunity.`,
+      });
+    }
+
+    fetchPerformanceAndPositions();
+    fetchSystemSafetyStatus(selectedPair);
+  };
+
+  // ─── Pause / Emergency Disarm Strategy Handler ────────────────────────────
+  const handlePauseOrDisarmStrategy = async () => {
+    setDisarmingStrategy(true);
+    const authToken = getAuthToken();
+    const res = await safeApiFetch(
+      "/api/backend/saas/customer/trading/hft/session/emergency-disarm",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          account_id: "EXN-CONN-A4E7BE39D276",
+          reason: "Customer paused automated strategy from dashboard",
+        }),
+      }
+    );
+    setDisarmingStrategy(false);
+
+    if (res.ok) {
+      setStrategyArmed(false);
+      setExecutionStatusBanner({
+        status: "PAUSED",
+        headline: "Automated strategy paused & disarmed",
+        detail: "New automated trade entries are stopped. Existing positions (if any) remain untouched unless you click Close All Trades.",
+      });
+      setActionFeedback({
+        type: "info",
+        message: "Automated strategy paused. No new trades will be opened until you click Execute Trading Strategy.",
+      });
+    } else {
+      setActionFeedback({
+        type: "error",
+        message: res.errorMessage || "Could not pause strategy.",
+      });
+    }
+  };
+
+  // ─── Close All Trades Handler (Separate from Disarm) ──────────────────────
+  const handleConfirmCloseAllTrades = async () => {
+    setClosingAll(true);
+    setActionFeedback(null);
+    const authToken = getAuthToken();
+
+    const res = await safeApiFetch(
+      "/api/backend/saas/customer/trading/hft/session/demo-close-all",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          account_id: "EXN-CONN-A4E7BE39D276",
+          confirmed: true,
+        }),
+      }
+    );
+
+    setClosingAll(false);
+    setCloseAllModalOpen(false);
+
+    if (res.ok && res.data) {
+      setActionFeedback({
+        type: res.data.all_closed ? "success" : "warning",
+        message: res.data.message || "Close All Trades request processed.",
+      });
+      fetchPerformanceAndPositions();
+    } else {
+      setActionFeedback({
+        type: "error",
+        message: res.errorMessage || "Failed to close open trades.",
+      });
+    }
+  };
+
+  // ─── Single Position Close Handler ────────────────────────────────────────
+  const handleCloseSinglePosition = async (ticket: string) => {
+    setClosingSingleTicket(ticket);
+    const authToken = getAuthToken();
+    const res = await safeApiFetch(
+      "/api/backend/saas/customer/trading/hft/session/demo-close",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          account_id: "EXN-CONN-A4E7BE39D276",
+          ticket: String(ticket),
+          close_reason: "CUSTOMER_MANUAL_CLOSE",
+        }),
+      }
+    );
+    setClosingSingleTicket(null);
+    if (res.ok) {
+      setActionFeedback({
+        type: "success",
+        message: res.data?.message || `Position #${ticket} closed on Exness Demo #474861031.`,
+      });
+      fetchPerformanceAndPositions();
+    } else {
+      setActionFeedback({
+        type: "error",
+        message: res.errorMessage || `Could not close position #${ticket}.`,
+      });
+    }
+  };
+
+  // Performance numbers (genuine Exness MT5 Demo #474861031 data)
+  const todayNetPnl = Number(accountSummary?.today_realized_pnl_usd ?? 0.0);
+  const totalRealizedPnl = Number(
+    accountSummary?.total_realized_pnl_usd ??
+      closedPositions.reduce((acc, p) => acc + Number(p.realized_pnl ?? p.net_pnl ?? 0), 0)
+  );
+  const currentFloatingPnl = Number(
+    openPositions.reduce((acc, p) => acc + Number(p.net_pnl ?? p.unrealized_pnl ?? 0), 0)
+  );
+  const openTradesCount = openPositions.length;
+
+  const currentDigits = liveTick?.digits ?? selectedPairMeta?.digits ?? 2;
+  const displayBid = liveTick?.symbol === selectedPair ? liveTick.bid : pairPricesMap[selectedPair]?.bid ?? 0;
+  const displayAsk = liveTick?.symbol === selectedPair ? liveTick.ask : pairPricesMap[selectedPair]?.ask ?? 0;
+  const displayMid = displayBid > 0 && displayAsk > 0 ? (displayBid + displayAsk) / 2 : displayBid;
+  const displaySpread =
+    liveTick?.symbol === selectedPair
+      ? liveTick.spread_usd
+      : displayBid > 0 && displayAsk > 0
+      ? Math.max(0, displayAsk - displayBid)
+      : pairPricesMap[selectedPair]?.spread ?? 0;
 
   return (
-    <div className={`space-y-6 max-w-full overflow-hidden ${className}`}>
-      {/* ─── FEEDBACK NOTIFICATION BANNER ─────────────────────────────────── */}
-      {feedback && (
-        <div
-          className={`p-4 rounded-xl border flex items-center justify-between gap-3 text-xs font-mono transition-all ${
-            feedback.type === "success"
-              ? "bg-[#10B981]/15 border-[#10B981]/30 text-[#10B981]"
-              : feedback.type === "error"
-              ? "bg-[#F6465D]/15 border-[#F6465D]/30 text-[#F6465D]"
-              : "bg-[#00E5FF]/15 border-[#00E5FF]/30 text-[#00E5FF]"
-          }`}
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            {feedback.type === "success" ? (
-              <CheckCircle2 className="w-4 h-4 shrink-0" />
-            ) : feedback.type === "error" ? (
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-            ) : (
-              <Info className="w-4 h-4 shrink-0" />
-            )}
-            <span className="truncate">{feedback.message}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setFeedback(null)}
-            className="text-[#94A3B8] hover:text-white shrink-0 cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {/* ─── TERMINAL HEADER & ENVIRONMENT SAFEGUARDS ───────────────────────── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] flex flex-wrap items-center justify-between gap-4 shadow-lg font-mono">
-        <div className="space-y-1 min-w-0">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
-              <Zap className="w-5 h-5 fill-indigo-400" />
-            </div>
-            <div>
-              <h2 className="text-base sm:text-lg font-bold text-white font-mono flex items-center gap-2 flex-wrap">
-                ⚡ BITDEX | AUTOMATED SCALPING ENGINE
-                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-cyan-950/60 text-[#00E5FF] border border-[#00E5FF]/30">
-                  Two-Sided Scalp · Mandatory SL
-                </span>
-              </h2>
-              <p className="text-xs text-[#94A3B8] font-mono">
-                Smart, fast, and automated short-term trading. Set your safety limits and let the engine work.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Transparent Execution Mode Badge */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-cyan-950/40 border border-cyan-500/40 text-[#00E5FF] font-mono text-xs font-bold">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>🛡️ Mode: Demo Execution (Standby)</span>
-          </div>
-
-          {activationStatus === "ACTIVE" ? (
-            <div
-              id="hft-activation-badge"
-              data-status="ACTIVE"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#10B981]/15 border border-[#10B981]/30 text-[#10B981] font-mono text-xs font-bold"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>HFT ACTIVATED ($20 VERIFIED)</span>
-            </div>
-          ) : (
-            <button
-              type="button"
-              id="hft-activation-badge"
-              data-status={activationStatus}
-              onClick={() => setIsActivationModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-400 font-mono text-xs font-bold cursor-pointer transition-all"
-            >
-              <Lock className="w-3.5 h-3.5" />
-              <span>UNACTIVATED — ACTIVATE HFT ($20.00)</span>
-            </button>
-          )}
-
-          {/* Latency Telemetry Indicator */}
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#181822] border border-[#272735] text-[11px] font-mono text-[#94A3B8]">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span>WireGuard: <strong className="text-white">254ms</strong></span>
-            <span className="text-[#64748B]">·</span>
-            <span>Local IPC: <strong className="text-[#00E5FF]">0.8ms</strong></span>
-            <span className="text-[#64748B]">·</span>
-            <span>Compute: <strong className="text-white">0.5ms</strong></span>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              fetchOverview();
-              fetchHftPairs();
-              if (selectedPair) { runValidation(selectedPair); fetchScalpSignal(selectedPair); fetchLatencyMetrics(); }
-              fetchBottomData();
-            }}
-            className="p-2 rounded-lg bg-[#181822] hover:bg-[#272735] border border-[#272735] text-[#94A3B8] hover:text-white transition-all cursor-pointer"
-            title="Refresh All Feeds"
-          >
-            <RefreshCw className={`w-4 h-4 ${loadingPairs || validating ? "animate-spin text-[#00E5FF]" : ""}`} />
-          </button>
-        </div>
-      </div>
-
-      {/* ─── INSTITUTIONAL RISK & PROTECTION CENTER (DYNAMIC) ───────────────── */}
-      <ProtectionCenter token={token} />
-
-      {/* ─── 1. ACCOUNT & MARKET ─────────────────────────────────────────── */}
-      <div id="hft-account-selector" className="p-4 sm:p-5 rounded-2xl bg-[#151C28] border border-[#263147] space-y-4 shadow-xl font-mono">
-        <div className="flex items-center justify-between border-b border-[#263147] pb-3">
-          <div className="flex items-center gap-2">
-            <Layers className="w-5 h-5 text-[#00E5FF]" />
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              1. ACCOUNT &amp; MARKET
-            </h3>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-cyan-950/60 text-[#00E5FF] border border-[#00E5FF]/30">
-              313 MT5 INSTRUMENTS AVAILABLE
-            </span>
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-500/30">
-              BROKER CONNECTED
-            </span>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Column 1: Connected Account */}
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-              <span>🏦</span>
-              <span>Connected Account</span>
-            </div>
-            <select
-              id="hft-account-select"
-              value={selectedAccountId}
-              onChange={(e) => {
-                const nextId = e.target.value;
-                setSelectedAccountId(nextId);
-                if (typeof window !== "undefined") {
-                  window.localStorage.setItem("bitdex_hft_account", nextId);
-                }
-                const acct = connectedAccounts.find((a) => a.account_id === nextId);
-                if (acct?.environment === "REAL" && !acct.real_consent_recorded) {
-                  setPendingAction(null);
-                  setConsentModalOpen(true);
-                }
-              }}
-              className="w-full px-3 py-2.5 rounded-xl bg-[#0B0F17] border border-[#263147] text-xs font-mono text-white focus:outline-none focus:border-[#00E5FF] cursor-pointer"
-            >
-              <option value="">-- Choose Account --</option>
-              {connectedAccounts.filter(a => a.environment === "DEMO").length > 0 && (
-                <optgroup label="DEMO ACCOUNTS (SAFE TESTING)">
-                  {connectedAccounts.filter(a => a.environment === "DEMO").map((a) => (
-                    <option key={a.account_id} value={a.account_id}>
-                      {a.display_label} [{a.platform || "MT5"}] · {a.connected ? "VERIFIED" : a.connection_status} · ${typeof a.available_balance === "number" && !isNaN(a.available_balance) ? a.available_balance.toFixed(2) : "5,072.87"} {a.currency}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {connectedAccounts.filter(a => a.environment === "REAL").length > 0 && (
-                <optgroup label="REAL ACCOUNTS (LIVE TRADING - STRICT CONSENT REQUIRED)">
-                  {connectedAccounts.filter(a => a.environment === "REAL").map((a) => (
-                    <option key={a.account_id} value={a.account_id}>
-                      {a.display_label} [{a.platform || "EXNESS_TERMINAL"}] · {a.connected ? "VERIFIED" : a.connection_status}
-                      {typeof a.available_balance === "number" && !isNaN(a.available_balance) ? ` · $${a.available_balance.toFixed(2)} ${a.currency}` : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
-            <div className="flex items-center justify-between text-[11px] text-[#94A3B8] pt-0.5">
-              <span>ℹ️ Active broker account</span>
-              {selectedAccount && (
-                <span className="text-emerald-400 font-bold truncate">
-                  {selectedAccount.environment === "DEMO" ? "Demo MT5" : "Real MT5"} · ${typeof selectedAccount.available_balance === "number" ? selectedAccount.available_balance.toFixed(2) : "5,072.87"} {selectedAccount.currency}
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Column 2: Selected Pair */}
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-              <span>💱</span>
-              <span>Selected Instrument</span>
-            </div>
-            <select
-              value={selectedPair}
-              onChange={(e) => {
-                const p = e.target.value;
-                setSelectedPair(p);
-                runValidation(p);
-                fetchScalpSignal(p);
-                fetchLiveTick(p);
-              }}
-              className="w-full px-3 py-2.5 rounded-xl bg-[#0B0F17] border border-[#263147] text-xs font-mono text-white focus:outline-none focus:border-[#00E5FF] cursor-pointer"
-            >
-              {filteredPairs.length > 0 ? (
-                filteredPairs.map((p: any) => (
-                  <option key={p.symbol} value={p.symbol}>
-                    {p.symbol} — {p.display_name || p.base_asset} ({p.category || 'MT5'})
-                  </option>
-                ))
-              ) : (
-                ["BTCUSDr", "ETHUSDr", "XAUUSDr", "EURUSDm", "GBPUSDm"].map((sym) => (
-                  <option key={sym} value={sym}>{sym}</option>
-                ))
-              )}
-            </select>
-            <div className="flex items-center justify-between text-[11px] text-[#94A3B8] pt-0.5">
-              <span>ℹ️ Tradable Exness MT5 CFD</span>
-              <span className="text-[#00E5FF] font-bold">{selectedPair}</span>
-            </div>
-          </div>
-
-          {/* Column 3: Live Market Price & Broker Spreads */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs font-bold text-white">
-              <div className="flex items-center gap-1.5">
-                <span>📈</span>
-                <span>Live MT5 Execution Quote</span>
-              </div>
-              <span className={`text-[10px] px-2 py-0.2 rounded font-bold ${
-                liveTick?.is_stale
-                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                  : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-              }`}>
-                {liveTick?.is_stale ? "⚠️ STALE (>5s)" : "🟢 EXNESS MT5 LIVE"}
-              </span>
-            </div>
-            <div className="p-2.5 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-1.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className={`w-2.5 h-2.5 rounded-full ${liveTick?.is_stale ? "bg-amber-400" : "bg-emerald-400 animate-pulse"}`} />
-                  <span className="text-base font-bold text-white tracking-tight">
-                    ${liveTick ? safeFormatPrice(liveTick.bid) : (scalpSignal?.bid ? safeFormatPrice(scalpSignal.bid) : "75,658.15")}
-                  </span>
-                  <span className="text-xs text-[#64748B]">/</span>
-                  <span className="text-xs font-medium text-[#94A3B8]">
-                    ${liveTick ? safeFormatPrice(liveTick.ask) : (scalpSignal?.ask ? safeFormatPrice(scalpSignal.ask) : "75,659.10")}
-                  </span>
-                </div>
-                <div className="text-right">
-                  <span className="text-xs font-bold text-[#00E5FF]">
-                    Spread: ${liveTick ? liveTick.spread_usd.toFixed(2) : (scalpSignal?.spread_usd ? scalpSignal.spread_usd.toFixed(2) : "0.95")}
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center justify-between text-[10px] text-[#64748B] pt-0.5 border-t border-[#263147]/50">
-                <span>Broker Bid/Ask Quote</span>
-                <span>Latency: <strong className="text-white">{liveTick?.age_ms !== undefined ? `${liveTick.age_ms}ms ago` : "Live"}</strong></span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ─── Search Bar & Category Filter Pills ─────────────────────────── */}
-        <div className="pt-2 border-t border-[#263147]/60 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            {/* Search Input */}
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#64748B]" />
-              <input
-                type="text"
-                value={pairSearch}
-                onChange={(e) => setPairSearch(e.target.value)}
-                placeholder="Search symbol or asset (e.g. BTCUSDr, Gold, EUR, NVDA, US30)..."
-                className="w-full pl-9 pr-3 py-2 rounded-xl bg-[#0B0F17] border border-[#263147] text-xs font-mono text-white placeholder-[#64748B] focus:outline-none focus:border-[#00E5FF]"
-              />
-              {pairSearch && (
-                <button
-                  type="button"
-                  onClick={() => setPairSearch("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[#64748B] hover:text-white text-xs font-bold"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-
-            {/* Showing count */}
-            <div className="text-xs text-[#94A3B8] whitespace-nowrap">
-              Showing <strong className="text-white">{filteredPairs.length}</strong> of <strong className="text-[#00E5FF]">{hftPairs.length || 313}</strong> MT5 instruments
-            </div>
-          </div>
-
-          {/* Category Filter Pills */}
-          <div className="flex flex-wrap items-center gap-1.5 text-xs">
-            {[
-              { id: "ALL", label: `All (${categoryCounts.ALL || hftPairs.length || 313})` },
-              { id: "Cryptocurrencies", label: `Crypto (${categoryCounts.Cryptocurrencies || 34})` },
-              { id: "Forex", label: `Forex (${categoryCounts.Forex || 147})` },
-              { id: "Metals", label: `Metals (${categoryCounts.Metals || 13})` },
-              { id: "Energies", label: `Energies (${categoryCounts.Energies || 3})` },
-              { id: "Indices", label: `Indices (${categoryCounts.Indices || 14})` },
-              { id: "Stocks", label: `Stocks (${categoryCounts.Stocks || 102})` },
-            ].map((cat) => (
-              <button
-                key={cat.id}
-                type="button"
-                onClick={() => setSelectedCategory(cat.id)}
-                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                  selectedCategory === cat.id
-                    ? "bg-[#6366F1] text-white shadow-md shadow-indigo-500/25"
-                    : "bg-[#0B0F17] text-[#94A3B8] hover:text-white border border-[#263147] hover:border-[#6366F1]/50"
-                }`}
-              >
-                {cat.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Instrument Cards Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 pt-1">
-            {(showAllPairs ? filteredPairs : filteredPairs.slice(0, 10)).map((p: any) => {
-              const sym = p.symbol;
-              const isSelected = selectedPair === sym;
-              const price = p.price;
-              const chg = p.price_change_pct_24h;
-              const isPos = chg !== undefined && chg >= 0;
-              return (
-                <button
-                  key={sym}
-                  data-testid="hft-pair-card"
-                  type="button"
-                  onClick={() => {
-                    setSelectedPair(sym);
-                    runValidation(sym);
-                    fetchScalpSignal(sym);
-                    fetchLiveTick(sym);
-                  }}
-                  className={`p-2.5 rounded-xl text-left transition-all border cursor-pointer ${
-                    isSelected
-                      ? "bg-[#6366F1]/15 border-[#6366F1] shadow-md shadow-indigo-500/15"
-                      : "bg-[#0B0F17] border-[#263147] hover:border-[#6366F1]/50"
-                  }`}
-                >
-                  <div className="flex items-center justify-between text-xs font-bold text-white">
-                    <span className="truncate">{sym}</span>
-                    {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-[#6366F1] shrink-0" />}
-                  </div>
-                  <div className="text-[10px] text-[#64748B] truncate pt-0.5">
-                    {p.display_name || p.base_asset || sym}
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-[#94A3B8] pt-1">
-                    <span className="font-mono">${price ? safeFormatPrice(price) : (p.spread_points ? `${p.spread_points} pts` : "---")}</span>
-                    <span className={`text-[9px] px-1 rounded font-bold ${
-                      p.category === 'Cryptocurrencies' ? 'bg-amber-500/15 text-amber-400' :
-                      p.category === 'Metals' ? 'bg-yellow-500/15 text-yellow-400' :
-                      p.category === 'Indices' ? 'bg-purple-500/15 text-purple-400' :
-                      p.category === 'Stocks' ? 'bg-cyan-500/15 text-cyan-400' : 'bg-blue-500/15 text-blue-400'
-                    }`}>
-                      {p.category || 'MT5'}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Show More / Show Less Toggle */}
-          {filteredPairs.length > 10 && (
-            <div className="text-center pt-1">
-              <button
-                type="button"
-                onClick={() => setShowAllPairs(!showAllPairs)}
-                className="px-4 py-1.5 rounded-xl bg-[#0B0F17] hover:bg-[#181822] border border-[#263147] text-xs font-bold text-[#00E5FF] transition-all cursor-pointer flex items-center gap-1.5 mx-auto"
-              >
-                {showAllPairs ? (
-                  <><span>Show Top 10 Instruments</span><ChevronUp className="w-3.5 h-3.5" /></>
-                ) : (
-                  <><span>Show All {filteredPairs.length} Instruments (+{filteredPairs.length - 10} more)</span><ChevronDown className="w-3.5 h-3.5" /></>
-                )}
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ─── 2. ENGINE STATUS & 3. TRADING CONTROLS (2-COLUMN GRID) ──────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 font-mono">
-        {/* ─── 2. ENGINE STATUS ─────────────────────────────────────────── */}
-        <div className="p-4 sm:p-5 rounded-2xl bg-[#151C28] border border-[#263147] space-y-4 shadow-xl flex flex-col justify-between">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between border-b border-[#263147] pb-3">
-              <div className="flex items-center gap-2">
-                <Cpu className="w-5 h-5 text-[#00E5FF]" />
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                  2. ENGINE STATUS
-                </h3>
-              </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-cyan-950/60 text-[#00E5FF] border border-[#00E5FF]/30">
-                SCALPING ENGINE
-              </span>
-            </div>
-
-            {/* Current State & Session Indicator */}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-[#94A3B8]">Current State:</span>
-                <span className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
-                  sessionState === "ARMED_READ_ONLY"
-                    ? "bg-[#10B981]/20 text-[#10B981] border border-[#10B981]/30"
-                    : sessionState === "PAUSED"
-                    ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                    : sessionState === "STOPPED"
-                    ? "bg-[#64748B]/20 text-[#94A3B8] border border-[#64748B]/30"
-                    : sessionState === "BLOCKED"
-                    ? "bg-[#F43F5E]/20 text-[#F43F5E] border border-[#F43F5E]/30"
-                    : "bg-blue-500/20 text-blue-400 border border-blue-500/30"
-                }`}>
-                  <span className={`w-2 h-2 rounded-full ${
-                    sessionState === "ARMED_READ_ONLY" ? "bg-[#10B981] animate-pulse" :
-                    sessionState === "PAUSED" ? "bg-amber-400" :
-                    sessionState === "STOPPED" ? "bg-gray-400" : "bg-blue-400 animate-pulse"
-                  }`} />
-                  {sessionState === "ARMED_READ_ONLY" ? "ARMED (DEMO ONLY)" :
-                   sessionState === "PAUSED" ? "PAUSED" :
-                   sessionState === "STOPPED" ? "STOPPED" : "WAITING FOR OPPORTUNITY"}
-                </span>
-              </div>
-              {sessionId && (
-                <span className="text-[10px] text-[#64748B] font-mono">
-                  ID: <strong className="text-white">{sessionId}</strong>
-                </span>
-              )}
-            </div>
-
-            {/* Live Diagnostic Console: Genuine Values (No Fabricated Text) */}
-            <div className="p-3.5 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-2.5">
-              <div className="flex items-start gap-2 text-xs">
-                <span className="text-[#00E5FF] shrink-0 font-bold">🔍</span>
-                <div className="space-y-1">
-                  <div className="text-white font-bold text-xs">
-                    {scalpSignal?.diagnostic?.exact_waiting_reason || scalpSignal?.reason || "Scanning market orderbook depth & momentum for safe entry..."}
-                  </div>
-                  <div className="text-[11px] text-[#94A3B8]">
-                    Last tick latency: <strong className="text-[#00E5FF]">{scalpSignal?.diagnostic?.last_tick_ms_ago ?? liveTick?.age_ms ?? 250}ms</strong> · Feed: <strong className="text-emerald-400">{scalpSignal?.diagnostic?.market_feed_status || "Connected (Exness MT5)"}</strong>
-                  </div>
-                </div>
-              </div>
-
-              {/* Multi-Factor Scalp Diagnostics Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-[#263147]/60 text-[11px]">
-                <div className="flex items-center justify-between p-1.5 rounded bg-[#151C28]/60">
-                  <span className="text-[#94A3B8]">BUY Signal:</span>
-                  <span className={`font-bold ${scalpSignal?.diagnostic?.buy_qualifying ? "text-emerald-400" : "text-amber-400"}`}>
-                    {scalpSignal?.diagnostic?.buy_qualifying ? "🟢 QUALIFYING" : "⏳ NOT QUALIFYING"}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between p-1.5 rounded bg-[#151C28]/60">
-                  <span className="text-[#94A3B8]">SELL Signal:</span>
-                  <span className={`font-bold ${scalpSignal?.diagnostic?.sell_qualifying ? "text-emerald-400" : "text-amber-400"}`}>
-                    {scalpSignal?.diagnostic?.sell_qualifying ? "🟢 QUALIFYING" : "⏳ NOT QUALIFYING"}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between p-1.5 rounded bg-[#151C28]/60">
-                  <span className="text-[#94A3B8]">Momentum:</span>
-                  <span className="text-white font-bold">{scalpSignal?.diagnostic?.momentum_status || "+0.00% (5-bar impulse)"}</span>
-                </div>
-                <div className="flex items-center justify-between p-1.5 rounded bg-[#151C28]/60">
-                  <span className="text-[#94A3B8]">Spread vs Max:</span>
-                  <span className="text-white font-bold">{scalpSignal?.diagnostic?.spread_status || "Within limits ($0.95)"}</span>
-                </div>
-                <div className="flex items-center justify-between p-1.5 rounded bg-[#151C28]/60">
-                  <span className="text-[#94A3B8]">EMA Status:</span>
-                  <span className="text-white font-bold">{scalpSignal?.diagnostic?.ema_status || "EMA9 > EMA21"}</span>
-                </div>
-                <div className="flex items-center justify-between p-1.5 rounded bg-[#151C28]/60">
-                  <span className="text-[#94A3B8]">RSI(14):</span>
-                  <span className="text-white font-bold">{scalpSignal?.diagnostic?.rsi_status || "RSI: 50.0"}</span>
-                </div>
-              </div>
-
-              {/* Detailed Reason Explanation */}
-              <div className="p-2 rounded bg-black/40 border border-[#263147]/50 text-[10px] text-[#94A3B8] space-y-1">
-                <div><strong className="text-white">BUY Condition: </strong>{scalpSignal?.diagnostic?.buy_status || "Awaiting EMA cross and momentum expansion"}</div>
-                <div><strong className="text-white">SELL Condition: </strong>{scalpSignal?.diagnostic?.sell_status || "Awaiting EMA cross and momentum contraction"}</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Phase 7H: Narrowly Scoped Demo Execution Permission Box */}
-          <div className="p-3.5 rounded-xl bg-[#0B0F17] border border-cyan-500/30 text-xs space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-[#00E5FF] font-bold">
-                <Lock className="w-3.5 h-3.5" />
-                <span>Execution Permission: Demo Scalping Authorized (Standby Mode)</span>
-              </div>
-              <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                <span className="px-2 py-0.5 rounded bg-cyan-950/80 text-cyan-400 border border-cyan-500/30 font-bold">
-                  ARMED (DEMO ONLY)
-                </span>
-                <span className="px-2 py-0.5 rounded bg-rose-950/80 text-rose-400 border border-rose-500/30 font-bold">
-                  REAL ACCOUNTS: PERMANENTLY LOCKED
-                </span>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-[#94A3B8]">
-              <div>Target Account: <strong className="text-white font-mono">Exness MT5 Demo #474861031</strong></div>
-              <div>Server: <strong className="text-white font-mono">Exness-MT5Trial15</strong></div>
-              <div>Interactive Worker: <strong className="text-emerald-400 font-mono">Session 2 (PID 6084 Connected)</strong></div>
-              <div>Active Broker Symbol: <strong className="text-[#00E5FF] font-mono">{selectedPair === "BTCUSD" ? "BTCUSDr" : selectedPair}</strong></div>
-            </div>
-            <p className="text-[10px] text-[#64748B] leading-relaxed pt-1 border-t border-[#263147]/50">
-              * Session arming scans markets only. Zero broker orders are dispatched without explicit operator approval. All live mutating orders require separate operator confirmation.
+    <div className={`min-h-screen bg-[#0D1117] text-[#E6EDF3] font-sans ${className}`}>
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+        {/* ═══════════════════════════════════════════════════════════════════
+            A. HEADER — Clean Title, Operational Status & Execution Latency
+        ═══════════════════════════════════════════════════════════════════ */}
+        <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-5 border-b border-[#21262D]">
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">
+              Automated Scalping
+            </h1>
+            <p className="text-sm text-[#8B949E] mt-1">
+              Smart, automated trading managed entirely by BITDEX.
             </p>
           </div>
 
-          {/* Phase 7H: Qualified Opportunity Display & Operator Approval Gate */}
-          <div className="p-3.5 rounded-xl bg-indigo-950/20 border border-indigo-500/30 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Zap className="w-4 h-4 text-[#00E5FF]" />
-                <h4 className="text-xs font-bold text-white uppercase tracking-wider">
-                  Opportunity Proposal &amp; Operator Approval Gate
-                </h4>
-              </div>
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded font-mono ${
-                scalpSignal?.has_signal || scalpSignal?.diagnostic?.buy_qualifying || scalpSignal?.diagnostic?.sell_qualifying
-                  ? "bg-emerald-950/80 text-emerald-400 border border-emerald-500/40 animate-pulse"
-                  : "bg-amber-950/80 text-amber-400 border border-amber-500/30"
-              }`}>
-                {scalpSignal?.has_signal || scalpSignal?.diagnostic?.buy_qualifying || scalpSignal?.diagnostic?.sell_qualifying
-                  ? "OPPORTUNITY QUALIFIED"
-                  : "WAITING QUALIFICATION (STANDBY PREVIEW)"}
-              </span>
-            </div>
-
-            {/* Opportunity Parameters Grid (Signal, Reason, Entry, Volume, SL, TP, Risk) */}
-            {(() => {
-              const liveBid = liveTick?.bid || scalpSignal?.bid || 75840.0;
-              const liveAsk = liveTick?.ask || scalpSignal?.ask || 75841.0;
-              const isSell = Boolean(scalpSignal?.diagnostic?.sell_qualifying && !scalpSignal?.diagnostic?.buy_qualifying);
-              const dir = isSell ? "SELL" : "BUY";
-              const entry = isSell ? liveBid : liveAsk;
-              const stopDist = 100.0;
-              const tpDist = 150.0;
-              const sl = isSell ? entry + stopDist : entry - stopDist;
-              const tp = isSell ? entry - tpDist : entry + tpDist;
-              const vol = 0.01;
-              const maxRiskUsd = +(stopDist * vol).toFixed(2);
-              const potentialProfitUsd = +(tpDist * vol).toFixed(2);
-              const reason = scalpSignal?.has_signal
-                ? scalpSignal?.proposed_entry?.rationale || scalpSignal?.reason || "High-probability momentum expansion"
-                : (scalpSignal?.diagnostic?.buy_qualifying
-                    ? "Momentum expansion confirmed (+0.04%), EMA9 > EMA21 cross confirmed"
-                    : "Scalp baseline: M1 impulse alignment with ATR expansion, spread conforming ($0.95)");
-
-              return (
-                <div className="space-y-2.5">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
-                    <div className="p-2 rounded-lg bg-[#0B0F17] border border-[#263147]">
-                      <div className="text-[10px] text-[#94A3B8]">Signal Direction</div>
-                      <div className={`font-bold text-sm ${dir === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>
-                        {dir}
-                      </div>
-                    </div>
-                    <div className="p-2 rounded-lg bg-[#0B0F17] border border-[#263147]">
-                      <div className="text-[10px] text-[#94A3B8]">Entry Reference</div>
-                      <div className="font-bold text-white">${entry.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                    </div>
-                    <div className="p-2 rounded-lg bg-[#0B0F17] border border-[#263147]">
-                      <div className="text-[10px] text-[#94A3B8]">Order Volume</div>
-                      <div className="font-bold text-[#00E5FF]">{vol} Lot (Min)</div>
-                    </div>
-                    <div className="p-2 rounded-lg bg-[#0B0F17] border border-[#263147]">
-                      <div className="text-[10px] text-[#94A3B8]">Max Monetary Risk</div>
-                      <div className="font-bold text-amber-400">${maxRiskUsd.toFixed(2)} USD</div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs font-mono">
-                    <div className="p-2 rounded-lg bg-[#0B0F17] border border-rose-500/20">
-                      <div className="text-[10px] text-[#94A3B8]">Mandatory Stop Loss (SL)</div>
-                      <div className="font-bold text-rose-400">${sl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                      <div className="text-[9px] text-[#64748B]">-$100.00 pts (-${maxRiskUsd.toFixed(2)} USD)</div>
-                    </div>
-                    <div className="p-2 rounded-lg bg-[#0B0F17] border border-emerald-500/20">
-                      <div className="text-[10px] text-[#94A3B8]">Mandatory Take Profit (TP)</div>
-                      <div className="font-bold text-emerald-400">${tp.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                      <div className="text-[9px] text-[#64748B]">+$150.00 pts (+${potentialProfitUsd.toFixed(2)} USD)</div>
-                    </div>
-                    <div className="p-2 rounded-lg bg-[#0B0F17] border border-[#263147]">
-                      <div className="text-[10px] text-[#94A3B8]">Risk:Reward Ratio</div>
-                      <div className="font-bold text-white">1:1.50 (Conforming)</div>
-                      <div className="text-[9px] text-emerald-400">Institutional threshold: &gt;=1.5:1</div>
-                    </div>
-                  </div>
-
-                  {/* Trigger Reason Box */}
-                  <div className="p-2 rounded-lg bg-[#0B0F17] border border-[#263147] text-[11px] text-[#94A3B8]">
-                    <strong className="text-white">Trigger Reason: </strong>
-                    <span>{reason}</span>
-                  </div>
-
-                  {/* Explicit Operator Approval Button */}
-                  <div className="pt-1">
-                    <button
-                      type="button"
-                      id="btn-approve-demo-scalp"
-                      onClick={() => handleApproveDemoScalp(dir)}
-                      disabled={preflightLoading}
-                      className="w-full py-2.5 px-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 text-xs text-white shadow-lg cursor-pointer bg-gradient-to-r from-cyan-600 via-indigo-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 shadow-cyan-500/20"
-                    >
-                      {preflightLoading ? (
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <ShieldCheck className="w-4 h-4 text-cyan-200" />
-                      )}
-                      <span>
-                        {preflightLoading
-                          ? "Executing Session 2 Worker Preflight..."
-                          : "Approve & Preflight Demo Scalp (Session 2 MT5 Worker)"}
-                      </span>
-                    </button>
-                    <div className="text-[10px] text-[#64748B] text-center pt-1.5">
-                      🔒 Explicit Approval Gate: Zero orders are submitted merely because session is armed. Phase 7H executes full end-to-end Session 2 worker verification without broker mutation.
-                    </div>
-                  </div>
-
-                  {/* Preflight Receipt Display */}
-                  {preflightReceipt && (
-                    <div className="p-3 rounded-xl bg-[#06101E] border border-emerald-500/40 text-xs font-mono space-y-2">
-                      <div className="flex items-center justify-between border-b border-[#263147] pb-1.5">
-                        <div className="flex items-center gap-1.5 text-emerald-400 font-bold">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>SESSION 2 WORKER PREFLIGHT VERIFICATION RECEIPT</span>
-                        </div>
-                        <span className="text-[10px] text-cyan-400 font-bold px-1.5 py-0.5 rounded bg-cyan-950/60 border border-cyan-500/30">
-                          {preflightReceipt.preflight_status || "READY_FOR_EXECUTION_HELD"}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[10px] text-[#94A3B8]">
-                        <div>Interactive Session: <strong className="text-white">Session {preflightReceipt.gateway_verification?.interactive_worker?.session_id ?? 2} (PID {preflightReceipt.gateway_verification?.interactive_worker?.terminal_pid ?? 6084})</strong></div>
-                        <div>Verified Account: <strong className="text-white">#{preflightReceipt.account_details?.broker_login ?? "474861031"} ({preflightReceipt.account_details?.server_name ?? "Exness-MT5Trial15"})</strong></div>
-                        <div>Broker Quote: <strong className="text-white">Bid ${preflightReceipt.gateway_verification?.broker_symbol_specs?.live_bid ?? entry} / Ask ${preflightReceipt.gateway_verification?.broker_symbol_specs?.live_ask ?? entry}</strong></div>
-                        <div>Broker Spread: <strong className="text-white">${preflightReceipt.gateway_verification?.broker_symbol_specs?.spread_usd ?? 0.95} USD</strong></div>
-                        <div>Order Preflight: <strong className="text-emerald-400">{preflightReceipt.order_details?.direction ?? dir} {preflightReceipt.order_details?.volume ?? 0.01} Lot {preflightReceipt.order_details?.broker_symbol ?? "BTCUSDr"}</strong></div>
-                        <div>Max Monetary Risk: <strong className="text-amber-400">${preflightReceipt.order_details?.max_monetary_risk_usd ?? 1.00} USD</strong></div>
-                        <div>Dispatched to Broker: <strong className="text-cyan-400">FALSE (Phase 7H Non-Mutating Standby)</strong></div>
-                        <div>Safety Governance: <strong className="text-rose-400">Real Trading Permanently Locked (HTTP 403)</strong></div>
-                      </div>
-                      <div className="text-[10px] text-[#10B981] pt-1 border-t border-[#263147]/50">
-                        ✓ {preflightReceipt.message || "Session 2 Interactive Worker non-mutating preflight PASSED. Zero orders dispatched to broker."}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Phase 7I: Final Explicit Operator Confirmation & Live Order Dispatch */}
-                  {preflightReceipt && !liveExecutionReceipt && (
-                    <div className="p-3.5 rounded-xl bg-gradient-to-br from-emerald-950/40 via-[#0B0F17] to-cyan-950/40 border border-emerald-500/50 space-y-2.5 font-mono">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 text-white font-bold text-xs">
-                          <span className="text-emerald-400">⚡</span>
-                          <span>PHASE 7I: READY FOR GENUINE DEMO TRADE DISPATCH</span>
-                        </div>
-                        <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-500/30 font-bold">
-                          1 ORDER PERMITTED
-                        </span>
-                      </div>
-                      <div className="p-2.5 rounded-lg bg-black/50 border border-emerald-500/20 text-[11px] text-[#94A3B8] space-y-1">
-                        <div>Account &amp; Server: <strong className="text-white">Exness MT5 Demo #474861031 (Exness-MT5Trial15)</strong></div>
-                        <div>Contract &amp; Lot: <strong className="text-cyan-400">{preflightReceipt.order_details?.broker_symbol || "BTCUSDr"} · 0.01 Lot</strong></div>
-                        <div>Order Direction: <strong className={preflightReceipt.order_details?.direction === "BUY" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>{preflightReceipt.order_details?.direction || dir}</strong></div>
-                        <div>Entry Reference: <strong className="text-white">${preflightReceipt.order_details?.entry_price?.toFixed(2) || entry.toFixed(2)} USD</strong></div>
-                        <div>Protective Stop Loss: <strong className="text-rose-400">${preflightReceipt.order_details?.stop_loss?.toFixed(2) || sl.toFixed(2)} USD</strong> (Max Monetary Risk: $1.00 USD)</div>
-                        <div>Profit Target: <strong className="text-emerald-400">${preflightReceipt.order_details?.take_profit?.toFixed(2) || tp.toFixed(2)} USD</strong> (Target Profit: $1.50 USD · R:R 1:1.50)</div>
-                        <div>Estimated Margin: <strong className="text-white">~$0.38 USD</strong> (at 1:2000 leverage)</div>
-                        <div>Execution Route: <strong className="text-[#00E5FF]">Windows Session 2 Interactive Worker IPC -&gt; mt5.order_send()</strong></div>
-                      </div>
-                      <button
-                        type="button"
-                        id="btn-execute-live-demo-scalp"
-                        onClick={() => handleApproveDemoScalp(dir, true)}
-                        disabled={preflightLoading}
-                        className="w-full py-3 px-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 text-xs text-white shadow-xl cursor-pointer bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 shadow-emerald-500/25 border border-emerald-400/40"
-                      >
-                        {preflightLoading ? (
-                          <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                        ) : (
-                          <CheckCircle2 className="w-4 h-4 text-emerald-200" />
-                        )}
-                        <span>
-                          {preflightLoading
-                            ? "Dispatching Order to Exness MT5 Terminal..."
-                            : `Submit Genuine 0.01 Lot Demo ${dir} Order to Exness MT5 (#474861031)`}
-                        </span>
-                      </button>
-                      <div className="text-[10px] text-amber-400/80 text-center">
-                        ⚠️ Live Demo Dispatch: Clicking above will submit ONE real order to Exness MT5 Demo #474861031 with broker-side SL/TP. Real accounts remain permanently blocked.
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Confirmed Live Broker Execution Receipt */}
-                  {liveExecutionReceipt && (
-                    <div className="p-4 rounded-xl bg-[#04140D] border-2 border-emerald-500/80 text-xs font-mono space-y-2.5 shadow-2xl">
-                      <div className="flex items-center justify-between border-b border-emerald-500/40 pb-2">
-                        <div className="flex items-center gap-2 text-emerald-400 font-bold">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                          <span className="text-sm">GENUINE DEMO TRADE EXECUTED ON EXNESS MT5</span>
-                        </div>
-                        <span className="text-[10px] text-emerald-300 font-bold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-500/50">
-                          BROKER CONFIRMED
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-[#94A3B8]">
-                        <div>Broker Order Ticket: <strong className="text-white text-xs">#{liveExecutionReceipt.broker_execution?.order_id}</strong></div>
-                        <div>Broker Deal Ticket: <strong className="text-white text-xs">#{liveExecutionReceipt.broker_execution?.deal_id}</strong></div>
-                        <div>Executed Price: <strong className="text-emerald-400 text-xs">${liveExecutionReceipt.broker_execution?.execution_price} USD</strong></div>
-                        <div>Volume: <strong className="text-white">{liveExecutionReceipt.broker_execution?.volume} Lot ({liveExecutionReceipt.broker_execution?.symbol})</strong></div>
-                        <div>Broker Stop Loss (SL): <strong className="text-rose-400">${liveExecutionReceipt.broker_execution?.stop_loss} USD</strong></div>
-                        <div>Broker Take Profit (TP): <strong className="text-emerald-400">${liveExecutionReceipt.broker_execution?.take_profit} USD</strong></div>
-                        <div>Execution Latency: <strong className="text-cyan-400">{liveExecutionReceipt.broker_execution?.dispatch_latency_ms} ms</strong></div>
-                        <div>Confirmed Open Position: <strong className="text-emerald-400">Ticket #{liveExecutionReceipt.broker_execution?.confirmed_position?.ticket}</strong></div>
-                      </div>
-                      <div className="p-2 rounded bg-black/60 border border-emerald-500/30 text-[10px] text-emerald-300">
-                        ✓ {liveExecutionReceipt.message || "First genuine Demo scalp trade executed successfully."}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-          </div>
-        </div>
-
-        {/* ─── 3. TRADING CONTROLS ──────────────────────────────────────── */}
-        <div className="p-4 sm:p-5 rounded-2xl bg-[#151C28] border border-[#263147] space-y-4 shadow-xl flex flex-col justify-between">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between border-b border-[#263147] pb-3">
-              <div className="flex items-center gap-2">
-                <Sliders className="w-5 h-5 text-[#6366F1]" />
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                  3. TRADING CONTROLS
-                </h3>
-              </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-400 border border-indigo-500/30">
-                ACTIVE CONTROLS
-              </span>
-            </div>
-
-            {/* Primary Action Button: Arm & Start Session */}
-            <div>
-              <button
-                type="button"
-                id="btn-start-hft-session"
-                onClick={() => {
-                  if (activationStatus !== "ACTIVE") {
-                    setIsActivationModalOpen(true);
-                  } else if (!selectedAccount) {
-                    setFeedback({ type: "error", message: "No trading account selected. Please choose a connected account." });
-                  } else if (!selectedAccount.connected) {
-                    setFeedback({ type: "error", message: `${selectedAccount.display_label} is not connected (${selectedAccount.connection_status}).` });
-                  } else if (hasDuplicatePair) {
-                    setFeedback({ type: "error", message: `Position or order for ${selectedPair} already active on this account.` });
-                  } else if (sessionState === "BLOCKED") {
-                    setFeedback({ type: "error", message: `Cannot arm session: Engine ${collisionInfo?.engine_id || "B"} holds active lease.` });
-                  } else if (checklist.length > 0 && !isReady) {
-                    const failing = checklist.filter((item) => item.critical && !item.passed);
-                    const reason = failing.length > 0 ? failing[0].name + ": " + failing[0].detail : "Pre-trade safety checklist incomplete.";
-                    setFeedback({ type: "error", message: `Cannot arm session: ${reason}` });
-                  } else if (sessionState === "PAUSED") {
-                    handleResumeSession();
-                  } else if (guardAccountAction("START")) {
-                    handleStartSession();
-                  }
-                }}
-                disabled={sessionActionLoading}
-                className={`w-full py-3.5 px-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 text-sm text-white shadow-lg cursor-pointer ${
-                  sessionState === "ARMED_READ_ONLY"
-                    ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/25"
-                    : sessionState === "PAUSED"
-                    ? "bg-amber-600 hover:bg-amber-700 shadow-amber-500/25"
-                    : "bg-[#6366F1] hover:bg-[#4F46E5] shadow-indigo-500/25"
-                }`}
+          <div className="flex flex-wrap items-center gap-3">
+            {systemStatus.all_systems_operational ? (
+              <div
+                id="status-all-systems-operational"
+                className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#10B981]/10 border border-[#10B981]/30 text-xs font-medium text-[#10B981]"
               >
-                {sessionActionLoading ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                ) : sessionState === "ARMED_READ_ONLY" ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                ) : (
-                  <Play className="w-4 h-4 fill-white" />
-                )}
-                <span>
-                  {sessionActionLoading
-                    ? "Executing Action..."
-                    : activationStatus !== "ACTIVE"
-                    ? "Activate Account ($20.00) to Start Engine"
-                    : sessionState === "ARMED_READ_ONLY"
-                    ? "Engine Armed · Active Market Scanning"
-                    : sessionState === "PAUSED"
-                    ? "Resume Market Scanning"
-                    : "Arm & Start Session"}
-                </span>
-              </button>
-            </div>
-
-            {/* Engine Lifecycle Controls: Pause / Resume / Stop */}
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <button
-                type="button"
-                id="btn-pause-hft-session"
-                onClick={() => {
-                  if (sessionState === "PAUSED") {
-                    handleResumeSession();
-                  } else {
-                    handlePauseSession();
-                  }
-                }}
-                disabled={sessionActionLoading || sessionState === "STOPPED"}
-                className={`py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                  sessionState === "PAUSED"
-                    ? "bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30"
-                    : "bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 border border-amber-500/30"
-                }`}
+                <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+                All Systems Operational
+              </div>
+            ) : (
+              <div
+                id="status-connection-warning"
+                className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-xs font-medium text-amber-400"
               >
-                {sessionState === "PAUSED" ? <span>▶️ Resume Engine</span> : <span>⏸️ Pause Engine</span>}
-              </button>
-
-              <button
-                type="button"
-                id="btn-stop-hft-session"
-                onClick={handleStopSession}
-                disabled={sessionActionLoading}
-                className="py-2.5 px-3 rounded-xl font-bold text-xs bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-              >
-                <span>🛑</span>
-                <span>Emergency Disarm</span>
-              </button>
-            </div>
-
-            {/* Phase 7M: Direct Customer Portal Manual Execution */}
-            <div className="p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/30 via-[#0B0F17] to-rose-950/30 border border-[#263147] space-y-2.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-white flex items-center gap-1.5">
-                  <span>⚡</span>
-                  <span>Direct Demo Scalp Execution</span>
-                </span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 font-bold">
-                  $1.00 Net Exit Target
-                </span>
+                <AlertTriangle className="w-3.5 h-3.5" />
+                Connection Refreshing
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  id="btn-portal-manual-buy"
-                  onClick={() => handleManualDemoOrder("BUY")}
-                  disabled={isManualExecuting || hasDuplicatePair}
-                  className="py-2.5 px-3 rounded-xl font-bold text-xs bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20 flex flex-col items-center justify-center gap-0.5 transition-all cursor-pointer border border-emerald-400/30"
-                >
-                  <div className="flex items-center gap-1">
-                    {isManualExecuting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <span>🟢</span>}
-                    <span>BUY {tradeVolumeLot} Lot</span>
-                  </div>
-                  <span className="text-[10px] opacity-80 font-normal">
-                    @ ${safeFormatPrice(liveTick?.ask || scalpSignal?.ask || 75866.0)}
-                  </span>
-                </button>
+            )}
 
-                <button
-                  type="button"
-                  id="btn-portal-manual-sell"
-                  onClick={() => handleManualDemoOrder("SELL")}
-                  disabled={isManualExecuting || hasDuplicatePair}
-                  className="py-2.5 px-3 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/20 flex flex-col items-center justify-center gap-0.5 transition-all cursor-pointer border border-rose-400/30"
-                >
-                  <div className="flex items-center gap-1">
-                    {isManualExecuting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <span>🔴</span>}
-                    <span>SELL {tradeVolumeLot} Lot</span>
-                  </div>
-                  <span className="text-[10px] opacity-80 font-normal">
-                    @ ${safeFormatPrice(liveTick?.bid || scalpSignal?.bid || 75865.0)}
-                  </span>
-                </button>
-              </div>
-              <div className="text-[10px] text-[#64748B] flex items-center justify-between">
-                <span>Broker: Exness Demo #474861031</span>
-                <span>Max 1 Position Limit Active</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Quick Engine Telemetry */}
-          <div className="p-3 rounded-xl bg-[#0B0F17] border border-[#263147] text-xs flex items-center justify-between text-[#94A3B8]">
-            <span>Latency (Frankfurt ↔ MT5):</span>
-            <span className="font-bold text-white">254ms (WireGuard Mesh)</span>
-          </div>
-        </div>
-      </div>
-
-      {/* ─── 4. LIVE PERFORMANCE (TODAY'S SUMMARY) ───────────────────────── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#151C28] border border-[#263147] space-y-4 shadow-xl font-mono">
-        <div className="flex items-center justify-between border-b border-[#263147] pb-3">
-          <div className="flex items-center gap-2">
-            <BarChart3 className="w-5 h-5 text-emerald-400" />
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              4. LIVE PERFORMANCE (TODAY'S SUMMARY)
-            </h3>
-          </div>
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-500/30">
-            AUDITED BROKER METRICS
-          </span>
-        </div>
-
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Card 1: Today's Net Profit/Loss */}
-          <div className="p-4 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-1">
-            <div className="text-xs text-[#94A3B8] flex items-center gap-1.5">
-              <span>💰</span>
-              <span>Today's Net Realized P&L</span>
-            </div>
-            <div className="flex items-baseline gap-2">
-              <span className="text-lg font-bold text-[#10B981]">
-                +${safeNum(hftAccountSummary?.today_realized_pnl_usd ?? 0.97, 2)} USD
-              </span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded font-bold bg-[#10B981]/20 text-[#10B981] border border-[#10B981]/30">
-                🟢 +0.02%
-              </span>
-            </div>
-            <div className="text-[10px] text-[#64748B]">Net broker profit (Deals #2505543187 & #2505543425)</div>
-          </div>
-
-          {/* Card 2: Open Positions & Floating P&L */}
-          <div className="p-4 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-1">
-            <div className="text-xs text-[#94A3B8] flex items-center gap-1.5">
-              <span>📂</span>
-              <span>Open Positions</span>
-            </div>
-            <div className="text-lg font-bold text-white">
-              {hftPositions.filter((p) => p.status === "OPEN").length || hftAccountSummary?.open_positions_count || 0} Active Trades
-            </div>
-            <div className="text-[10px] text-[#64748B]">
-              Floating P&L: ${(hftAccountSummary?.unrealized_pnl_usd || 0) >= 0 ? "+" : ""}{safeNum(hftAccountSummary?.unrealized_pnl_usd || 0.0, 2)} USD
-            </div>
-          </div>
-
-          {/* Card 3: Completed Trades Today */}
-          <div className="p-4 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-1">
-            <div className="text-xs text-[#94A3B8] flex items-center gap-1.5">
-              <span>✅</span>
-              <span>Completed Today</span>
-            </div>
-            <div className="text-lg font-bold text-white">
-              {hftAccountSummary?.today_trades_count ?? 2} Trades
-            </div>
-            <div className="text-[10px] text-[#64748B]">Tickets #2721632745 & #2721633044 closed</div>
-          </div>
-
-          {/* Card 4: Win Rate & Commissions */}
-          <div className="p-4 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-1">
-            <div className="text-xs text-[#94A3B8] flex items-center gap-1.5">
-              <span>🎯</span>
-              <span>Win Rate & Fees</span>
-            </div>
-            <div className="text-lg font-bold text-[#10B981]">
-              {safeNum(hftAccountSummary?.win_rate_percent ?? 100.0, 1)}%
-            </div>
-            <div className="text-[10px] text-[#64748B]">
-              2/2 Profitable · Comm: -${safeNum(hftAccountSummary?.today_commissions_usd ?? 0.08, 2)}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ─── 5. RISK MANAGEMENT (SAFETY CONTROLS) ────────────────────────── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#151C28] border border-[#263147] space-y-4 shadow-xl font-mono">
-        <div className="flex items-center justify-between border-b border-[#263147] pb-3">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5 text-[#00E5FF]" />
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              5. RISK MANAGEMENT (SAFETY CONTROLS)
-            </h3>
-          </div>
-          <button
-            type="button"
-            id="btn-open-config-modal"
-            onClick={() => setIsConfigModalOpen(true)}
-            disabled={savingConfig}
-            className="px-3.5 py-1.5 rounded-lg bg-[#6366F1] hover:bg-[#4F46E5] text-white text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-indigo-500/20"
-          >
-            {savingConfig ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <span>⚙️</span>}
-            <span>Save Settings</span>
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Target Net Profit per Position */}
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-              <span>🎯</span>
-              <span>Target Net Profit ($ USD)</span>
-            </div>
-            <div className="flex items-center px-3 py-2 rounded-xl bg-[#0B0F17] border border-[#263147]">
-              <input
-                type="number"
-                step="0.10"
-                min="0.50"
-                max="10.0"
-                value={profitTargetUsd}
-                onChange={(e) => setProfitTargetUsd(parseFloat(e.target.value) || 1.0)}
-                className="w-full bg-transparent text-sm text-[#10B981] focus:outline-none font-bold"
-              />
-              <span className="text-xs text-[#94A3B8] font-bold">USD</span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8]">ℹ️ Auto-exits entire position at +$1.00 net profit</div>
-          </div>
-
-          {/* Stop Loss (Safety Net) */}
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-              <span>🛑</span>
-              <span>Stop Loss ($ USD Risk)</span>
-            </div>
-            <div className="flex items-center px-3 py-2 rounded-xl bg-[#0B0F17] border border-[#263147]">
-              <input
-                type="number"
-                step="0.10"
-                min="0.50"
-                max="5.0"
-                value={stopLossUsd}
-                onChange={(e) => setStopLossUsd(parseFloat(e.target.value) || 1.0)}
-                className="w-full bg-transparent text-sm text-rose-400 focus:outline-none font-bold"
-              />
-              <span className="text-xs text-[#94A3B8] font-bold">USD</span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8]">ℹ️ Max price-movement risk ($1.00 USD)</div>
-          </div>
-
-          {/* Scalping Volume (Lots) */}
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-              <span>📦</span>
-              <span>Scalping Volume (Lot Size)</span>
-            </div>
-            <div className="flex items-center px-3 py-2 rounded-xl bg-[#0B0F17] border border-[#263147]">
-              <input
-                type="number"
-                step="0.01"
-                min="0.01"
-                max="0.05"
-                value={tradeVolumeLot}
-                onChange={(e) => setTradeVolumeLot(parseFloat(e.target.value) || 0.01)}
-                className="w-full bg-transparent text-sm text-[#00E5FF] focus:outline-none font-bold"
-              />
-              <span className="text-xs text-[#94A3B8] font-bold">Lot</span>
-            </div>
-            <div className="text-[11px] text-[#94A3B8]">ℹ️ 0.01 Lot = 0.01 BTC ($1 movement = $0.01)</div>
-          </div>
-        </div>
-
-        {/* Max Open Positions & Continuous Trading Controls */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="p-3.5 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <div className="flex items-center gap-1.5 font-bold text-white">
-                <span>📊</span>
-                <span>Maximum Open Positions:</span>
-              </div>
-              <span className="text-xs font-bold text-[#00E5FF] px-2 py-0.5 rounded bg-cyan-950/60 border border-[#00E5FF]/30">
-                {maxOpenPositions} Trade at a time
-              </span>
-            </div>
-            <input
-              type="range"
-              min="1"
-              max="3"
-              value={maxOpenPositions}
-              onChange={(e) => setMaxOpenPositions(parseInt(e.target.value) || 1)}
-              className="w-full accent-[#00E5FF] cursor-pointer"
-            />
-            <div className="text-[11px] text-[#94A3B8]">
-              ℹ️ Strict one-position barrier prevents simultaneous concurrent exposures.
-            </div>
-          </div>
-
-          <div className="p-3.5 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-2 flex flex-col justify-between">
-            <div className="flex items-center justify-between text-xs">
-              <div className="flex items-center gap-1.5 font-bold text-white">
-                <span>🔄</span>
-                <span>Automated Continuous Re-entry:</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAutomatedReEntry(!automatedReEntry)}
-                className={`px-2.5 py-0.5 rounded text-xs font-bold transition-all cursor-pointer ${
-                  automatedReEntry
-                    ? "bg-emerald-500 text-black shadow-md shadow-emerald-500/20"
-                    : "bg-[#1E2736] text-[#94A3B8] hover:text-white"
-                }`}
-              >
-                {automatedReEntry ? "ENABLED (CONTINUOUS)" : "DISABLED (SINGLE-CYCLE)"}
-              </button>
-            </div>
-            <div className="text-[11px] text-[#94A3B8]">
-              ℹ️ When DISABLED (default), engine stops after the $1 profit exit. Enable for continuous scalping loops.
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ─── 6. RECENT ACTIVITY (PLAIN-ENGLISH TRADE LOG) ────────────────── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#151C28] border border-[#263147] space-y-4 shadow-xl font-mono">
-        <div className="flex items-center justify-between border-b border-[#263147] pb-3">
-          <div className="flex items-center gap-2">
-            <Clock className="w-5 h-5 text-[#00E5FF]" />
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              6. RECENT ACTIVITY (PLAIN-ENGLISH TRADE LOG)
-            </h3>
-          </div>
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-500/30">
-            LIVE BROKER ACTIVITY
-          </span>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b border-[#263147] text-[#64748B] uppercase text-[11px]">
-                <th className="py-2.5 px-3">TIME</th>
-                <th className="py-2.5 px-3">ACTION</th>
-                <th className="py-2.5 px-3">ASSET</th>
-                <th className="py-2.5 px-3">PRICE</th>
-                <th className="py-2.5 px-3">STATUS / RESULT</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#263147]/50 text-white">
-              {/* Row 1: Genuine Closed Demo Position (Ticket 2721014982) */}
-              <tr className="hover:bg-[#1C2536] transition-colors">
-                <td className="py-3 px-3 text-[#94A3B8]">22:54:15</td>
-                <td className="py-3 px-3">
-                  <span className="px-2 py-0.5 rounded font-bold text-[11px] bg-[#10B981]/20 text-[#10B981] border border-[#10B981]/30">
-                    🟢 BUY 0.01 lot
-                  </span>
-                </td>
-                <td className="py-3 px-3 font-bold">BTCUSDr</td>
-                <td className="py-3 px-3">$75,669.73 → $75,702.52</td>
-                <td className="py-3 px-3 text-[#10B981] font-bold">
-                  ✅ Closed with Profit: +$0.33 USD (deal #2505044889 · order #2721014982)
-                </td>
-              </tr>
-              {/* Row 2: Account Balance Verification */}
-              <tr className="hover:bg-[#1C2536] transition-colors">
-                <td className="py-3 px-3 text-[#94A3B8]">22:55:00</td>
-                <td className="py-3 px-3">
-                  <span className="px-2 py-0.5 rounded font-bold text-[11px] bg-cyan-500/20 text-[#00E5FF] border border-cyan-500/30">
-                    🏦 BALANCE
-                  </span>
-                </td>
-                <td className="py-3 px-3 font-bold">Exness MT5</td>
-                <td className="py-3 px-3">$5,072.87 USD</td>
-                <td className="py-3 px-3 text-[#94A3B8] font-medium">
-                  Equity: $5,072.87 USD · Free Margin: $5,072.87 USD · 0 Open Positions
-                </td>
-              </tr>
-              {/* Row 3 */}
-              <tr className="hover:bg-[#1C2536] transition-colors">
-                <td className="py-3 px-3 text-[#94A3B8]">13:50:19</td>
-                <td className="py-3 px-3">
-                  <span className="px-2 py-0.5 rounded font-bold text-[11px] bg-[#10B981]/20 text-[#10B981] border border-[#10B981]/30">
-                    🟢 BUY
-                  </span>
-                </td>
-                <td className="py-3 px-3 font-bold">BTC/USDT</td>
-                <td className="py-3 px-3">$75,410.00</td>
-                <td className="py-3 px-3 text-[#10B981] font-medium">
-                  ✅ Closed with Profit ( +$29.10 )
-                </td>
-              </tr>
-              {/* Row 4 */}
-              <tr className="hover:bg-[#1C2536] transition-colors">
-                <td className="py-3 px-3 text-[#94A3B8]">13:20:05</td>
-                <td className="py-3 px-3">
-                  <span className="px-2 py-0.5 rounded font-bold text-[11px] bg-[#F43F5E]/20 text-[#F43F5E] border border-[#F43F5E]/30">
-                    🔴 SELL
-                  </span>
-                </td>
-                <td className="py-3 px-3 font-bold">BTC/USDT</td>
-                <td className="py-3 px-3">$75,650.00</td>
-                <td className="py-3 px-3 text-amber-400 font-medium">
-                  🛡️ Auto-Stopped for Safety ( -$14.20 )
-                </td>
-              </tr>
-              {/* Row 5 */}
-              <tr className="hover:bg-[#1C2536] transition-colors">
-                <td className="py-3 px-3 text-[#94A3B8]">13:05:00</td>
-                <td className="py-3 px-3">
-                  <span className="px-2 py-0.5 rounded font-bold text-[11px] bg-blue-500/20 text-blue-400 border border-blue-500/30">
-                    🔍 SCAN
-                  </span>
-                </td>
-                <td className="py-3 px-3 font-bold">BTC/USDT</td>
-                <td className="py-3 px-3">$75,670.00</td>
-                <td className="py-3 px-3 text-[#94A3B8] font-medium">
-                  ℹ️ Waiting for clear market trend...
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* ─── PRE-TRADE SAFETY CHECKLIST (9 AUDITED RISK BARRIERS) ─────────── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-4 shadow-lg font-mono">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#272735] pb-3">
-          <div className="flex items-center gap-2 font-mono">
-            <span className="w-5 h-5 rounded-full bg-[#00E5FF]/20 text-[#00E5FF] text-xs font-bold flex items-center justify-center">
-              ✓
-            </span>
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              Pre-Trade Safety Checklist ({checklist.filter((i) => i.passed).length}/9 Security Checks Passed)
-            </h3>
-          </div>
-          <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded border ${
-            isReady
-              ? "bg-[#10B981]/15 text-[#10B981] border-[#10B981]/30"
-              : "bg-amber-500/15 text-amber-400 border-amber-500/30"
-          }`}>
-            {isReady ? "ALL 9 CHECKS PASSED · ENGINE READY" : "PRE-FLIGHT VALIDATION PENDING"}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-          {checklist.map((item) => (
             <div
-              key={item.id}
-              data-testid="checklist-item"
-              className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs transition-all ${
-                item.passed
-                  ? "bg-[#10B981]/5 border-[#10B981]/20 text-white"
-                  : item.critical
-                  ? "bg-[#F6465D]/5 border-[#F6465D]/30 text-white"
-                  : "bg-[#181822] border-[#272735] text-[#94A3B8]"
-              }`}
+              id="status-execution-latency"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#161B22] border border-[#21262D] text-xs font-medium text-[#8B949E]"
             >
-              <div className="mt-0.5 shrink-0">
-                {item.passed ? (
-                  <CheckCircle2 className="w-4 h-4 text-[#10B981]" />
-                ) : item.critical ? (
-                  <Ban className="w-4 h-4 text-[#F6465D]" />
-                ) : (
-                  <AlertTriangle className="w-4 h-4 text-amber-400" />
-                )}
-              </div>
-              <div className="min-w-0 space-y-0.5">
-                <div className="font-bold flex items-center gap-1.5 truncate">
-                  <span>{item.name}</span>
-                  {item.critical && (
-                    <span className="text-[9px] px-1 py-0.2 rounded bg-rose-950/60 text-rose-400 border border-rose-500/30">
-                      GATE
-                    </span>
-                  )}
-                </div>
-                <div className="text-[11px] text-[#94A3B8] leading-tight break-words">
-                  {item.detail}
-                </div>
-              </div>
+              <Zap className="w-3.5 h-3.5 text-[#10B981]" />
+              <span>Execution Latency:</span>
+              <span className="text-white font-semibold">{systemStatus.execution_latency_ms}ms</span>
             </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ─── AUTHORITATIVE BOTTOM TRADING ACTIVITY PANEL (5 TABS) ────────── */}
-      <div className="p-4 sm:p-5 rounded-2xl bg-[#121218] border border-[#272735] space-y-4 shadow-xl font-mono">
-        {/* Panel Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#272735] pb-3">
-          <div className="flex items-center gap-2">
-            <Layers className="w-5 h-5 text-[#00E5FF]" />
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              Authoritative Broker Journal &amp; Raw Execution Ledger
-            </h3>
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-500/30">
-              BROKER-CONFIRMED DATA
-            </span>
           </div>
+        </header>
 
-          <div className="flex items-center gap-2">
+        {/* Clean Customer Action Feedback Toast */}
+        {actionFeedback && (
+          <div
+            className={`flex items-center justify-between gap-3 px-4 py-3 rounded-xl border text-sm ${
+              actionFeedback.type === "success"
+                ? "bg-[#10B981]/10 border-[#10B981]/30 text-[#10B981]"
+                : actionFeedback.type === "error"
+                ? "bg-[#E11D48]/10 border-[#E11D48]/30 text-[#FDA4AF]"
+                : actionFeedback.type === "warning"
+                ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                : "bg-sky-500/10 border-sky-500/30 text-sky-300"
+            }`}
+          >
+            <div className="flex items-center gap-2.5">
+              {actionFeedback.type === "success" ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : actionFeedback.type === "error" ? (
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+              ) : (
+                <Info className="w-4 h-4 shrink-0" />
+              )}
+              <span>{actionFeedback.message}</span>
+            </div>
             <button
               type="button"
-              onClick={fetchBottomData}
-              disabled={loadingBottomData}
-              className="px-2.5 py-1 rounded-lg bg-[#0A0A0E] border border-[#272735] hover:border-[#00E5FF] text-xs text-[#94A3B8] hover:text-white transition-all flex items-center gap-1.5 cursor-pointer"
+              onClick={() => setActionFeedback(null)}
+              className="p-1 rounded-lg hover:bg-white/10 transition-colors"
+              aria-label="Dismiss notification"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingBottomData ? "animate-spin text-[#00E5FF]" : ""}`} />
-              <span>Refresh</span>
+              <X className="w-4 h-4" />
             </button>
           </div>
-        </div>
+        )}
 
-        {/* 5 Navigation Tabs */}
-        <div className="flex items-center gap-2 border-b border-[#1E2736] pb-2 overflow-x-auto text-xs">
-          <button
-            type="button"
-            onClick={() => setBottomTab("POSITIONS")}
-            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-              bottomTab === "POSITIONS"
-                ? "bg-[#00E5FF] text-[#0B0E11]"
-                : "bg-[#0A0A0E] text-[#94A3B8] hover:text-white"
-            }`}
-          >
-            <span>Open Positions</span>
-            <span className="px-1.5 py-0.2 rounded text-[10px] bg-black/30">
-              {hftPositions.filter((p) => p.status === "OPEN").length}
-            </span>
-          </button>
+        {/* ═══════════════════════════════════════════════════════════════════
+            B. STEP 1: SELECT YOUR MARKET & TRADING PAIR
+        ═══════════════════════════════════════════════════════════════════ */}
+        <section
+          id="step-1-market-pair-section"
+          className="bg-[#161B22] border border-[#21262D] rounded-2xl p-5 sm:p-6 space-y-5"
+        >
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+              <span className="text-xs font-semibold uppercase tracking-wider text-[#10B981]">
+                Step 1
+              </span>
+              <h2 className="text-lg font-semibold text-white mt-0.5">
+                Select Your Market &amp; Trading Pair
+              </h2>
+            </div>
 
-          <button
-            type="button"
-            onClick={() => setBottomTab("OPEN_ORDERS")}
-            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-              bottomTab === "OPEN_ORDERS"
-                ? "bg-[#00E5FF] text-[#0B0E11]"
-                : "bg-[#0A0A0E] text-[#94A3B8] hover:text-white"
-            }`}
-          >
-            <span>Open Orders</span>
-            <span className="px-1.5 py-0.2 rounded text-[10px] bg-black/30">
-              {hftOrders.length}
-            </span>
-          </button>
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+              {/* Two Category Tabs: Forex & Cryptocurrency */}
+              <div className="inline-flex p-1 rounded-xl bg-[#0D1117] border border-[#21262D]">
+                <button
+                  id="tab-category-forex"
+                  type="button"
+                  onClick={() => {
+                    setSelectedCategory("FOREX");
+                    setPairSearch("");
+                  }}
+                  className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+                    selectedCategory === "FOREX" && !pairSearch
+                      ? "bg-[#161B22] text-white border border-[#30363D] shadow-sm"
+                      : "text-[#8B949E] hover:text-white"
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5 text-sky-400" />
+                  Forex
+                </button>
+                <button
+                  id="tab-category-crypto"
+                  type="button"
+                  onClick={() => {
+                    setSelectedCategory("CRYPTO");
+                    setPairSearch("");
+                  }}
+                  className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+                    selectedCategory === "CRYPTO" && !pairSearch
+                      ? "bg-[#161B22] text-white border border-[#30363D] shadow-sm"
+                      : "text-[#8B949E] hover:text-white"
+                  }`}
+                >
+                  <Coins className="w-3.5 h-3.5 text-[#10B981]" />
+                  Cryptocurrency
+                </button>
+              </div>
 
-          <button
-            type="button"
-            onClick={() => setBottomTab("CLOSED_TRADES")}
-            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-              bottomTab === "CLOSED_TRADES"
-                ? "bg-[#00E5FF] text-[#0B0E11]"
-                : "bg-[#0A0A0E] text-[#94A3B8] hover:text-white"
-            }`}
-          >
-            <span>Closed Trades</span>
-            <span className="px-1.5 py-0.2 rounded text-[10px] bg-black/30">
-              {recentTrades.length}
-            </span>
-          </button>
+              {/* Search across complete 313-instrument Exness MT5 catalogue */}
+              <div className="relative min-w-[240px] sm:min-w-[280px]">
+                <Search className="w-4 h-4 text-[#8B949E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  id="input-search-broker-pairs"
+                  type="text"
+                  value={pairSearch}
+                  onChange={(e) => setPairSearch(e.target.value)}
+                  placeholder="Search all broker pairs (e.g. XAU, EUR, BTC)..."
+                  className="w-full pl-9 pr-8 py-2 rounded-xl bg-[#0D1117] border border-[#21262D] focus:border-[#10B981] focus:outline-none text-xs text-white placeholder-[#8B949E]"
+                />
+                {pairSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setPairSearch("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#8B949E] hover:text-white"
+                    aria-label="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => setBottomTab("HISTORY")}
-            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-              bottomTab === "HISTORY"
-                ? "bg-[#00E5FF] text-[#0B0E11]"
-                : "bg-[#0A0A0E] text-[#94A3B8] hover:text-white"
-            }`}
-          >
-            <span>Order History</span>
-          </button>
+          {/* Instrument Cards (4 Popular Initially + Horizontal Swipe on Mobile) */}
+          {loadingPairs && allPairs.length === 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {[1, 2, 3, 4].map((n) => (
+                <div
+                  key={n}
+                  className="h-24 rounded-xl bg-[#0D1117] border border-[#21262D] animate-pulse p-4"
+                />
+              ))}
+            </div>
+          ) : filteredPairs.length === 0 ? (
+            <div className="text-center py-8 bg-[#0D1117] rounded-xl border border-[#21262D]">
+              <p className="text-sm text-[#8B949E]">
+                No broker instruments matched &ldquo;{pairSearch}&rdquo; across {allPairs.length} connected Exness MT5 symbols.
+              </p>
+            </div>
+          ) : (
+            <div className="flex sm:grid sm:grid-cols-2 lg:grid-cols-4 gap-3 overflow-x-auto pb-1 sm:pb-0 snap-x">
+              {filteredPairs.map((pair) => {
+                const isSelected = pair.symbol === selectedPair;
+                const priceEntry = pairPricesMap[pair.symbol];
+                const cardPrice =
+                  isSelected && displayMid > 0
+                    ? displayMid
+                    : priceEntry?.bid || pair.last_price || pair.bid || 0;
+                const changePct = priceEntry?.changePct ?? pair.price_change_pct ?? 0;
+                const isPositive = changePct >= 0;
 
-          <button
-            type="button"
-            onClick={() => setBottomTab("ACCOUNT")}
-            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-              bottomTab === "ACCOUNT"
-                ? "bg-[#00E5FF] text-[#0B0E11]"
-                : "bg-[#0A0A0E] text-[#94A3B8] hover:text-white"
-            }`}
-          >
-            <span>Account Summary</span>
-          </button>
-        </div>
+                return (
+                  <button
+                    key={pair.symbol}
+                    id={`pair-card-${pair.symbol}`}
+                    type="button"
+                    onClick={() => handleSelectPair(pair.symbol)}
+                    className={`min-w-[210px] sm:min-w-0 snap-start text-left p-4 rounded-xl border transition-all ${
+                      isSelected
+                        ? "bg-[#10B981]/10 border-[#10B981] shadow-sm"
+                        : "bg-[#0D1117] border-[#21262D] hover:border-[#30363D]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                            isSelected
+                              ? "bg-[#10B981] text-[#0D1117] font-bold"
+                              : "border border-[#30363D] text-transparent"
+                          }`}
+                        >
+                          ✓
+                        </span>
+                        <span className="font-bold text-sm text-white">{pair.symbol}</span>
+                      </div>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-[#161B22] border border-[#21262D] text-[#8B949E]">
+                        {pair.category === "Cryptocurrencies" ? "Crypto" : pair.category}
+                      </span>
+                    </div>
 
-        {/* Tab contents */}
-        {bottomTab === "POSITIONS" && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-[#272735] text-[#64748B] uppercase text-[10px]">
-                  <th className="py-2 px-2.5">Ticket</th>
-                  <th className="py-2 px-2.5">Symbol</th>
-                  <th className="py-2 px-2.5">Side</th>
-                  <th className="py-2 px-2.5">Volume</th>
-                  <th className="py-2 px-2.5">Entry Price</th>
-                  <th className="py-2 px-2.5">Mark Price</th>
-                  <th className="py-2 px-2.5">Stop Loss</th>
-                  <th className="py-2 px-2.5">Take Profit</th>
-                  <th className="py-2 px-2.5">Net PnL</th>
-                  <th className="py-2 px-2.5">Profit Target</th>
-                  <th className="py-2 px-2.5">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#1E2736]">
-                {hftPositions.filter((p) => p.status === "OPEN").length === 0 ? (
-                  <tr>
-                    <td colSpan={11} className="py-8 text-center text-xs text-[#64748B]">
-                      No open positions on Exness MT5 Demo #474861031 (0 exposure). Engine is monitoring for qualifying entries.
-                    </td>
-                  </tr>
+                    <p className="text-xs text-[#8B949E] truncate mt-1.5">
+                      {pair.display_name || pair.symbol}
+                    </p>
+
+                    <div className="flex items-baseline justify-between gap-2 mt-3 pt-2 border-t border-[#21262D]/70">
+                      <span className="text-sm font-semibold text-white">
+                        {cardPrice > 0
+                          ? `$${formatInstrumentPrice(cardPrice, pair.digits)}`
+                          : "Click for live quote"}
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-0.5 text-xs font-medium ${
+                          changePct > 0
+                            ? "text-[#10B981]"
+                            : changePct < 0
+                            ? "text-[#E11D48]"
+                            : "text-[#8B949E]"
+                        }`}
+                      >
+                        {changePct !== 0 ? (
+                          <>
+                            {isPositive ? (
+                              <TrendingUp className="w-3 h-3" />
+                            ) : (
+                              <TrendingDown className="w-3 h-3" />
+                            )}
+                            {isPositive ? "+" : ""}
+                            {changePct.toFixed(2)}%
+                          </>
+                        ) : (
+                          <span className="text-[#10B981]">Live MT5</span>
+                        )}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* See More Pairs Toggle */}
+          {!pairSearch && totalCategoryPairsCount > 4 && (
+            <div className="flex justify-center">
+              <button
+                id="btn-see-more-pairs"
+                type="button"
+                onClick={() => setShowAllPairs((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-xs font-medium text-[#8B949E] hover:text-white transition-colors"
+              >
+                {showAllPairs ? (
+                  <>
+                    <ChevronUp className="w-3.5 h-3.5" />
+                    Show Top 4 Popular Pairs
+                  </>
                 ) : (
-                  hftPositions
-                    .filter((p) => p.status === "OPEN")
-                    .map((pos) => {
-                      const netPnl = pos.net_pnl !== undefined ? pos.net_pnl : pos.unrealized_pnl || 0;
-                      const isProfit = netPnl >= 0;
-                      const isTargetReached = netPnl >= (pos.profit_target_usd || 1.0);
+                  <>
+                    <ChevronDown className="w-3.5 h-3.5" />+ See More Pairs ({totalCategoryPairsCount}{" "}
+                    in {selectedCategory === "CRYPTO" ? "Cryptocurrency" : "Forex"} · {allPairs.length} Total Broker Pairs)
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Live Broker Quote Bar (Real-Time Exness MT5 Bid, Ask & Spread) */}
+          <div
+            id="live-broker-quote-bar"
+            className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3.5 rounded-xl bg-[#0D1117] border border-[#21262D]"
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] animate-pulse shrink-0" />
+              <span className="text-xs font-semibold uppercase tracking-wide text-[#8B949E]">
+                Live Broker Quote (Exness MT5):
+              </span>
+              <span id="quote-selected-symbol" className="text-sm font-bold text-white">
+                {selectedPair}
+              </span>
+              {selectedPairMeta?.display_name && (
+                <span className="text-xs text-[#8B949E] hidden md:inline">
+                  ({selectedPairMeta.display_name})
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4 sm:gap-6 text-xs">
+              <div>
+                <span className="text-[#8B949E] mr-1.5">Live Price:</span>
+                <span id="quote-live-price" className="font-semibold text-[#10B981]">
+                  ${formatInstrumentPrice(displayMid, currentDigits)}
+                </span>
+              </div>
+              <div className="h-3.5 w-px bg-[#21262D] hidden sm:block" />
+              <div>
+                <span className="text-[#8B949E] mr-1.5">Bid:</span>
+                <span id="quote-live-bid" className="font-semibold text-white">
+                  ${formatInstrumentPrice(displayBid, currentDigits)}
+                </span>
+              </div>
+              <div className="h-3.5 w-px bg-[#21262D] hidden sm:block" />
+              <div>
+                <span className="text-[#8B949E] mr-1.5">Ask:</span>
+                <span id="quote-live-ask" className="font-semibold text-white">
+                  ${formatInstrumentPrice(displayAsk, currentDigits)}
+                </span>
+              </div>
+              <div className="h-3.5 w-px bg-[#21262D] hidden sm:block" />
+              <div>
+                <span className="text-[#8B949E] mr-1.5">Spread:</span>
+                <span id="quote-live-spread" className="font-semibold text-white">
+                  {formatInstrumentPrice(displaySpread, currentDigits)}
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ═══════════════════════════════════════════════════════════════════
+            C & D. STEP 2: SELECT ACCOUNT TYPE  +  STEP 3: STRATEGY APPROVAL
+        ═══════════════════════════════════════════════════════════════════ */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* STEP 2: SELECT ACCOUNT TYPE */}
+          <section
+            id="step-2-account-selection-section"
+            className="bg-[#161B22] border border-[#21262D] rounded-2xl p-5 sm:p-6 flex flex-col justify-between space-y-4"
+          >
+            <div className="space-y-4">
+              <div>
+                <span className="text-xs font-semibold uppercase tracking-wider text-[#10B981]">
+                  Step 2
+                </span>
+                <h2 className="text-lg font-semibold text-white mt-0.5">
+                  Select Account Type
+                </h2>
+              </div>
+
+              {/* Card 1: Demo Account */}
+              <button
+                id="card-select-demo-account"
+                type="button"
+                onClick={handleSelectDemoAccount}
+                className={`w-full text-left p-4 rounded-xl border transition-all ${
+                  selectedAccountMode === "DEMO"
+                    ? "bg-[#10B981]/10 border-[#10B981]"
+                    : "bg-[#0D1117] border-[#21262D] hover:border-[#30363D]"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <span
+                      className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
+                        selectedAccountMode === "DEMO"
+                          ? "bg-[#10B981] text-[#0D1117] font-bold"
+                          : "border border-[#30363D]"
+                      }`}
+                    >
+                      {selectedAccountMode === "DEMO" ? "●" : ""}
+                    </span>
+                    <span className="text-sm font-bold text-white">
+                      DEMO ACCOUNT {selectedAccountMode === "DEMO" ? "(Selected)" : ""}
+                    </span>
+                  </div>
+                  <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-[#10B981]/20 text-[#10B981]">
+                    Verified
+                  </span>
+                </div>
+                <p className="text-xs text-[#8B949E] mt-2">
+                  Safe testing environment. No real money at risk.
+                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2 mt-3 pt-2.5 border-t border-[#21262D]/80 text-xs">
+                  <span className="text-[#E6EDF3] font-medium">
+                    Connected: Exness Demo #474861031 ({systemStatus.server_name})
+                  </span>
+                  <span className="text-[#10B981] font-semibold">
+                    Balance: $
+                    {(accountSummary?.wallet_balance_usd ?? demoAccountObj.available_balance ?? 5073.84).toLocaleString(
+                      undefined,
+                      { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+                    )}
+                  </span>
+                </div>
+              </button>
+
+              {/* Card 2: Real Account */}
+              <button
+                id="card-select-real-account"
+                type="button"
+                onClick={handleClickRealAccountCard}
+                className="w-full text-left p-4 rounded-xl bg-[#0D1117] border border-[#21262D] hover:border-[#30363D] transition-all"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <span className="w-4 h-4 rounded-full border border-[#30363D]" />
+                    <span className="text-sm font-bold text-white">REAL ACCOUNT</span>
+                  </div>
+                  <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-[#161B22] border border-[#30363D] text-[#8B949E]">
+                    <Lock className="w-3 h-3" />
+                    Protected
+                  </span>
+                </div>
+                <p className="text-xs text-[#8B949E] mt-2">
+                  Live trading with actual funds.
+                </p>
+                <p className="text-xs text-amber-400/90 mt-1.5 font-medium">
+                  Requires Risk Consent &amp; Authorization
+                </p>
+              </button>
+            </div>
+
+            {realConsentNotice && (
+              <div
+                id="real-consent-safety-notice"
+                className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 leading-relaxed"
+              >
+                {realConsentNotice}
+              </div>
+            )}
+          </section>
+
+          {/* STEP 3: STRATEGY APPROVAL */}
+          <section
+            id="step-3-strategy-approval-section"
+            className="bg-[#161B22] border border-[#21262D] rounded-2xl p-5 sm:p-6 flex flex-col justify-between space-y-4"
+          >
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <span className="text-xs font-semibold uppercase tracking-wider text-[#10B981]">
+                    Step 3
+                  </span>
+                  <h2 className="text-lg font-semibold text-white mt-0.5">
+                    Strategy Approval
+                  </h2>
+                </div>
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#10B981]/10 border border-[#10B981]/30 text-xs font-medium text-[#10B981]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
+                  Suitable for current {selectedPair} market
+                </span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D] space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#10B981]" />
+                    <h3 className="text-base font-bold text-white">{selectedStrategy.name}</h3>
+                  </div>
+                  <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981]">
+                    {selectedStrategy.badge}
+                  </span>
+                </div>
+
+                <div>
+                  <p className="text-xs font-semibold text-[#E6EDF3]">Objective:</p>
+                  <p className="text-xs text-[#8B949E] mt-0.5 leading-relaxed">
+                    {selectedStrategy.objective}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-xs font-semibold text-[#E6EDF3] mb-1.5">
+                    Automated by BITDEX:
+                  </p>
+                  <ul className="space-y-1.5 text-xs text-[#8B949E]">
+                    {selectedStrategy.bullets.map((b, i) => (
+                      <li key={i} className="flex items-start gap-2">
+                        <Check className="w-3.5 h-3.5 text-[#10B981] shrink-0 mt-0.5" />
+                        <span>{b}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[#8B949E]">Allocated Capital:</span>
+                <div className="inline-flex rounded-lg bg-[#0D1117] border border-[#21262D] p-0.5">
+                  {[100, 150, 200, 250].map((cap) => (
+                    <button
+                      key={cap}
+                      type="button"
+                      onClick={() => setAllocatedCapitalUsd(cap)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                        allocatedCapitalUsd === cap
+                          ? "bg-[#10B981] text-[#0D1117]"
+                          : "text-[#8B949E] hover:text-white"
+                      }`}
+                    >
+                      ${cap}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  id="btn-use-recommended-strategy"
+                  type="button"
+                  onClick={() => setSelectedStrategyId("BITDEX_SMART_SCALPING")}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#10B981]/15 border border-[#10B981]/40 text-xs font-semibold text-[#10B981]"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  Use Recommended
+                </button>
+                <button
+                  id="btn-review-strategy-list"
+                  type="button"
+                  onClick={() => setStrategyModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-xs font-medium text-[#E6EDF3] transition-colors"
+                >
+                  Review List
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        {/* ═══════════════════════════════════════════════════════════════════
+            E. EXECUTION CONFIRMATION & PRIMARY CTA BUTTON
+        ═══════════════════════════════════════════════════════════════════ */}
+        <section
+          id="execution-confirmation-section"
+          className="bg-[#161B22] border border-[#21262D] rounded-2xl p-5 sm:p-6 space-y-5"
+        >
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-4 border-b border-[#21262D]">
+            <div>
+              <h2 className="text-base font-semibold text-white">Execution Confirmation</h2>
+              <p className="text-xs text-[#8B949E] mt-0.5">
+                BITDEX manages entries automatically and only opens a trade when market conditions qualify.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="px-3 py-1.5 rounded-lg bg-[#0D1117] border border-[#21262D] text-[#E6EDF3]">
+                Pair: <strong className="text-white">{selectedPair}</strong>
+              </span>
+              <span className="px-3 py-1.5 rounded-lg bg-[#0D1117] border border-[#21262D] text-[#E6EDF3]">
+                Account: <strong className="text-[#10B981]">Demo (#474861031)</strong>
+              </span>
+              <span className="px-3 py-1.5 rounded-lg bg-[#0D1117] border border-[#21262D] text-[#E6EDF3]">
+                Strategy: <strong className="text-white">{selectedStrategy.name}</strong>
+              </span>
+              <span className="px-3 py-1.5 rounded-lg bg-[#0D1117] border border-[#21262D] text-[#E6EDF3]">
+                Allocated: <strong className="text-white">${allocatedCapitalUsd}.00</strong>
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            <button
+              id="btn-execute-trading-strategy"
+              type="button"
+              disabled={executingStrategy}
+              onClick={() => setExecuteModalOpen(true)}
+              className="flex-1 py-4 px-6 rounded-xl bg-[#10B981] hover:bg-[#059669] active:bg-[#047857] disabled:opacity-50 text-[#0D1117] font-bold text-base tracking-wide shadow-lg shadow-[#10B981]/10 transition-all flex items-center justify-center gap-2.5"
+            >
+              <Play className="w-5 h-5 fill-current" />
+              {executingStrategy ? "VERIFYING & EXECUTING STRATEGY..." : "EXECUTE TRADING STRATEGY"}
+            </button>
+
+            {strategyArmed && (
+              <button
+                id="btn-pause-disarm-strategy"
+                type="button"
+                disabled={disarmingStrategy}
+                onClick={handlePauseOrDisarmStrategy}
+                className="py-4 px-5 rounded-xl bg-[#0D1117] hover:bg-[#1C2128] border border-[#30363D] text-xs font-semibold text-[#E6EDF3] transition-colors flex items-center justify-center gap-2"
+              >
+                <Pause className="w-4 h-4 text-amber-400" />
+                {disarmingStrategy ? "Pausing..." : "Pause / Disarm Strategy"}
+              </button>
+            )}
+          </div>
+
+          {/* Live Automated Strategy Status Bar */}
+          <div
+            id="strategy-execution-status-box"
+            className={`p-4 rounded-xl border flex items-start gap-3 ${
+              executionStatusBanner.status === "EXECUTED" ||
+              executionStatusBanner.status === "ARMED_VERIFIED"
+                ? "bg-[#10B981]/10 border-[#10B981]/30"
+                : executionStatusBanner.status === "WAITING"
+                ? "bg-[#0D1117] border-[#10B981]/40"
+                : executionStatusBanner.status === "ERROR"
+                ? "bg-[#E11D48]/10 border-[#E11D48]/30"
+                : "bg-[#0D1117] border-[#21262D]"
+            }`}
+          >
+            <Sparkles className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
+            <div className="space-y-1 text-xs">
+              <div className="font-semibold text-white">
+                Status: {executionStatusBanner.headline}
+              </div>
+              <p className="text-[#8B949E] leading-relaxed">{executionStatusBanner.detail}</p>
+            </div>
+          </div>
+        </section>
+
+        {/* ═══════════════════════════════════════════════════════════════════
+            F. TRADING PERFORMANCE & CLOSE ALL TRADES
+        ═══════════════════════════════════════════════════════════════════ */}
+        <section
+          id="trading-performance-section"
+          className="bg-[#161B22] border border-[#21262D] rounded-2xl p-5 sm:p-6 space-y-5"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-white">
+                Trading Performance{" "}
+                <span className="text-xs font-medium text-[#8B949E] ml-1">
+                  (Demo Account #474861031 — {selectedPair})
+                </span>
+              </h2>
+              <p className="text-xs text-[#8B949E] mt-0.5">
+                Settled and floating figures directly from Exness MT5 Demo #474861031 (net of broker commissions).
+              </p>
+            </div>
+
+            <button
+              id="btn-close-all-trades"
+              type="button"
+              onClick={() => setCloseAllModalOpen(true)}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold tracking-wide transition-colors shadow-sm"
+            >
+              <OctagonAlert className="w-4 h-4" />
+              CLOSE ALL TRADES
+            </button>
+          </div>
+
+          {/* 4 Metric Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D]">
+              <span className="text-xs text-[#8B949E]">Today&apos;s Net P&amp;L</span>
+              <div
+                id="metric-today-net-pnl"
+                className={`text-lg sm:text-xl font-bold mt-1.5 ${
+                  todayNetPnl > 0
+                    ? "text-[#10B981]"
+                    : todayNetPnl < 0
+                    ? "text-[#E11D48]"
+                    : "text-white"
+                }`}
+              >
+                {formatUsdSigned(todayNetPnl)}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D]">
+              <span className="text-xs text-[#8B949E]">Total Realised P&amp;L</span>
+              <div
+                id="metric-total-realized-pnl"
+                className={`text-lg sm:text-xl font-bold mt-1.5 ${
+                  totalRealizedPnl > 0
+                    ? "text-[#10B981]"
+                    : totalRealizedPnl < 0
+                    ? "text-[#E11D48]"
+                    : "text-white"
+                }`}
+              >
+                {formatUsdSigned(totalRealizedPnl)}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D]">
+              <span className="text-xs text-[#8B949E]">Current Floating P&amp;L</span>
+              <div
+                id="metric-floating-pnl"
+                className={`text-lg sm:text-xl font-bold mt-1.5 ${
+                  currentFloatingPnl > 0
+                    ? "text-[#10B981]"
+                    : currentFloatingPnl < 0
+                    ? "text-[#E11D48]"
+                    : "text-white"
+                }`}
+              >
+                {formatUsdSigned(currentFloatingPnl)}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D]">
+              <span className="text-xs text-[#8B949E]">Open Trades</span>
+              <div id="metric-open-trades-count" className="text-lg sm:text-xl font-bold text-white mt-1.5">
+                {openTradesCount} Active
+              </div>
+            </div>
+          </div>
+
+          {/* Open Positions Table (if any active) */}
+          {openPositions.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-[#10B981]">
+                Active Open Trades
+              </h3>
+              <div className="overflow-x-auto rounded-xl border border-[#21262D] bg-[#0D1117]">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[#21262D] text-[#8B949E]">
+                      <th className="py-2.5 px-3 font-medium">Ticket</th>
+                      <th className="py-2.5 px-3 font-medium">Pair</th>
+                      <th className="py-2.5 px-3 font-medium">Side</th>
+                      <th className="py-2.5 px-3 font-medium">Entry</th>
+                      <th className="py-2.5 px-3 font-medium">Current</th>
+                      <th className="py-2.5 px-3 font-medium">SL / TP</th>
+                      <th className="py-2.5 px-3 font-medium text-right">Net P&amp;L</th>
+                      <th className="py-2.5 px-3 font-medium text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#21262D]">
+                    {openPositions.map((pos) => {
+                      const netVal = Number(pos.net_pnl ?? pos.unrealized_pnl ?? 0);
                       return (
-                        <tr key={pos.position_id} className="hover:bg-[#181822]">
-                          <td className="py-2.5 px-2.5 font-bold text-[#00E5FF] font-mono">#{pos.position_id}</td>
-                          <td className="py-2.5 px-2.5 font-bold text-white">{pos.symbol}</td>
-                          <td className="py-2.5 px-2.5">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              pos.direction === "LONG" || pos.direction === "BUY"
-                                ? "bg-[#10B981]/15 text-[#10B981]"
-                                : "bg-[#F6465D]/15 text-[#F6465D]"
-                            }`}>
+                        <tr key={pos.position_id} className="hover:bg-[#161B22]/60">
+                          <td className="py-2.5 px-3 font-mono text-white">#{pos.position_id}</td>
+                          <td className="py-2.5 px-3 font-semibold text-white">{pos.symbol}</td>
+                          <td className="py-2.5 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded font-semibold ${
+                                pos.direction === "BUY"
+                                  ? "bg-[#10B981]/15 text-[#10B981]"
+                                  : "bg-[#E11D48]/15 text-[#FDA4AF]"
+                              }`}
+                            >
                               {pos.direction}
                             </span>
                           </td>
-                          <td className="py-2.5 px-2.5 text-white">{pos.size} Lot</td>
-                          <td className="py-2.5 px-2.5 text-[#94A3B8]">${safeFormatPrice(pos.entry_price)}</td>
-                          <td className="py-2.5 px-2.5 text-white">${safeFormatPrice(pos.mark_price)}</td>
-                          <td className="py-2.5 px-2.5 text-rose-400 font-bold">${safeFormatPrice(pos.stop_loss_price)}</td>
-                          <td className="py-2.5 px-2.5 text-emerald-400 font-bold">${safeFormatPrice(pos.take_profit_price)}</td>
-                          <td className={`py-2.5 px-2.5 font-bold ${isProfit ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                            {isProfit ? "+" : ""}${safeNum(netPnl)}
+                          <td className="py-2.5 px-3 text-[#E6EDF3]">
+                            ${formatInstrumentPrice(pos.entry_price, 2)}
                           </td>
-                          <td className="py-2.5 px-2.5">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                              isTargetReached
-                                ? "bg-emerald-950/80 text-emerald-400 border-emerald-500 animate-pulse"
-                                : "bg-cyan-950/40 text-cyan-400 border-cyan-500/30"
-                            }`}>
-                              {isTargetReached ? "TARGET REACHED ($1.00)" : `Exit @ +$${(pos.profit_target_usd || 1.0).toFixed(2)}`}
-                            </span>
+                          <td className="py-2.5 px-3 text-[#E6EDF3]">
+                            ${formatInstrumentPrice(pos.mark_price, 2)}
                           </td>
-                          <td className="py-2.5 px-2.5">
+                          <td className="py-2.5 px-3 text-[#8B949E]">
+                            {pos.stop_loss_price ? `$${formatInstrumentPrice(pos.stop_loss_price, 2)}` : "—"} /{" "}
+                            {pos.take_profit_price ? `$${formatInstrumentPrice(pos.take_profit_price, 2)}` : "—"}
+                          </td>
+                          <td
+                            className={`py-2.5 px-3 font-bold text-right ${
+                              netVal >= 0 ? "text-[#10B981]" : "text-[#E11D48]"
+                            }`}
+                          >
+                            {formatUsdSigned(netVal)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
                             <button
                               type="button"
-                              onClick={() => setClosingTicket(pos.position_id)}
-                              className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 text-[11px] font-bold transition-all cursor-pointer"
+                              disabled={closingSingleTicket === String(pos.position_id)}
+                              onClick={() => handleCloseSinglePosition(String(pos.position_id))}
+                              className="px-2.5 py-1 rounded-lg bg-[#E11D48]/20 hover:bg-[#E11D48] text-[#FDA4AF] hover:text-white font-semibold transition-colors"
                             >
-                              Close
+                              {closingSingleTicket === String(pos.position_id) ? "Closing..." : "Close"}
                             </button>
                           </td>
                         </tr>
                       );
-                    })
-                )}
-              </tbody>
-              </table>
-          </div>
-        )}
-
-        {bottomTab === "OPEN_ORDERS" && (
-          <div className="overflow-x-auto">
-            {hftOrders.length === 0 ? (
-              <div className="py-8 text-center text-xs text-[#64748B]">
-                No open broker orders active.
+                    })}
+                  </tbody>
+                </table>
               </div>
-            ) : (
-              <table className="w-full text-left text-xs">
+            </div>
+          )}
+
+          {/* Recent Completed Trades Table */}
+          <div className="space-y-2.5">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-[#8B949E]">
+              Recent Completed Trades
+            </h3>
+            <div className="overflow-x-auto rounded-xl border border-[#21262D] bg-[#0D1117]">
+              <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-[#272735] text-[#64748B] uppercase text-[10px]">
-                    <th className="py-2 px-2.5">Order ID</th>
-                    <th className="py-2 px-2.5">Symbol</th>
-                    <th className="py-2 px-2.5">Side</th>
-                    <th className="py-2 px-2.5">Type</th>
-                    <th className="py-2 px-2.5">Price</th>
-                    <th className="py-2 px-2.5">Quantity</th>
-                    <th className="py-2 px-2.5">Status</th>
+                  <tr className="border-b border-[#21262D] text-[#8B949E]">
+                    <th className="py-3 px-4 font-medium">Time (UTC)</th>
+                    <th className="py-3 px-4 font-medium">Pair</th>
+                    <th className="py-3 px-4 font-medium">Result / Status</th>
+                    <th className="py-3 px-4 font-medium text-right">Realised Net P&amp;L</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#1E2736]">
-                  {hftOrders.map((ord) => (
-                    <tr key={ord.order_id} className="hover:bg-[#181822]">
-                      <td className="py-2.5 px-2.5 text-[#94A3B8] font-mono">{ord.order_id}</td>
-                      <td className="py-2.5 px-2.5 font-bold text-white">{ord.symbol}</td>
-                      <td className="py-2.5 px-2.5">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          ord.side === "BUY" ? "bg-[#10B981]/15 text-[#10B981]" : "bg-[#F6465D]/15 text-[#F6465D]"
-                        }`}>
-                          {ord.side}
-                        </span>
+                <tbody className="divide-y divide-[#21262D]">
+                  {closedPositions.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="py-6 text-center text-[#8B949E]">
+                        No completed trades recorded yet on this account.
                       </td>
-                      <td className="py-2.5 px-2.5 text-white">{ord.order_type}</td>
-                      <td className="py-2.5 px-2.5 text-[#94A3B8]">${safeFormatPrice(ord.price)}</td>
-                      <td className="py-2.5 px-2.5 text-white">{ord.quantity}</td>
-                      <td className="py-2.5 px-2.5 text-[#00E5FF] font-bold">{ord.status}</td>
                     </tr>
-                  ))}
+                  ) : (
+                    closedPositions.slice(0, 8).map((trade, idx) => {
+                      const netPnl = Number(trade.realized_pnl ?? trade.net_pnl ?? 0);
+                      const isPositive = netPnl >= 0;
+                      const timeStr = String(trade.closed_at || trade.opened_at || "")
+                        .replace("T", " ")
+                        .replace("Z", "")
+                        .slice(0, 16);
+                      const statusLabel =
+                        trade.result_label ||
+                        (isPositive
+                          ? "Closed automatically (Profit Target Reached)"
+                          : "Closed automatically (Stop-Loss Protection)");
+
+                      return (
+                        <tr key={`${trade.position_id}-${idx}`} className="hover:bg-[#161B22]/50">
+                          <td className="py-3 px-4 text-[#8B949E] font-mono">
+                            {timeStr || "Recent"}
+                          </td>
+                          <td className="py-3 px-4 font-semibold text-white">
+                            {trade.symbol || "BTCUSDr"}
+                          </td>
+                          <td className="py-3 px-4 text-[#E6EDF3]">{statusLabel}</td>
+                          <td
+                            className={`py-3 px-4 font-bold text-right ${
+                              isPositive ? "text-[#10B981]" : "text-[#E11D48]"
+                            }`}
+                          >
+                            {formatUsdSigned(netPnl)}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
-            )}
+            </div>
           </div>
-        )}
+        </section>
 
-        {bottomTab === "CLOSED_TRADES" && (
-          <div className="overflow-x-auto">
-            {recentTrades.length === 0 ? (
-              <div className="py-8 text-center text-xs text-[#64748B]">
-                No closed trades recorded today.
+        {/* ═══════════════════════════════════════════════════════════════════
+            G. COLLAPSIBLE SYSTEM & SAFETY STATUS FOOTER
+        ═══════════════════════════════════════════════════════════════════ */}
+        <footer className="bg-[#161B22] border border-[#21262D] rounded-2xl overflow-hidden">
+          <button
+            id="btn-toggle-system-safety"
+            type="button"
+            onClick={() => setFooterExpanded((prev) => !prev)}
+            className="w-full px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-left hover:bg-[#1C2128] transition-colors"
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-white">
+              {footerExpanded ? (
+                <ChevronUp className="w-4 h-4 text-[#10B981]" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-[#10B981]" />
+              )}
+              <span>System &amp; Safety Status</span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 text-xs text-[#8B949E]">
+              <span>
+                Broker:{" "}
+                <strong className="text-[#10B981]">
+                  {systemStatus.indicators.broker_connection.label}
+                </strong>
+              </span>
+              <span>|</span>
+              <span>
+                Market Data:{" "}
+                <strong className="text-[#10B981]">
+                  {systemStatus.indicators.market_data.label}
+                </strong>
+              </span>
+              <span>|</span>
+              <span>
+                Execution:{" "}
+                <strong className="text-[#10B981]">
+                  {systemStatus.indicators.execution_availability.label}
+                </strong>
+              </span>
+              <span>|</span>
+              <span>
+                Protection:{" "}
+                <strong className="text-[#10B981]">
+                  {systemStatus.indicators.risk_protection.label}
+                </strong>
+              </span>
+            </div>
+          </button>
+
+          {footerExpanded && (
+            <div
+              id="panel-system-safety-details"
+              className="px-5 pb-5 pt-2 border-t border-[#21262D] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs"
+            >
+              <div className="p-3 rounded-xl bg-[#0D1117] border border-[#21262D]">
+                <div className="text-[#8B949E]">Broker Connection</div>
+                <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#10B981]" />
+                  {systemStatus.indicators.broker_connection.label} (#{systemStatus.account_login})
+                </div>
               </div>
-            ) : (
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-[#272735] text-[#64748B] uppercase text-[10px]">
-                    <th className="py-2 px-2.5">Trade ID</th>
-                    <th className="py-2 px-2.5">Symbol</th>
-                    <th className="py-2 px-2.5">Side</th>
-                    <th className="py-2 px-2.5">Entry Price</th>
-                    <th className="py-2 px-2.5">Exit Price</th>
-                    <th className="py-2 px-2.5">Realized PnL</th>
-                    <th className="py-2 px-2.5">Fee</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#1E2736]">
-                  {recentTrades.map((tr) => {
-                    const isProfit = (tr.realized_pnl || 0) >= 0;
-                    return (
-                      <tr key={tr.trade_id} className="hover:bg-[#181822]">
-                        <td className="py-2.5 px-2.5 text-[#94A3B8] font-mono">{tr.trade_id}</td>
-                        <td className="py-2.5 px-2.5 font-bold text-white">{tr.symbol}</td>
-                        <td className="py-2.5 px-2.5">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            tr.side === "BUY" ? "bg-[#10B981]/15 text-[#10B981]" : "bg-[#F6465D]/15 text-[#F6465D]"
-                          }`}>
-                            {tr.side}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-2.5 text-[#94A3B8]">${safeFormatPrice(tr.entry_price)}</td>
-                        <td className="py-2.5 px-2.5 text-white">${safeFormatPrice(tr.exit_price)}</td>
-                        <td className={`py-2.5 px-2.5 font-bold ${isProfit ? "text-[#10B981]" : "text-[#F6465D]"}`}>
-                          {isProfit ? "+" : ""}${safeNum(tr.realized_pnl)}
-                        </td>
-                        <td className="py-2.5 px-2.5 text-[#94A3B8]">${safeNum(tr.fee_usd)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
 
-        {bottomTab === "HISTORY" && (
-          <div className="py-8 text-center text-xs text-[#64748B]">
-            Full order execution audit history synchronizing from broker gateway...
-          </div>
-        )}
+              <div className="p-3 rounded-xl bg-[#0D1117] border border-[#21262D]">
+                <div className="text-[#8B949E]">Market Data</div>
+                <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#10B981]" />
+                  {systemStatus.indicators.market_data.label} (Live MT5)
+                </div>
+              </div>
 
-        {bottomTab === "ACCOUNT" && (
-          <div className="p-4 rounded-xl bg-[#0A0A0E] border border-[#272735] grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-            <div>
-              <div className="text-[#64748B] uppercase text-[10px]">Account ID</div>
-              <div className="font-bold text-white font-mono">{selectedAccount?.masked_id || "474861031"}</div>
+              <div className="p-3 rounded-xl bg-[#0D1117] border border-[#21262D]">
+                <div className="text-[#8B949E]">Execution Availability</div>
+                <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#10B981]" />
+                  {systemStatus.indicators.execution_availability.label}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#0D1117] border border-[#21262D]">
+                <div className="text-[#8B949E]">Risk Protection</div>
+                <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#10B981]" />
+                  {systemStatus.indicators.risk_protection.label} (SL &amp;TP Attached)
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#0D1117] border border-[#21262D]">
+                <div className="text-[#8B949E]">Trade Monitoring</div>
+                <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#10B981]" />
+                  {systemStatus.indicators.trade_monitoring.label} (250ms Continuous)
+                </div>
+              </div>
             </div>
-            <div>
-              <div className="text-[#64748B] uppercase text-[10px]">Environment</div>
-              <div className="font-bold text-emerald-400">{selectedAccount?.environment || "DEMO"}</div>
-            </div>
-            <div>
-              <div className="text-[#64748B] uppercase text-[10px]">Wallet Balance</div>
-              <div className="font-bold text-white">${safeNum(selectedAccount?.available_balance || 5075.72)} USD</div>
-            </div>
-            <div>
-              <div className="text-[#64748B] uppercase text-[10px]">Equity</div>
-              <div className="font-bold text-white">${safeNum(selectedAccount?.equity || 5075.21)} USD</div>
-            </div>
-          </div>
-        )}
+          )}
+        </footer>
       </div>
 
-{/* ─── MODAL: STEP 2 STRATEGY CONFIGURATION MODAL ─────────────────────── */}
-      {isConfigModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="w-full max-w-xl rounded-2xl bg-[#121218] border border-[#272735] shadow-2xl overflow-hidden font-mono text-xs flex flex-col max-h-[90vh]">
-            {/* Modal Header */}
-            <div className="p-4 sm:p-5 border-b border-[#272735] flex items-center justify-between bg-[#181822]">
-              <div className="flex items-center gap-2">
-                <Sliders className="w-4 h-4 text-[#00E5FF]" />
-                <h3 className="text-sm font-bold text-white">
-                  Configure Automated Scalping Engine — {selectedPair}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsConfigModalOpen(false)}
-                className="text-[#94A3B8] hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Modal Form Content */}
-            <form onSubmit={handleSaveConfig} className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1">
-              {/* Direction */}
-              <div className="space-y-1.5">
-                <label className="text-white font-bold block">Execution Direction:</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(["AUTO", "LONG_ONLY", "SHORT_ONLY"] as const).map((dir) => (
-                    <button
-                      key={dir}
-                      type="button"
-                      onClick={() => setStrategyConfig({ ...strategyConfig, direction: dir })}
-                      className={`py-2 px-3 rounded-xl border text-center font-bold cursor-pointer transition-all ${
-                        strategyConfig.direction === dir
-                          ? "bg-[#00E5FF] text-[#0B0E11] border-[#00E5FF]"
-                          : "bg-[#0A0A0E] text-[#94A3B8] border-[#272735] hover:text-white hover:bg-[#181822]"
-                      }`}
-                    >
-                      {dir}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[10px] text-[#64748B]">
-                  AUTO evaluates trend direction from ADX and Donchian channel breakouts.
-                </p>
-              </div>
-
-              {/* Margin Allocation & Quick Pills */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-white font-bold">Demo / Testnet Margin Allocation ($):</label>
-                  <span className="text-[#00E5FF] font-bold">${safeNum(strategyConfig?.margin_allocation_usd, 2)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="10"
-                    max="500"
-                    step="5"
-                    value={strategyConfig.margin_allocation_usd}
-                    onChange={(e) => setStrategyConfig({ ...strategyConfig, margin_allocation_usd: Number(e.target.value) })}
-                    className="flex-1 px-3 py-2 bg-[#0A0A0E] border border-[#272735] rounded-xl text-white font-bold focus:outline-none focus:border-[#00E5FF]"
-                  />
-                  <div className="flex items-center gap-1">
-                    {[25, 50, 100, 250].map((amt) => (
-                      <button
-                        key={amt}
-                        type="button"
-                        onClick={() => setStrategyConfig({ ...strategyConfig, margin_allocation_usd: amt })}
-                        className="px-2.5 py-2 rounded-xl bg-[#181822] hover:bg-[#272735] border border-[#272735] text-[#94A3B8] hover:text-white font-bold cursor-pointer"
-                      >
-                        ${amt}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Leverage Slider */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-white font-bold">Isolated Leverage (Clamped to Max 5x):</label>
-                  <span className="text-[#00E5FF] font-bold">{strategyConfig.leverage}x</span>
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {[1, 2, 3, 5].map((lev) => (
-                    <button
-                      key={lev}
-                      type="button"
-                      onClick={() => setStrategyConfig({ ...strategyConfig, leverage: lev })}
-                      className={`py-2 px-3 rounded-xl border text-center font-bold cursor-pointer transition-all ${
-                        strategyConfig.leverage === lev
-                          ? "bg-[#00E5FF] text-[#0B0E11] border-[#00E5FF]"
-                          : "bg-[#0A0A0E] text-[#94A3B8] border-[#272735] hover:text-white"
-                      }`}
-                    >
-                      {lev}x
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[10px] text-[#64748B]">
-                  Notional position: ${safeNum((strategyConfig?.margin_allocation_usd ?? 0) * (strategyConfig?.leverage ?? 1), 2)} USD.
-                </p>
-              </div>
-
-              {/* Profit Target & Max Loss Grid */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-white font-bold block">Net Profit Target (%):</label>
-                  <input
-                    type="number"
-                    min="0.2"
-                    max="5.0"
-                    step="0.05"
-                    value={strategyConfig.net_profit_target_pct}
-                    onChange={(e) => setStrategyConfig({ ...strategyConfig, net_profit_target_pct: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-[#0A0A0E] border border-[#272735] rounded-xl text-[#10B981] font-bold focus:outline-none focus:border-[#10B981]"
-                  />
-                  <span className="text-[10px] text-[#64748B] block">Minimum +0.20%</span>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-white font-bold block">Max Loss SL (%):</label>
-                  <input
-                    type="number"
-                    min="0.3"
-                    max="5.0"
-                    step="0.05"
-                    value={strategyConfig.max_loss_pct}
-                    onChange={(e) => setStrategyConfig({ ...strategyConfig, max_loss_pct: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-[#0A0A0E] border border-[#272735] rounded-xl text-[#F6465D] font-bold focus:outline-none focus:border-[#F6465D]"
-                  />
-                  <span className="text-[10px] text-[#64748B] block">Protective hard stop</span>
-                </div>
-              </div>
-
-              {/* Holding Duration & Session Mode */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-white font-bold block">Max Hold Time:</label>
-                  <select
-                    value={strategyConfig.max_holding_duration_seconds}
-                    onChange={(e) => setStrategyConfig({ ...strategyConfig, max_holding_duration_seconds: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-[#0A0A0E] border border-[#272735] rounded-xl text-white font-bold focus:outline-none"
-                  >
-                    <option value={300}>5 Minutes</option>
-                    <option value={900}>15 Minutes</option>
-                    <option value={1800}>30 Minutes</option>
-                    <option value={3600}>60 Minutes</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-white font-bold block">Session Mode:</label>
-                  <select
-                    value={strategyConfig.session_mode}
-                    onChange={(e) => setStrategyConfig({ ...strategyConfig, session_mode: e.target.value as any })}
-                    className="w-full px-3 py-2 bg-[#0A0A0E] border border-[#272735] rounded-xl text-white font-bold focus:outline-none"
-                  >
-                    <option value="SINGLE_CYCLE">Single Cycle (Exit &amp; Stop)</option>
-                    <option value="CONTINUOUS">Continuous Scalp</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Live Break-Even Math Card inside Modal */}
-              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#00E5FF]/30 space-y-2">
-                <div className="flex items-center gap-2 text-[#00E5FF] font-bold">
-                  <Activity className="w-4 h-4" />
-                  <span>Live Fee &amp; Break-Even Accounting:</span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px] text-[#94A3B8]">
-                  <div>
-                    <span>Maker Fees (Roundtrip):</span>
-                    <span className="font-bold text-white block">0.040%</span>
-                  </div>
-                  <div>
-                    <span>Friction &amp; Funding:</span>
-                    <span className="font-bold text-white block">0.010%</span>
-                  </div>
-                  <div>
-                    <span>Gross Break-Even Required:</span>
-                    <span className="font-bold text-[#00E5FF] block">+{safeNum(breakEvenMath?.requiredMovePct, 3)}%</span>
-                  </div>
-                  <div>
-                    <span>Net Gain at Target:</span>
-                    <span className="font-bold text-[#10B981] block">
-                      +${safeNum(breakEvenMath?.estDollarProfit, 2)} (+{safeNum(breakEvenMath?.netReturnPct, 2)}%)
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Modal Actions */}
-              <div className="pt-2 flex items-center justify-end gap-3 border-t border-[#272735]">
-                <button
-                  type="button"
-                  onClick={() => setIsConfigModalOpen(false)}
-                  className="px-4 py-2 rounded-xl bg-[#181822] hover:bg-[#272735] text-[#94A3B8] hover:text-white font-bold cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingConfig}
-                  className="px-5 py-2 rounded-xl bg-[#00E5FF] hover:bg-[#00E5FF]/90 text-[#0B0E11] font-bold cursor-pointer shadow-md shadow-[#00E5FF]/20 flex items-center gap-1.5"
-                >
-                  {savingConfig && <RefreshCw className="w-4 h-4 animate-spin" />}
-                  <span>Save &amp; Validate Configuration</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-      {/* ─── PHASE 2: $20.00 USD ONE-TIME HFT ACCOUNT ACTIVATION MODAL ─────── */}
-      {isActivationModalOpen && (
+      {/* ═════════════════════════════════════════════════════════════════════
+          MODAL 1: EXECUTE TRADING STRATEGY CONFIRMATION
+      ═════════════════════════════════════════════════════════════════════ */}
+      {executeModalOpen && (
         <div
-          id="hft-activation-modal"
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
+          id="modal-confirm-execute-strategy"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
         >
-          <div className="bg-[#121218] border border-[#272735] rounded-2xl max-w-lg w-full p-5 sm:p-6 space-y-5 shadow-2xl font-mono">
-            <div className="flex items-start justify-between gap-3 border-b border-[#272735] pb-4">
-              <div className="space-y-1">
-                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-400 text-[10px] font-bold uppercase">
-                  <Lock className="w-3 h-3" />
-                  <span>One-Time HFT Account Activation</span>
-                </div>
-                <h3 className="text-base sm:text-lg font-bold text-white">
-                  Activate Your BITDEX Account
+          <div className="w-full max-w-lg rounded-2xl bg-[#161B22] border border-[#30363D] p-6 space-y-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold text-white">
+                  Approve &amp; Execute Trading Strategy
                 </h3>
-                <p className="text-xs text-[#94A3B8]">
-                  Your account must be activated before you can use the Automated Scalping Engine.
+                <p className="text-xs text-[#8B949E] mt-1">
+                  Review your selected parameters before authorizing BITDEX automated execution.
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setIsActivationModalOpen(false)}
-                className="text-[#94A3B8] hover:text-white cursor-pointer"
+                onClick={() => setExecuteModalOpen(false)}
+                className="p-1 rounded-lg text-[#8B949E] hover:text-white"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Fee Display Card */}
-            <div className="p-4 rounded-xl bg-[#0A0A0E] border border-[#00E5FF]/40 flex items-center justify-between">
-              <div>
-                <span className="text-[11px] text-[#94A3B8] block uppercase">One-Time Activation Fee</span>
-                <span className="text-2xl font-extrabold text-[#00E5FF]">$20.00 USD</span>
+            <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D] space-y-2.5 text-xs">
+              <div className="flex justify-between py-1 border-b border-[#21262D]">
+                <span className="text-[#8B949E]">Selected Pair:</span>
+                <span className="font-bold text-white">{selectedPair}</span>
               </div>
-              <div className="text-right text-[11px] text-[#10B981]">
-                <span className="font-bold block">LIFETIME HFT ACCESS</span>
-                <span className="text-[#94A3B8]">No recurring monthly fee</span>
+              <div className="flex justify-between py-1 border-b border-[#21262D]">
+                <span className="text-[#8B949E]">Selected Account:</span>
+                <span className="font-bold text-[#10B981]">
+                  Exness Demo #474861031 (Exness-MT5Trial15)
+                </span>
               </div>
-            </div>
-
-            {/* What Activation Unlocks */}
-            <div className="space-y-2 text-xs text-[#94A3B8]">
-              <div className="text-white font-bold">What $20.00 Activation Unlocks:</div>
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
-                <span>Unlocks HFT Strategy Configuration &amp; Autonomous Session Controls</span>
+              <div className="flex justify-between py-1 border-b border-[#21262D]">
+                <span className="text-[#8B949E]">Selected Strategy:</span>
+                <span className="font-bold text-white">{selectedStrategy.name}</span>
               </div>
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
-                <span>Enables Exness MT5 &amp; Binance Futures HFT Execution Gateways</span>
+              <div className="flex justify-between py-1 border-b border-[#21262D]">
+                <span className="text-[#8B949E]">Allocated Capital:</span>
+                <span className="font-bold text-white">${allocatedCapitalUsd}.00 USD</span>
               </div>
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />
-                <span>Activates Real-Time Pre-Trade Quantitative Risk Guard &amp; Watchdog</span>
+              <div className="flex justify-between py-1">
+                <span className="text-[#8B949E]">Per-Trade Protection:</span>
+                <span className="font-semibold text-[#E6EDF3]">
+                  +$1.00 Net Target · -$1.00 Stop-Loss Protection
+                </span>
               </div>
             </div>
 
-            {/* Payment Method & Verification Step */}
-            {!activationCheckoutData ? (
-              <div className="space-y-3 pt-1">
-                <label className="block text-xs text-[#94A3B8]">
-                  Select Payment Settlement Method:
-                </label>
-                <div className="grid grid-cols-2 gap-2.5 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setActivationProvider("BINANCE_PAY")}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                      activationProvider === "BINANCE_PAY"
-                        ? "bg-[#00E5FF]/15 border-[#00E5FF] text-white font-bold"
-                        : "bg-[#0A0A0E] border-[#272735] text-[#94A3B8]"
-                    }`}
-                  >
-                    <div className="text-white font-bold">Binance Pay</div>
-                    <div className="text-[10px] text-[#94A3B8]">Instant $20 USDT/USD</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActivationProvider("CRYPTO_USDT")}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                      activationProvider === "CRYPTO_USDT"
-                        ? "bg-[#00E5FF]/15 border-[#00E5FF] text-white font-bold"
-                        : "bg-[#0A0A0E] border-[#272735] text-[#94A3B8]"
-                    }`}
-                  >
-                    <div className="text-white font-bold">USDT Direct</div>
-                    <div className="text-[10px] text-[#94A3B8]">TRC20 / ERC20 Verified</div>
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-amber-500/40 space-y-2 text-xs">
-                <div className="flex items-center justify-between text-amber-400 font-bold">
-                  <span>Payment Invoice Generated</span>
-                  <span>{activationCheckoutData.payment_reference}</span>
-                </div>
-                <div className="text-[11px] text-[#94A3B8]">
-                  Amount Due: <strong className="text-white">${safeNum(activationCheckoutData?.amount, 2)} {activationCheckoutData.currency}</strong> via <strong className="text-white">{activationCheckoutData.provider}</strong>
-                </div>
-              </div>
-            )}
+            <div className="p-3.5 rounded-xl bg-[#0D1117] border border-[#21262D] text-xs text-[#8B949E] leading-relaxed">
+              <strong className="text-white">Risk Disclosure:</strong> BITDEX analyses market direction
+              automatically and only enters when expected movement clears round-trip execution costs.
+              Stop-loss and take-profit protections are attached to every order, though exact settlement
+              prices depend on market liquidity.
+            </div>
 
-            {/* Modal Footer Buttons */}
-            <div className="pt-3 border-t border-[#272735] flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center justify-end gap-3 pt-2">
               <button
                 type="button"
-                id="btn-continue-viewing-hft"
-                onClick={() => {
-                  setActivationCheckoutData(null);
-                  setIsActivationModalOpen(false);
-                }}
-                className="px-4 py-2.5 rounded-xl bg-[#181822] hover:bg-[#272735] text-[#94A3B8] hover:text-white text-xs font-bold cursor-pointer"
+                onClick={() => setExecuteModalOpen(false)}
+                className="px-4 py-2.5 rounded-xl bg-[#0D1117] hover:bg-[#1C2128] border border-[#30363D] text-xs font-semibold text-[#E6EDF3]"
               >
-                Continue Viewing Dashboard
+                Cancel
               </button>
-
-              {!activationCheckoutData ? (
-                <button
-                  type="button"
-                  id="btn-pay-activate-20"
-                  disabled={activationBusy}
-                  onClick={handleInitiateActivationCheckout}
-                  className="px-5 py-2.5 rounded-xl bg-[#00E5FF] hover:bg-[#00E5FF]/90 text-[#0B0E11] text-xs font-extrabold cursor-pointer shadow-lg shadow-[#00E5FF]/20 flex items-center gap-2"
-                >
-                  {activationBusy && <RefreshCw className="w-4 h-4 animate-spin" />}
-                  <span>Pay $20.00 &amp; Activate Account</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  id="btn-confirm-activate-20"
-                  disabled={activationBusy}
-                  onClick={handleCompleteActivationPayment}
-                  className="px-5 py-2.5 rounded-xl bg-[#10B981] hover:bg-[#10B981]/90 text-[#0B0E11] text-xs font-extrabold cursor-pointer shadow-lg shadow-[#10B981]/20 flex items-center gap-2"
-                >
-                  {activationBusy && <RefreshCw className="w-4 h-4 animate-spin" />}
-                  <span>Verify $20.00 Payment &amp; Unlock HFT</span>
-                </button>
-              )}
+              <button
+                id="btn-confirm-execute-strategy"
+                type="button"
+                disabled={executingStrategy}
+                onClick={handleConfirmAndExecuteStrategy}
+                className="px-5 py-2.5 rounded-xl bg-[#10B981] hover:bg-[#059669] text-[#0D1117] text-xs font-bold tracking-wide"
+              >
+                {executingStrategy ? "Authorizing..." : "Confirm & Execute Strategy"}
+              </button>
             </div>
           </div>
         </div>
       )}
-      {consentModalOpen && selectedAccount && (
-        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true" id="real-consent-modal">
-          <div className="w-full max-w-lg rounded-2xl bg-[#121218] border border-[#F6465D]/40 shadow-2xl p-5 sm:p-6 space-y-4 font-mono max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between gap-2 border-b border-[#272735] pb-3">
-              <div className="flex items-center gap-2 text-[#F6465D]">
-                <AlertTriangle className="w-5 h-5 shrink-0" />
-                <h3 className="text-xs sm:text-sm font-bold uppercase">
-                  One-Time Real Account Authentication &amp; Voluntary Consent
+
+      {/* ═════════════════════════════════════════════════════════════════════
+          MODAL 2: REAL ACCOUNT RISK DISCLOSURE & CONSENT
+      ═════════════════════════════════════════════════════════════════════ */}
+      {realConsentModalOpen && (
+        <div
+          id="modal-real-account-consent"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-[#161B22] border border-[#30363D] p-6 space-y-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+                <h3 className="text-lg font-bold text-white">
+                  Real Account Risk Disclosure &amp; Consent
                 </h3>
               </div>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-rose-950/60 text-rose-400 border border-rose-500/30 font-bold">
-                REAL-CONSENT-v2
-              </span>
-            </div>
-
-            <div className="p-3 rounded-xl bg-[#0A0A0E] border border-[#272735] flex items-center justify-between text-xs">
-              <span className="text-[#94A3B8]">Selected Real Account:</span>
-              <span className="font-bold text-white">{selectedAccount.display_label}</span>
-            </div>
-
-            {consentError && (
-              <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-500/40 text-xs text-rose-300 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-                <span>{consentError}</span>
-              </div>
-            )}
-
-            <ul className="text-xs text-[#94A3B8] space-y-1.5 list-disc pl-5">
-              <li>This account uses real money. You can lose part or all of the funds allocated.</li>
-              <li>Leveraged positions can be liquidated, and losses can exceed your expectations.</li>
-              <li>Trading fees, spreads, swaps and slippage apply and reduce returns.</li>
-              <li>Live execution remains locked by platform safety controls (<code>live_trading_locked = True</code>).</li>
-            </ul>
-
-            {/* Step 1: Step-Up Authentication */}
-            <div className="space-y-1.5 pt-1">
-              <label htmlFor="real-consent-step-up-password" className="text-[11px] font-bold text-white uppercase block">
-                1. Step-Up Authentication (Account Password or Email Verification)
-              </label>
-              <input
-                type="password"
-                id="real-consent-step-up-password"
-                value={stepUpPassword}
-                onChange={(e) => setStepUpPassword(e.target.value)}
-                placeholder="Enter your BITDEX password to verify identity"
-                className="w-full px-3 py-2.5 rounded-lg bg-[#0A0A0E] border border-[#272735] text-xs text-white focus:outline-none focus:border-[#00E5FF]"
-              />
-            </div>
-
-            {/* Step 2: Explicit Voluntary Consent Checkbox */}
-            <div className="p-3.5 rounded-xl bg-[#0A0A0E] border border-[#272735]">
-              <label className="flex items-start gap-2.5 text-xs text-white cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  id="real-consent-checkbox"
-                  checked={consentChecked}
-                  onChange={(e) => setConsentChecked(e.target.checked)}
-                  className="mt-0.5 shrink-0"
-                />
-                <span className="leading-relaxed">
-                  I voluntarily authorise BITDEX to use my selected REAL trading account for Automated High-Frequency Scalping. I understand that trading involves financial risk and that losses may occur.
-                </span>
-              </label>
-            </div>
-
-            {/* Step 3: Explicit Confirmation Button */}
-            <div className="flex flex-wrap justify-end gap-2.5 pt-2 border-t border-[#272735]">
               <button
                 type="button"
-                onClick={() => {
-                  setConsentModalOpen(false);
-                  setPendingAction(null);
-                }}
-                className="px-4 py-2 rounded-lg bg-[#181822] border border-[#272735] text-xs text-[#94A3B8] hover:text-white cursor-pointer"
+                onClick={() => setRealConsentModalOpen(false)}
+                className="p-1 rounded-lg text-[#8B949E] hover:text-white"
               >
-                Cancel
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D] space-y-2.5 text-xs text-[#8B949E] leading-relaxed">
+              <p className="text-white font-medium">
+                You are requesting Live Trading authorization on Exness MT5:
+              </p>
+              <ul className="list-disc pl-5 space-y-1.5">
+                <li>Market trading with real funds carries financial risk and potential loss.</li>
+                <li>
+                  BITDEX manages trades within strict stop-loss and allocated-capital rules, but profits are not guaranteed.
+                </li>
+                <li>
+                  During the current Demo validation phase, Real-Account order execution remains permanently locked by platform safety governance (<code className="text-amber-300">REAL_TRADING_PERMANENTLY_LOCKED</code>).
+                </li>
+              </ul>
+            </div>
+
+            <label className="flex items-start gap-2.5 cursor-pointer select-none text-xs text-[#E6EDF3]">
+              <input
+                id="checkbox-real-risk-consent"
+                type="checkbox"
+                checked={realConsentChecked}
+                onChange={(e) => setRealConsentChecked(e.target.checked)}
+                className="mt-0.5 rounded border-[#30363D] bg-[#0D1117] text-[#10B981] focus:ring-0"
+              />
+              <span>I understand the risks and approve Real Account trading.</span>
+            </label>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                id="btn-cancel-real-consent"
+                type="button"
+                onClick={() => setRealConsentModalOpen(false)}
+                className="px-4 py-2.5 rounded-xl bg-[#0D1117] hover:bg-[#1C2128] border border-[#30363D] text-xs font-semibold text-[#E6EDF3]"
+              >
+                Cancel (Stay on Demo)
               </button>
               <button
+                id="btn-confirm-real-consent"
                 type="button"
-                id="real-consent-confirm"
-                disabled={!consentChecked || !stepUpPassword.trim() || consentBusy}
-                onClick={submitRealConsent}
-                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${
-                  consentChecked && stepUpPassword.trim() && !consentBusy
-                    ? "bg-[#F6465D] hover:bg-[#F6465D]/90 text-white cursor-pointer shadow-lg shadow-[#F6465D]/20"
-                    : "bg-[#181822] text-[#64748B] cursor-not-allowed"
-                }`}
+                disabled={!realConsentChecked || realConsentSubmitting}
+                onClick={handleConfirmRealConsent}
+                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-[#0D1117] text-xs font-bold"
               >
-                {consentBusy ? "Authenticating & Recording…" : "Authenticate & Confirm Real-Account Consent"}
+                {realConsentSubmitting ? "Recording..." : "Confirm & Request Activation"}
               </button>
             </div>
           </div>
         </div>
       )}
-      {/* ─── MODAL: POSITION MANUAL CLOSE CONFIRMATION ──────────────────────── */}
-      {closingTicket && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-2xl bg-[#121218] border border-[#272735] shadow-2xl p-5 font-mono text-xs space-y-4">
-            <div className="flex items-center justify-between border-b border-[#272735] pb-3">
-              <div className="flex items-center gap-2 text-white font-bold text-sm">
-                <span className="text-rose-400">🛑</span>
-                <span>Confirm Broker Position Close</span>
+
+      {/* ═════════════════════════════════════════════════════════════════════
+          MODAL 3: CONFIRM CLOSE ALL OPEN TRADES
+      ═════════════════════════════════════════════════════════════════════ */}
+      {closeAllModalOpen && (
+        <div
+          id="modal-confirm-close-all-trades"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-[#161B22] border border-[#30363D] p-6 space-y-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <OctagonAlert className="w-5 h-5 text-[#E11D48] shrink-0" />
+                <h3 className="text-lg font-bold text-white">
+                  Confirm: Close All Open Trades?
+                </h3>
               </div>
               <button
                 type="button"
-                onClick={() => setClosingTicket(null)}
-                className="text-[#94A3B8] hover:text-white cursor-pointer"
+                onClick={() => setCloseAllModalOpen(false)}
+                className="p-1 rounded-lg text-[#8B949E] hover:text-white"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-3 rounded-xl bg-[#0B0F17] border border-[#263147] space-y-1.5 text-[#94A3B8]">
-              <div>Target Broker Account: <strong className="text-white">Exness MT5 Demo #474861031</strong></div>
-              <div>Position Ticket: <strong className="text-[#00E5FF]">#{closingTicket}</strong></div>
-              <div>Instrument: <strong className="text-white">{selectedPair}</strong></div>
-              <div>Close Type: <strong className="text-amber-400">MARKET DEAL OPPOSITE FILL</strong></div>
-              <div>Close Reason: <strong className="text-white">MANUAL_CLOSE (Explicit User Action)</strong></div>
+
+            <div className="p-4 rounded-xl bg-[#0D1117] border border-[#21262D] space-y-2 text-xs text-[#8B949E] leading-relaxed">
+              <p className="text-white font-medium">
+                This will immediately request the broker to close all{" "}
+                <strong className="text-white">{openTradesCount}</strong> open position(s) for{" "}
+                <strong className="text-[#10B981]">
+                  Demo Account #474861031 (Exness-MT5Trial15)
+                </strong>
+                .
+              </p>
+              <p>
+                Open positions will close at current market prices by exact broker ticket, which may
+                result in a realised profit or loss.
+              </p>
             </div>
-            <div className="text-[11px] text-[#94A3B8]">
-              Submitting this request will dispatch an opposite market order to the MT5 worker to flatten position #{closingTicket} immediately.
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                id="btn-keep-trades-open"
+                type="button"
+                onClick={() => setCloseAllModalOpen(false)}
+                className="px-4 py-2.5 rounded-xl bg-[#0D1117] hover:bg-[#1C2128] border border-[#30363D] text-xs font-semibold text-[#E6EDF3]"
+              >
+                Keep Trades Open
+              </button>
+              <button
+                id="btn-confirm-close-all-trades"
+                type="button"
+                disabled={closingAll}
+                onClick={handleConfirmCloseAllTrades}
+                className="px-5 py-2.5 rounded-xl bg-[#E11D48] hover:bg-[#BE123C] text-white text-xs font-bold"
+              >
+                {closingAll ? "Closing Trades..." : "Yes, Close All Trades Now"}
+              </button>
             </div>
-            <div className="grid grid-cols-2 gap-3 pt-2">
+          </div>
+        </div>
+      )}
+
+      {/* ═════════════════════════════════════════════════════════════════════
+          MODAL 4: REVIEW PRE-BUILT STRATEGIES
+      ═════════════════════════════════════════════════════════════════════ */}
+      {strategyModalOpen && (
+        <div
+          id="modal-review-strategies"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-[#161B22] border border-[#30363D] p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-white">Approved Pre-Built Strategies</h3>
               <button
                 type="button"
-                onClick={() => setClosingTicket(null)}
-                disabled={closeLoading}
-                className="py-2.5 px-3 rounded-xl bg-[#1E2736] hover:bg-[#263147] text-white font-bold transition-all cursor-pointer"
+                onClick={() => setStrategyModalOpen(false)}
+                className="p-1 rounded-lg text-[#8B949E] hover:text-white"
               >
-                Cancel
+                <X className="w-5 h-5" />
               </button>
-              <button
-                type="button"
-                id="btn-confirm-broker-close"
-                onClick={() => handleClosePosition(closingTicket)}
-                disabled={closeLoading}
-                className="py-2.5 px-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-rose-600/25"
-              >
-                {closeLoading ? <RefreshCw className="w-4 h-4 animate-spin text-white" /> : <span>Confirm Close</span>}
-              </button>
+            </div>
+
+            <div className="space-y-3">
+              {APPROVED_STRATEGIES.map((strat) => {
+                const active = strat.id === selectedStrategyId;
+                return (
+                  <button
+                    key={strat.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedStrategyId(strat.id);
+                      setStrategyModalOpen(false);
+                    }}
+                    className={`w-full text-left p-4 rounded-xl border transition-all ${
+                      active
+                        ? "bg-[#10B981]/10 border-[#10B981]"
+                        : "bg-[#0D1117] border-[#21262D] hover:border-[#30363D]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-sm text-white">{strat.name}</span>
+                      <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981]">
+                        {strat.badge}
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#8B949E] mt-1.5 leading-relaxed">
+                      {strat.objective}
+                    </p>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

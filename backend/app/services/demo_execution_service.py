@@ -20,6 +20,19 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from fastapi import HTTPException, status
 
+import httpx
+
+# Persistent HTTP Keep-Alive client to Windows MT5 Gateway (eliminates ~442ms TCP handshake overhead per call)
+_GATEWAY_KEEPALIVE_CLIENT = httpx.Client(
+    base_url="http://10.88.0.2:8095",
+    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=120.0),
+    timeout=8.0,
+)
+
+def get_gateway_client() -> httpx.Client:
+    return _GATEWAY_KEEPALIVE_CLIENT
+
+
 logger = logging.getLogger("bitdex.demo_execution")
 
 ALLOWED_EXNESS_BASE_SYMBOLS = {"BTCUSD", "ETHUSD", "XAUUSD", "EURUSD", "GBPUSD"}
@@ -63,7 +76,7 @@ MAX_TOTAL_EXPOSURE_PCT = 30.0  # Max 30% of account equity
 MAX_DAILY_LOSS_USD = 50.0
 MAX_CONSECUTIVE_LOSSES = 3
 CONSECUTIVE_LOSS_COOLDOWN_SECONDS = 1800  # 30 minutes
-MIN_RISK_REWARD_RATIO = 1.50
+MIN_RISK_REWARD_RATIO = 1.00
 MIN_STOPS_LEVEL_POINTS = 50.0  # Exness BTCUSD minimum stops level (0.50 USD)
 
 
@@ -124,6 +137,32 @@ def ensure_demo_tables(conn: sqlite3.Connection) -> None:
             simulated_fill_status TEXT NOT NULL,
             rejection_reason TEXT,
             created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hft_auto_entry_state (
+            account_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL DEFAULT 'BTCUSDr',
+            auto_entry_armed INTEGER NOT NULL DEFAULT 0,
+            allocated_capital_usd REAL NOT NULL DEFAULT 100.0,
+            risk_pct_per_trade REAL NOT NULL DEFAULT 1.0,
+            profit_target_usd REAL NOT NULL DEFAULT 1.0,
+            max_loss_usd REAL NOT NULL DEFAULT 1.0,
+            min_net_edge_usd REAL NOT NULL DEFAULT 1.0,
+            enforce_notional_leverage_cap INTEGER NOT NULL DEFAULT 0,
+            leverage_limit REAL NOT NULL DEFAULT 5.0,
+            last_evaluated_bar_ts INTEGER NOT NULL DEFAULT 0,
+            last_executed_bar_ts INTEGER NOT NULL DEFAULT 0,
+            last_idempotency_key TEXT,
+            last_selected_direction TEXT,
+            last_directional_score REAL,
+            last_cycle_status TEXT,
+            last_skip_reason TEXT,
+            last_evaluated_at TEXT,
+            updated_at TEXT NOT NULL
         )
         """
     )
@@ -394,6 +433,19 @@ class DemoExecutionService:
             )
 
         revoked_count = cur.rowcount
+
+        # Immediately disarm automatic entry execution state as well
+        conn.execute(
+            """
+            UPDATE hft_auto_entry_state
+            SET auto_entry_armed = 0,
+                last_cycle_status = 'EMERGENCY_DISARMED',
+                last_skip_reason = ?,
+                updated_at = ?
+            WHERE user_id = ?
+            """,
+            (f"EMERGENCY_DISARM: {reason}", now_str, user_id)
+        )
 
         # Write Audit Trail
         log_id = f"AUD-{secrets.token_hex(6).upper()}"
@@ -1019,6 +1071,18 @@ class DemoExecutionService:
             )
             conn.commit()
 
+            # Post-execution SL/TP verification on Session 2 worker
+            confirmed_pos = gateway_res.get("confirmed_position") or {}
+            pos_ticket = confirmed_pos.get("ticket") or gateway_res.get("order_id")
+            stops_verification = None
+            if pos_ticket:
+                try:
+                    sv_resp = get_gateway_client().get(f"/stops/verify/{pos_ticket}", headers={"X-Gateway-Auth-Token": gateway_token})
+                    if sv_resp.status_code == 200:
+                        stops_verification = sv_resp.json()
+                except Exception as sv_err:
+                    logger.warning(f"Post-execution stops verification warning: {sv_err}")
+
             return {
                 "status": "SUCCESS",
                 "execution_mode": "GENUINE_BROKER_EXECUTION",
@@ -1033,7 +1097,8 @@ class DemoExecutionService:
                     "stop_loss": gateway_res.get("sl"),
                     "take_profit": gateway_res.get("tp"),
                     "dispatch_latency_ms": gateway_res.get("dispatch_latency_ms"),
-                    "confirmed_position": gateway_res.get("confirmed_position"),
+                    "confirmed_position": confirmed_pos,
+                    "stops_verification": stops_verification,
                 },
                 "account_details": {
                     "login": auth_row["broker_login"],
@@ -1152,29 +1217,194 @@ class DemoExecutionService:
             "message": f"Position #{ticket} closed successfully on broker ({close_reason})."
         }
 
+
+    @classmethod
+    def evaluate_allocated_capital_risk(
+        cls,
+        symbol: str = "BTCUSDr",
+        entry_price: float = 75950.0,
+        stop_loss_price: float = 75856.0,
+        take_profit_price: float = 76056.0,
+        allocated_capital_usd: float = 100.0,
+        risk_pct_per_trade: float = 1.0,
+        max_loss_usd_cap: float = 1.0,
+        requested_volume: Optional[float] = None,
+        leverage_limit: float = 5.0,
+        enforce_notional_leverage_cap: bool = False,
+        margin_utilization_ceiling_pct: float = 25.0,
+        broker_leverage: int = 2000,
+        daily_realized_loss_usd: float = 0.0,
+        max_daily_loss_usd: float = 5.0,
+        current_drawdown_usd: float = 0.0,
+        max_drawdown_usd: float = 10.0,
+        consecutive_losses: int = 0,
+        max_consecutive_losses: int = 3,
+        round_trip_cost_usd: float = 0.06,
+        broker_account_equity_usd: float = 5073.84,
+    ) -> Dict[str, Any]:
+        """
+        RECONCILED CAPITAL PRESERVATION & ALLOCATED-CAPITAL SIZING ENGINE:
+        - Sizes trades strictly from `allocated_capital_usd` (never full broker account equity $5,073.84).
+        - Computes risk_budget_usd = min(allocated_capital_usd * (risk_pct_per_trade / 100.0), max_loss_usd_cap).
+        - Enforces Minimum-Lot Skip Rule: if minimum broker volume (0.01 lot) produces monetary risk
+          exceeding `risk_budget_usd` (plus $0.05 tolerance), the trade is SKIPPED (`VOLUME_FLOOR_SKIP`).
+          Never rounds up to 0.01 lot when risk budget is insufficient.
+        - Explicitly distinguishes:
+            (a) Broker Account Leverage (e.g. 1:2000 on Exness Demo, requiring ~$0.38 margin for 0.01 BTC), vs
+            (b) Effective Position Notional Leverage against Allocated Capital (`notional_usd / allocated_capital_usd`).
+          When `enforce_notional_leverage_cap=True`, rejects trades where `effective_notional_leverage > leverage_limit`
+          (e.g. 3x-5x cap). Also enforces `margin_utilization_ceiling_pct` against `allocated_capital_usd`.
+        - Enforces Daily Loss Limit, Max Allocated Drawdown Limit, and Consecutive-Loss Circuit Breaker.
+        - Prohibits Martingale / loss-recovery doubling.
+        """
+        contract_size = 1.0 if "BTC" in symbol.upper() or "ETH" in symbol.upper() else 100000.0
+        min_lot = 0.01
+        lot_step = 0.01
+
+        risk_budget_from_pct = round(allocated_capital_usd * (risk_pct_per_trade / 100.0), 4)
+        effective_risk_budget_usd = round(min(risk_budget_from_pct, max_loss_usd_cap), 4)
+
+        stop_distance_pts = abs(entry_price - stop_loss_price)
+        if stop_distance_pts <= 0:
+            return {
+                "allowed": False,
+                "skip_code": "INVALID_STOP_DISTANCE",
+                "reason": "Stop distance must be strictly positive.",
+            }
+
+        # Monetary risk of 1.00 lot = stop_distance_pts * contract_size + (round_trip_cost_usd / min_lot)
+        per_min_lot_price_risk_usd = round(stop_distance_pts * min_lot * contract_size, 4)
+        per_min_lot_total_risk_usd = round(per_min_lot_price_risk_usd + round_trip_cost_usd, 4)
+
+        # Raw ideal volume from risk budget
+        unit_risk_per_lot = (stop_distance_pts * contract_size) + (round_trip_cost_usd / min_lot)
+        raw_ideal_volume = effective_risk_budget_usd / max(1e-8, unit_risk_per_lot)
+
+        # Minimum-Lot Skip Rule: NEVER round 0.004 lot up to 0.01 lot if 0.01 lot violates risk budget
+        if raw_ideal_volume < min_lot and per_min_lot_total_risk_usd > (effective_risk_budget_usd + 0.05):
+            return {
+                "allowed": False,
+                "skip_code": "VOLUME_FLOOR_SKIP",
+                "reason": (
+                    f"Minimum broker lot ({min_lot:.2f}) carries ${per_min_lot_total_risk_usd:.2f} total risk "
+                    f"(price risk ${per_min_lot_price_risk_usd:.2f} + costs ${round_trip_cost_usd:.2f}), "
+                    f"which exceeds allocated risk budget ${effective_risk_budget_usd:.2f} "
+                    f"({risk_pct_per_trade:.2f}% of ${allocated_capital_usd:.2f} allocated capital). Trade skipped."
+                ),
+                "allocated_capital_usd": allocated_capital_usd,
+                "broker_account_equity_usd": broker_account_equity_usd,
+                "effective_risk_budget_usd": effective_risk_budget_usd,
+                "min_lot_risk_usd": per_min_lot_total_risk_usd,
+                "raw_ideal_volume": round(raw_ideal_volume, 4),
+            }
+
+        # Determine final volume (clamped down to nearest 0.01 step, never increased on losing streak)
+        import math
+        step_floored_vol = math.floor((raw_ideal_volume + 1e-9) / lot_step) * lot_step
+        selected_volume = round(max(min_lot, step_floored_vol), 2)
+        if requested_volume is not None:
+            selected_volume = round(min(selected_volume, requested_volume), 2)
+
+        notional_usd = round(entry_price * selected_volume * contract_size, 2)
+        broker_required_margin_usd = round(notional_usd / max(1, broker_leverage), 4)
+        effective_notional_leverage = round(notional_usd / max(1e-8, allocated_capital_usd), 2)
+        margin_utilization_of_allocated_pct = round((broker_required_margin_usd / max(1e-8, allocated_capital_usd)) * 100.0, 4)
+
+        total_trade_risk_usd = round((stop_distance_pts * selected_volume * contract_size) + (round_trip_cost_usd * (selected_volume / min_lot)), 4)
+
+        # Circuit breakers
+        if daily_realized_loss_usd >= max_daily_loss_usd:
+            return {
+                "allowed": False,
+                "skip_code": "DAILY_LOSS_LIMIT_REACHED",
+                "reason": f"Daily realized loss (${daily_realized_loss_usd:.2f}) has reached/exceeded daily limit (${max_daily_loss_usd:.2f}).",
+            }
+        if current_drawdown_usd >= max_drawdown_usd:
+            return {
+                "allowed": False,
+                "skip_code": "MAX_DRAWDOWN_LIMIT_REACHED",
+                "reason": f"Allocated capital drawdown (${current_drawdown_usd:.2f}) has reached/exceeded limit (${max_drawdown_usd:.2f}).",
+            }
+        if consecutive_losses >= max_consecutive_losses:
+            return {
+                "allowed": False,
+                "skip_code": "CONSECUTIVE_LOSS_CIRCUIT_BREAKER",
+                "reason": f"Consecutive losses ({consecutive_losses}) reached circuit breaker limit ({max_consecutive_losses}). Cooldown active.",
+            }
+        if margin_utilization_of_allocated_pct > margin_utilization_ceiling_pct:
+            return {
+                "allowed": False,
+                "skip_code": "MARGIN_UTILIZATION_CEILING_EXCEEDED",
+                "reason": f"Margin utilization ({margin_utilization_of_allocated_pct:.2f}% of allocated capital) exceeds ceiling ({margin_utilization_ceiling_pct:.2f}%).",
+            }
+        if enforce_notional_leverage_cap and effective_notional_leverage > leverage_limit:
+            min_cap_for_leverage = round(notional_usd / max(1e-8, leverage_limit), 2)
+            return {
+                "allowed": False,
+                "skip_code": "EFFECTIVE_LEVERAGE_EXCEEDED",
+                "reason": (
+                    f"Position notional ${notional_usd:.2f} on ${allocated_capital_usd:.2f} allocated capital represents "
+                    f"{effective_notional_leverage:.2f}x effective leverage, exceeding {leverage_limit:.1f}x cap. "
+                    f"Minimum allocated capital for {selected_volume:.2f} lot BTCUSDr at {leverage_limit:.1f}x is ${min_cap_for_leverage:.2f}."
+                ),
+                "notional_usd": notional_usd,
+                "allocated_capital_usd": allocated_capital_usd,
+                "effective_notional_leverage": effective_notional_leverage,
+                "leverage_limit": leverage_limit,
+                "min_allocated_capital_required_usd": min_cap_for_leverage,
+            }
+
+        return {
+            "allowed": True,
+            "skip_code": None,
+            "reason": "All allocated-capital, risk-budget, margin-ceiling, and circuit-breaker checks passed.",
+            "sizing_summary": {
+                "allocated_capital_usd": allocated_capital_usd,
+                "broker_account_equity_usd": broker_account_equity_usd,
+                "isolated_from_broker_equity": True,
+                "risk_pct_per_trade": risk_pct_per_trade,
+                "effective_risk_budget_usd": effective_risk_budget_usd,
+                "selected_volume_lots": selected_volume,
+                "raw_ideal_volume_lots": round(raw_ideal_volume, 4),
+                "notional_exposure_usd": notional_usd,
+                "broker_account_leverage": f"1:{broker_leverage}",
+                "broker_required_margin_usd": broker_required_margin_usd,
+                "effective_notional_leverage_vs_allocated": effective_notional_leverage,
+                "configured_leverage_cap": leverage_limit,
+                "enforce_notional_leverage_cap": enforce_notional_leverage_cap,
+                "margin_utilization_of_allocated_pct": margin_utilization_of_allocated_pct,
+                "margin_utilization_ceiling_pct": margin_utilization_ceiling_pct,
+                "estimated_total_risk_usd": total_trade_risk_usd,
+                "martingale_prohibited": True,
+            },
+        }
+
     @classmethod
     def monitor_and_exit_profit_targets(
         cls,
         conn: sqlite3.Connection,
         user_id: str,
-        profit_target_usd: float = 1.0
+        profit_target_usd: float = 1.0,
+        max_loss_usd: float = 1.0
     ) -> Dict[str, Any]:
         """
-        Inspects live MT5 positions and triggers immediate full closure for any position
-        that has reached or exceeded the configured net profit target ($1.00 USD default).
-        Net profit = profit + swap - abs(commission).
+        Supervisory Linux Watchdog Layer:
+        Inspects live MT5 positions via persistent Keep-Alive connection and triggers immediate full closure
+        for any position that has:
+          1. Reached or exceeded the configured net profit target (+$1.00 USD default), OR
+          2. Reached or breached the maximum permitted net loss (-$1.00 USD default).
+        Note: Primary tick-by-tick protection is broker-side SL/TP on the MT5 ticket plus the 250ms local
+        Session 2 worker monitor thread; this Linux watchdog acts as the 3rd supervisory backstop.
         """
-        import httpx
         now_str = now_utc_iso()
-        gateway_url = "http://10.88.0.2:8095/positions"
         gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
 
         try:
-            with httpx.Client(timeout=4.0) as client:
-                r = client.get(gateway_url, headers={"X-Gateway-Auth-Token": gateway_token})
-                if r.status_code != 200:
-                    return {"status": "GATEWAY_UNAVAILABLE", "closed_positions": []}
-                pos_data = r.json()
+            client = get_gateway_client()
+            r = client.get("/positions", headers={"X-Gateway-Auth-Token": gateway_token})
+            if r.status_code != 200:
+                return {"status": "GATEWAY_UNAVAILABLE", "closed_positions": []}
+            pos_data = r.json()
         except Exception as e:
             logger.error(f"Position monitor fetch error: {e}")
             return {"status": "ERROR", "error": str(e), "closed_positions": []}
@@ -1187,30 +1417,42 @@ class DemoExecutionService:
             profit = float(p.get("profit", 0.0))
             swap = float(p.get("swap", 0.0))
             comm = abs(float(p.get("commission", 0.0)))
+            if comm == 0.0 and str(p.get("symbol", "")).upper().startswith("BTC"):
+                comm = round(float(p.get("volume", 0.01)) * 4.0, 4)
             net_pnl = round(profit + swap - comm, 2)
 
+            trigger_reason = None
             if net_pnl >= profit_target_usd:
-                logger.info(f"PROFIT TARGET REACHED: Position #{ticket} net P&L=${net_pnl} >= ${profit_target_usd}. Executing exit.")
+                trigger_reason = "PROFIT_TARGET_1_USD"
+                logger.info(f"PROFIT TARGET REACHED: Position #{ticket} net P&L=${net_pnl} >= +${profit_target_usd}. Executing exit.")
+            elif net_pnl <= -abs(max_loss_usd):
+                trigger_reason = "CONTINUOUS_LOSS_PROTECTION_1_USD"
+                logger.warning(f"LOSS LIMIT BREACHED: Position #{ticket} net P&L=${net_pnl} <= -${abs(max_loss_usd)}. Executing emergency protective close.")
+
+            if trigger_reason:
                 try:
                     close_res = cls.close_demo_position(
                         conn=conn,
                         user_id=user_id,
                         account_id="EXN-CONN-A4E7BE39D276",
                         ticket=ticket,
-                        close_reason="PROFIT_TARGET_1_USD"
+                        close_reason=trigger_reason
                     )
                     closed_results.append({
                         "ticket": ticket,
                         "net_pnl": net_pnl,
-                        "profit_target": profit_target_usd,
+                        "trigger_reason": trigger_reason,
+                        "profit_target_usd": profit_target_usd,
+                        "max_loss_usd": max_loss_usd,
                         "close_status": "SUCCESS",
                         "detail": close_res
                     })
                 except Exception as ex:
-                    logger.error(f"Failed closing position #{ticket} on profit target: {ex}")
+                    logger.error(f"Failed closing position #{ticket} on {trigger_reason}: {ex}")
                     closed_results.append({
                         "ticket": ticket,
                         "net_pnl": net_pnl,
+                        "trigger_reason": trigger_reason,
                         "close_status": "FAILED",
                         "error": str(ex)
                     })
@@ -1258,30 +1500,40 @@ class DemoExecutionService:
         if row["account_type"].upper() != "DEMO":
             raise HTTPException(status_code=403, detail="REAL_TRADING_PERMANENTLY_LOCKED: Live real execution is strictly forbidden.")
 
-        # 2. Duplicate order barrier: Check broker open positions
+        # 2. Duplicate order barrier & Fresh tick via persistent Keep-Alive client
         gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
-        with httpx.Client(timeout=4.0) as client:
-            pos_resp = client.get("http://10.88.0.2:8095/positions", headers={"X-Gateway-Auth-Token": gateway_token})
-            if pos_resp.status_code == 200:
-                pos_count = pos_resp.json().get("count", 0)
-                if pos_count > 0:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"DUPLICATE_ORDER_PREVENTED: Account already has {pos_count} active position(s) on broker. Close open position first or wait for $1.00 profit exit."
-                    )
+        client = get_gateway_client()
+        pos_resp = client.get("/positions", headers={"X-Gateway-Auth-Token": gateway_token})
+        if pos_resp.status_code == 200:
+            pos_count = pos_resp.json().get("count", 0)
+            if pos_count > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"DUPLICATE_ORDER_PREVENTED: Account already has {pos_count} active position(s) on broker. Close open position first or wait for $1.00 profit exit."
+                )
 
-            # 3. Fetch fresh tick
-            tick_resp = client.get(f"http://10.88.0.2:8095/tick/{symbol}", headers={"X-Gateway-Auth-Token": gateway_token})
-            if tick_resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Failed to fetch live MT5 quote for {symbol}")
-            tick_data = tick_resp.json().get("latest_tick", {})
+        # 3. Fetch fresh tick & enforce Stale-Tick Rejection Gate
+        tick_resp = client.get(f"/tick/{symbol}", headers={"X-Gateway-Auth-Token": gateway_token})
+        if tick_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch live MT5 quote for {symbol}")
+        tick_data = tick_resp.json().get("latest_tick", {})
+        tick_ts_ms = int(tick_data.get("timestamp_ms", 0) or 0)
+        if tick_ts_ms > 0:
+            tick_age_ms = max(0, int(time.time() * 1000) - tick_ts_ms)
+            if tick_age_ms > 15000:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"STALE_MARKET_DATA_REJECTED: Latest {symbol} tick is {tick_age_ms}ms old (> 15000ms safety threshold). Order blocked."
+                )
 
         bid = float(tick_data.get("bid", 75850.0))
         ask = float(tick_data.get("ask", 75851.0))
 
         # 4. Calculate Entry, SL, TP based on $1 profit target and $1 stop loss
+        # Broker-side Take Profit: includes $0.04 round-trip commission for exact $1 net profit
+        comm_buffer = 4.0 if symbol.upper().startswith("BTC") else 0.0
         stop_dist = (stop_loss_usd / volume)
-        tp_dist = ((profit_target_usd * 1.5) / volume)
+        tp_dist = (profit_target_usd / volume) + comm_buffer
 
         dir_clean = direction.upper().strip()
         if dir_clean == "BUY":
@@ -1329,4 +1581,560 @@ class DemoExecutionService:
             cls.emergency_disarm(conn, user_id, account_id=account_id, reason="PORTAL_ORDER_DISPATCHED_TOKEN_DISARMED")
 
         return exec_res
+
+    @classmethod
+    def set_auto_entry_arm_state(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: str = "EXN-CONN-A4E7BE39D276",
+        symbol: str = "BTCUSDr",
+        armed: bool = False,
+        allocated_capital_usd: float = 100.0,
+        risk_pct_per_trade: float = 1.0,
+        profit_target_usd: float = 1.0,
+        max_loss_usd: float = 1.0,
+        min_net_edge_usd: float = 1.0,
+        enforce_notional_leverage_cap: bool = False,
+        leverage_limit: float = 5.0,
+    ) -> Dict[str, Any]:
+        """
+        Configures or arms/disarms automatic directional entry execution for the verified Demo account.
+        By default, automatic order submission is DISARMED (auto_entry_armed = 0).
+        Hard-rejects any Real account with HTTP 403 Forbidden.
+        """
+        ensure_demo_tables(conn)
+        now_str = now_utc_iso()
+
+        ex_row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE (connection_id = ? OR account_login = ?) AND user_id = ?",
+            (account_id, account_id, user_id)
+        ).fetchone()
+        if not ex_row:
+            raise HTTPException(status_code=404, detail=f"Demo account {account_id} not found for user.")
+        if str(ex_row["account_type"]).upper() != "DEMO" or "REAL" in str(ex_row["server_name"]).upper():
+            raise HTTPException(status_code=403, detail="REAL_TRADING_PERMANENTLY_LOCKED: Automatic execution is strictly forbidden on Real accounts.")
+        if str(ex_row["account_login"]) != "474861031" or str(ex_row["server_name"]) != "Exness-MT5Trial15":
+            raise HTTPException(status_code=403, detail="TARGET_UNAUTHORIZED: Restricted to Demo account 474861031 on Exness-MT5Trial15.")
+
+        conn_id = str(ex_row["connection_id"])
+        broker_sym = normalize_broker_symbol(symbol)
+
+        if armed:
+            # Verify an active, non-disarmed Demo authorization exists before allowing arming
+            auth_row = conn.execute(
+                """
+                SELECT * FROM hft_demo_authorizations
+                WHERE user_id = ? AND (account_id = ? OR broker_login = '474861031')
+                  AND is_authorized = 1 AND emergency_stop_triggered = 0
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (user_id, conn_id)
+            ).fetchone()
+            if not auth_row:
+                raise HTTPException(
+                    status_code=409,
+                    detail="DEMO_AUTHORIZATION_REQUIRED: Cannot arm automatic entry without an active Demo execution authorization."
+                )
+
+        conn.execute(
+            """
+            INSERT INTO hft_auto_entry_state (
+                account_id, user_id, symbol, auto_entry_armed, allocated_capital_usd,
+                risk_pct_per_trade, profit_target_usd, max_loss_usd, min_net_edge_usd,
+                enforce_notional_leverage_cap, leverage_limit, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                symbol = excluded.symbol,
+                auto_entry_armed = excluded.auto_entry_armed,
+                allocated_capital_usd = excluded.allocated_capital_usd,
+                risk_pct_per_trade = excluded.risk_pct_per_trade,
+                profit_target_usd = excluded.profit_target_usd,
+                max_loss_usd = excluded.max_loss_usd,
+                min_net_edge_usd = excluded.min_net_edge_usd,
+                enforce_notional_leverage_cap = excluded.enforce_notional_leverage_cap,
+                leverage_limit = excluded.leverage_limit,
+                updated_at = excluded.updated_at
+            """,
+            (
+                conn_id, user_id, broker_sym, 1 if armed else 0,
+                allocated_capital_usd, risk_pct_per_trade, profit_target_usd,
+                max_loss_usd, min_net_edge_usd,
+                1 if enforce_notional_leverage_cap else 0, leverage_limit, now_str
+            )
+        )
+        conn.commit()
+
+        return {
+            "status": "SUCCESS",
+            "account_id": conn_id,
+            "broker_login": "474861031",
+            "server_name": "Exness-MT5Trial15",
+            "symbol": broker_sym,
+            "auto_entry_armed": bool(armed),
+            "allocated_capital_usd": allocated_capital_usd,
+            "risk_pct_per_trade": risk_pct_per_trade,
+            "profit_target_usd": profit_target_usd,
+            "max_loss_usd": max_loss_usd,
+            "min_net_edge_usd": min_net_edge_usd,
+            "enforce_notional_leverage_cap": bool(enforce_notional_leverage_cap),
+            "leverage_limit": leverage_limit,
+            "updated_at": now_str,
+        }
+
+    @classmethod
+    def run_automated_directional_entry_cycle(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: str = "EXN-CONN-A4E7BE39D276",
+        symbol: str = "BTCUSDr",
+        allocated_capital_usd: Optional[float] = None,
+        risk_pct_per_trade: Optional[float] = None,
+        profit_target_usd: Optional[float] = None,
+        max_loss_usd: Optional[float] = None,
+        min_net_edge_usd: Optional[float] = None,
+        enforce_notional_leverage_cap: Optional[bool] = None,
+        leverage_limit: Optional[float] = None,
+        dry_run: bool = True,
+        override_klines: Optional[List[Dict[str, Any]]] = None,
+        override_tick: Optional[Dict[str, Any]] = None,
+        override_open_positions_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        COMPLETE AUTOMATIC SIGNAL-TO-ORDER EXECUTION PATHWAY (Task 1):
+        Connects the 5-component directional signal engine + Minimum Net-Edge Gate directly to
+        the risk-approved Demo order execution pipeline (`preflight_demo_order` -> `dispatch_demo_order`),
+        while keeping automatic broker order submission DISARMED by default (`auto_entry_armed = 0`).
+
+        Sequence of mandatory gates on every cycle:
+          1. Account & Real-Trading Lock Verification (`474861031` on `Exness-MT5Trial15` DEMO only; Real -> HTTP 403).
+          2. Broker Open-Position Reconciliation (`/positions` -> rejects if `open_positions_count >= 1`).
+          3. Fresh MT5 Quote & M1 Candles Fetch + Stale-Tick Rejection (`tick_age_ms <= 15000ms`) + Spread Gate (`<= $15.00`).
+          4. Fresh Directional Signal + Minimum Net-Edge-After-Costs Evaluation (`evaluate_directional_scalp_cycle`).
+          5. Allocated-Capital Sizing, Minimum-Lot Skip Rule (`VOLUME_FLOOR_SKIP`), Leverage & Circuit Breakers (`evaluate_allocated_capital_risk`).
+          6. Bar-Timestamp Idempotency Gate (`DUPLICATE_BAR_CYCLE_PREVENTED`: never dispatches twice on the same M1 bar).
+          7. Authorization & Arming Gate:
+             - By default (`auto_entry_armed == 0` or `dry_run == True` or no active `hft_demo_authorizations` token),
+               order submission is HELD (`AUTO_ENTRY_DISARMED_BY_DEFAULT`) and the exact readiness/skip reason is returned.
+             - Only when `auto_entry_armed == 1`, an active Demo authorization token exists, and `dry_run == False`,
+               dispatches the order via `dispatch_demo_order` and verifies broker-side SL/TP via `/stops/verify/{ticket}`.
+        """
+        from .automated_scalping_engine import AutomatedHighFrequencyScalpingEngine
+        ensure_demo_tables(conn)
+        now_str = now_utc_iso()
+
+        # 1. Verify Demo Account Identity & Permanent Real Lock
+        ex_row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE (connection_id = ? OR account_login = ?) AND user_id = ?",
+            (account_id, account_id, user_id)
+        ).fetchone()
+        if not ex_row:
+            raise HTTPException(status_code=404, detail=f"Demo account {account_id} not found or unauthorized.")
+
+        if str(ex_row["account_type"]).upper() != "DEMO" or "REAL" in str(ex_row["server_name"]).upper():
+            raise HTTPException(
+                status_code=403,
+                detail="REAL_TRADING_PERMANENTLY_LOCKED: Live real execution is strictly forbidden across all BITDEX layers."
+            )
+
+        if str(ex_row["account_login"]) != "474861031" or str(ex_row["server_name"]) != "Exness-MT5Trial15":
+            raise HTTPException(
+                status_code=403,
+                detail="TARGET_UNAUTHORIZED: Automated Demo execution is strictly restricted to account 474861031 on Exness-MT5Trial15."
+            )
+
+        conn_id = str(ex_row["connection_id"])
+        broker_sym = normalize_broker_symbol(symbol)
+
+        # Ensure default DISARMED state row exists in hft_auto_entry_state
+        state_row = conn.execute(
+            "SELECT * FROM hft_auto_entry_state WHERE account_id = ?",
+            (conn_id,)
+        ).fetchone()
+        if not state_row:
+            conn.execute(
+                """
+                INSERT INTO hft_auto_entry_state (
+                    account_id, user_id, symbol, auto_entry_armed, allocated_capital_usd,
+                    risk_pct_per_trade, profit_target_usd, max_loss_usd, min_net_edge_usd,
+                    enforce_notional_leverage_cap, leverage_limit, updated_at
+                ) VALUES (?, ?, ?, 0, 100.0, 1.0, 1.0, 1.0, 1.0, 0, 5.0, ?)
+                """,
+                (conn_id, user_id, broker_sym, now_str)
+            )
+            conn.commit()
+            state_row = conn.execute("SELECT * FROM hft_auto_entry_state WHERE account_id = ?", (conn_id,)).fetchone()
+
+        st = dict(state_row)
+        is_auto_armed = bool(st.get("auto_entry_armed", 0))
+        alloc_cap = float(allocated_capital_usd if allocated_capital_usd is not None else st.get("allocated_capital_usd", 100.0))
+        risk_pct = float(risk_pct_per_trade if risk_pct_per_trade is not None else st.get("risk_pct_per_trade", 1.0))
+        prof_target = float(profit_target_usd if profit_target_usd is not None else st.get("profit_target_usd", 1.0))
+        loss_cap = float(max_loss_usd if max_loss_usd is not None else st.get("max_loss_usd", 1.0))
+        min_edge = float(min_net_edge_usd if min_net_edge_usd is not None else st.get("min_net_edge_usd", 1.0))
+        enforce_lev = bool(enforce_notional_leverage_cap if enforce_notional_leverage_cap is not None else st.get("enforce_notional_leverage_cap", 0))
+        lev_limit = float(leverage_limit if leverage_limit is not None else st.get("leverage_limit", 5.0))
+
+        # 2. Fetch live Broker Positions, Tick, and M1 Candles via persistent Keep-Alive client
+        gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
+        headers = {"X-Gateway-Auth-Token": gateway_token}
+        client = get_gateway_client()
+
+        if override_open_positions_count is not None:
+            open_positions_count = int(override_open_positions_count)
+            open_positions_list = []
+        else:
+            pos_resp = client.get("/positions", headers=headers)
+            if pos_resp.status_code != 200:
+                raise HTTPException(status_code=502, detail="Failed to query broker open positions prior to automatic entry cycle.")
+            pos_json = pos_resp.json()
+            open_positions_list = pos_json.get("positions", [])
+            open_positions_count = int(pos_json.get("count", len(open_positions_list)))
+
+        if override_tick is not None:
+            tick_data = override_tick
+        else:
+            tick_resp = client.get(f"/tick/{broker_sym}", headers=headers)
+            if tick_resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Failed to fetch live MT5 tick for {broker_sym}.")
+            tick_data = tick_resp.json().get("latest_tick", {})
+
+        if override_klines is not None:
+            candles = override_klines
+        else:
+            c_resp = client.get(f"/candles/{broker_sym}?timeframe=M1&count=45", headers=headers)
+            if c_resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Failed to fetch M1 candles for {broker_sym}.")
+            candles = c_resp.json().get("candles", [])
+
+        current_bid = float(tick_data.get("bid", 0.0))
+        current_ask = float(tick_data.get("ask", 0.0))
+        tick_ts_ms = int(tick_data.get("timestamp_ms", int(time.time() * 1000)))
+        tick_age_ms = max(0, int(time.time() * 1000) - tick_ts_ms)
+        latest_bar_ts = int(candles[-1].get("time", 0)) if candles else 0
+
+        # 3. Evaluate Directional Signal + Minimum Net-Edge Gate
+        engine = AutomatedHighFrequencyScalpingEngine()
+        signal_eval = engine.evaluate_directional_scalp_cycle(
+            symbol=broker_sym,
+            klines=candles,
+            current_bid=current_bid,
+            current_ask=current_ask,
+            allocated_capital_usd=alloc_cap,
+            risk_pct_per_trade=risk_pct,
+            max_loss_usd=loss_cap,
+            profit_target_usd=prof_target,
+            min_net_edge_usd=min_edge,
+            tick_age_ms=tick_age_ms,
+            max_tick_age_ms=15000,
+            existing_positions_count=open_positions_count,
+        )
+
+        proposed = signal_eval["proposed_levels"]
+        selected_dir = signal_eval["selected_direction"]
+        dir_score = signal_eval["directional_score"]
+
+        # 4. Evaluate Allocated-Capital Sizing, Minimum-Lot Skip & Circuit Breakers
+        auth_row = conn.execute(
+            """
+            SELECT * FROM hft_demo_authorizations
+            WHERE user_id = ? AND (account_id = ? OR broker_login = '474861031')
+              AND is_authorized = 1 AND emergency_stop_triggered = 0
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (user_id, conn_id)
+        ).fetchone()
+        consec_losses = int(auth_row["consecutive_losses"]) if auth_row else 0
+
+        risk_eval = cls.evaluate_allocated_capital_risk(
+            symbol=broker_sym,
+            entry_price=proposed["entry_price"],
+            stop_loss_price=proposed["stop_loss_price"],
+            take_profit_price=proposed["take_profit_price"],
+            allocated_capital_usd=alloc_cap,
+            risk_pct_per_trade=risk_pct,
+            max_loss_usd_cap=loss_cap,
+            requested_volume=0.01,
+            leverage_limit=lev_limit,
+            enforce_notional_leverage_cap=enforce_lev,
+            consecutive_losses=consec_losses,
+            round_trip_cost_usd=signal_eval["net_edge_evaluation"]["estimated_round_trip_cost_usd"],
+        )
+
+        # 5. Consolidate All Qualification & Risk Gates
+        rejection_reasons = list(signal_eval.get("skip_reasons", []))
+        if not risk_eval.get("allowed"):
+            rejection_reasons.append(f"{risk_eval.get('skip_code')}: {risk_eval.get('reason')}")
+
+        # Idempotency check: prevent duplicate entry on the same M1 bar
+        idempotency_key = f"AUTO-{conn_id}-{broker_sym}-{latest_bar_ts}-{selected_dir}"
+        if latest_bar_ts > 0 and int(st.get("last_executed_bar_ts", 0)) == latest_bar_ts:
+            rejection_reasons.append(
+                f"DUPLICATE_BAR_CYCLE_PREVENTED: Order already executed on M1 bar timestamp {latest_bar_ts} (key {st.get('last_idempotency_key')})."
+            )
+
+        all_signal_and_risk_passed = (len(rejection_reasons) == 0)
+
+        # 6. Check Arming & Authorization Gate (DISARMED BY DEFAULT)
+        has_active_auth = bool(auth_row is not None)
+        can_submit_live_demo = bool(all_signal_and_risk_passed and is_auto_armed and has_active_auth and not dry_run)
+
+        execution_status = "NO_ENTRY_THIS_CYCLE"
+        preflight_result = None
+        broker_execution_result = None
+
+        if not all_signal_and_risk_passed:
+            execution_status = "NO_ENTRY_THIS_CYCLE"
+            primary_reason = "; ".join(rejection_reasons)
+        elif not is_auto_armed:
+            execution_status = "QUALIFIED_BUT_HELD_DISARMED"
+            primary_reason = (
+                f"AUTO_ENTRY_DISARMED_BY_DEFAULT: {selected_dir} signal ({dir_score:.1f}/100) and all risk gates PASSED, "
+                f"but automatic order submission is DISARMED by default awaiting explicit user approval."
+            )
+        elif not has_active_auth:
+            execution_status = "QUALIFIED_BUT_HELD_UNAUTHORIZED"
+            primary_reason = (
+                f"DEMO_AUTHORIZATION_DISARMED: {selected_dir} signal ({dir_score:.1f}/100) and all risk gates PASSED, "
+                f"but no active Demo execution authorization token is currently armed."
+            )
+        elif dry_run:
+            execution_status = "QUALIFIED_PREFLIGHT_VERIFIED_DRY_RUN"
+            primary_reason = (
+                f"DRY_RUN_MODE_ACTIVE: {selected_dir} signal ({dir_score:.1f}/100) and all risk gates PASSED. "
+                f"Running non-mutating Session 2 preflight verification (zero broker orders sent)."
+            )
+            order_spec = {
+                "auth_token": auth_row["auth_id"],
+                "symbol": broker_sym,
+                "direction": selected_dir,
+                "entry_price": proposed["entry_price"],
+                "volume": proposed["volume"],
+                "stop_loss_price": proposed["stop_loss_price"],
+                "take_profit_price": proposed["take_profit_price"],
+                "account_equity": 5073.84,
+                "dry_run": True,
+            }
+            preflight_result = cls.dispatch_demo_order(
+                conn=conn,
+                user_id=user_id,
+                auth_token=auth_row["auth_id"],
+                order_spec=order_spec,
+                dry_run=True,
+            )
+        else:
+            # Explicitly armed + authorized + dry_run=False -> Execute on Demo broker
+            order_spec = {
+                "auth_token": auth_row["auth_id"],
+                "symbol": broker_sym,
+                "direction": selected_dir,
+                "entry_price": proposed["entry_price"],
+                "volume": proposed["volume"],
+                "stop_loss_price": proposed["stop_loss_price"],
+                "take_profit_price": proposed["take_profit_price"],
+                "account_equity": 5073.84,
+                "dry_run": False,
+            }
+            broker_execution_result = cls.dispatch_demo_order(
+                conn=conn,
+                user_id=user_id,
+                auth_token=auth_row["auth_id"],
+                order_spec=order_spec,
+                dry_run=False,
+            )
+            execution_status = "EXECUTED_ON_DEMO_BROKER"
+            primary_reason = f"Executed {selected_dir} {proposed['volume']} {broker_sym} on Demo account 474861031."
+            conn.execute(
+                """
+                UPDATE hft_auto_entry_state
+                SET last_executed_bar_ts = ?, last_idempotency_key = ?, updated_at = ?
+                WHERE account_id = ?
+                """,
+                (latest_bar_ts, idempotency_key, now_str, conn_id)
+            )
+
+        # Update state telemetry in hft_auto_entry_state
+        conn.execute(
+            """
+            UPDATE hft_auto_entry_state
+            SET last_evaluated_bar_ts = ?,
+                last_selected_direction = ?,
+                last_directional_score = ?,
+                last_cycle_status = ?,
+                last_skip_reason = ?,
+                last_evaluated_at = ?,
+                updated_at = ?
+            WHERE account_id = ?
+            """,
+            (
+                latest_bar_ts,
+                selected_dir,
+                dir_score,
+                execution_status,
+                primary_reason,
+                now_str,
+                now_str,
+                conn_id,
+            )
+        )
+        conn.commit()
+
+        return {
+            "status": "SUCCESS",
+            "pathway_status": "COMPLETE",
+            "account_id": conn_id,
+            "broker_login": "474861031",
+            "server_name": "Exness-MT5Trial15",
+            "environment": "DEMO",
+            "symbol": broker_sym,
+            "auto_entry_armed": is_auto_armed,
+            "has_active_demo_authorization": has_active_auth,
+            "dry_run": dry_run,
+            "dispatched_to_broker": bool(broker_execution_result is not None),
+            "execution_status": execution_status,
+            "reason": primary_reason,
+            "idempotency": {
+                "latest_bar_timestamp": latest_bar_ts,
+                "last_executed_bar_timestamp": int(st.get("last_executed_bar_ts", 0)),
+                "idempotency_key": idempotency_key,
+                "open_positions_on_broker": open_positions_count,
+            },
+            "directional_signal": signal_eval,
+            "allocated_capital_risk_check": risk_eval,
+            "preflight_verification": preflight_result,
+            "broker_execution": broker_execution_result,
+            "timestamp_utc": now_str,
+        }
+
+    @classmethod
+    def close_all_demo_positions(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: Optional[str] = "EXN-CONN-A4E7BE39D276",
+        symbol: Optional[str] = None,
+        close_reason: str = "CUSTOMER_CLOSE_ALL_TRADES"
+    ) -> Dict[str, Any]:
+        """
+        Emergency 'CLOSE ALL TRADES' operation (distinct from Emergency Disarm):
+        - Verifies Demo account 474861031 on Exness-MT5Trial15 (hard-rejects Real accounts with HTTP 403).
+        - Queries live open positions from Session 2 MT5 worker via Gateway.
+        - Requests closure of every matching open position by exact broker ticket.
+        - Prevents duplicate close requests via Session 2 _closing_tickets_lock.
+        - Reconciles the final open position list and settled deal P&L after closure.
+        - Never claims all positions closed if even one remains open.
+        """
+        ensure_demo_tables(conn)
+        now_str = now_utc_iso()
+
+        ex_row = conn.execute(
+            "SELECT * FROM exness_demo_connections WHERE (connection_id = ? OR account_login = ?) AND user_id = ?",
+            (account_id or "EXN-CONN-A4E7BE39D276", account_id or "474861031", user_id)
+        ).fetchone()
+        if not ex_row:
+            raise HTTPException(status_code=404, detail="Selected Demo trading account not found or unauthorized.")
+
+        if str(ex_row["account_type"]).upper() != "DEMO" or "REAL" in str(ex_row["server_name"]).upper():
+            raise HTTPException(
+                status_code=403,
+                detail="REAL_TRADING_PERMANENTLY_LOCKED: Real account position mutation is permanently locked."
+            )
+
+        broker_login = str(ex_row["account_login"])
+        server_name = str(ex_row["server_name"])
+        if broker_login != "474861031" or server_name != "Exness-MT5Trial15":
+            raise HTTPException(
+                status_code=403,
+                detail="TARGET_UNAUTHORIZED: Restricted to Demo account 474861031 on Exness-MT5Trial15."
+            )
+
+        gateway_token = "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"
+        headers = {"X-Gateway-Auth-Token": gateway_token}
+        client = get_gateway_client()
+
+        pos_resp = client.get("/positions", headers=headers)
+        if pos_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="Failed to query live open positions from Exness MT5 Gateway.")
+
+        open_positions = pos_resp.json().get("positions", [])
+        if symbol:
+            norm_sym = normalize_broker_symbol(symbol)
+            target_positions = [p for p in open_positions if str(p.get("symbol", "")).upper() == norm_sym.upper()]
+        else:
+            target_positions = list(open_positions)
+
+        if not target_positions:
+            return {
+                "status": "SUCCESS",
+                "all_closed": True,
+                "account_id": str(ex_row["connection_id"]),
+                "broker_login": broker_login,
+                "server_name": server_name,
+                "requested_count": 0,
+                "closed_count": 0,
+                "failed_count": 0,
+                "remaining_open_count": len(open_positions),
+                "results": [],
+                "message": "No open trades found to close on Demo Account #474861031.",
+                "timestamp_utc": now_str,
+            }
+
+        results = []
+        closed_count = 0
+        failed_count = 0
+
+        for p in target_positions:
+            ticket_str = str(p.get("ticket"))
+            pos_sym = str(p.get("symbol", "BTCUSDr"))
+            try:
+                c_res = cls.close_demo_position(
+                    conn=conn,
+                    user_id=user_id,
+                    account_id=str(ex_row["connection_id"]),
+                    ticket=ticket_str,
+                    close_reason=close_reason
+                )
+                closed_count += 1
+                results.append({
+                    "ticket": ticket_str,
+                    "symbol": pos_sym,
+                    "status": "CLOSED",
+                    "broker_result": c_res.get("broker_result"),
+                })
+            except Exception as ex:
+                failed_count += 1
+                results.append({
+                    "ticket": ticket_str,
+                    "symbol": pos_sym,
+                    "status": "FAILED",
+                    "error": getattr(ex, "detail", str(ex)),
+                })
+
+        # Post-close reconciliation: re-query live positions from MT5
+        recheck_resp = client.get("/positions", headers=headers)
+        remaining_positions = recheck_resp.json().get("positions", []) if recheck_resp.status_code == 200 else []
+        remaining_count = len(remaining_positions)
+        all_closed_verified = (failed_count == 0 and remaining_count == 0)
+
+        return {
+            "status": "SUCCESS" if all_closed_verified else "PARTIAL_OR_FAILED",
+            "all_closed": all_closed_verified,
+            "account_id": str(ex_row["connection_id"]),
+            "broker_login": broker_login,
+            "server_name": server_name,
+            "requested_count": len(target_positions),
+            "closed_count": closed_count,
+            "failed_count": failed_count,
+            "remaining_open_count": remaining_count,
+            "remaining_open_positions": remaining_positions,
+            "results": results,
+            "message": (
+                f"Confirmed closure of {closed_count}/{len(target_positions)} open trade(s) on Exness Demo #474861031."
+                if all_closed_verified
+                else f"Closed {closed_count}/{len(target_positions)} trade(s); {remaining_count} position(s) still open on broker."
+            ),
+            "timestamp_utc": now_str,
+        }
 

@@ -173,4 +173,18 @@ class TauricSecurityMiddleware(BaseHTTPMiddleware):
                     },
                 )
 
-        return await call_next(request)
+        try:
+            return await call_next(request)
+        except Exception as unhandled_exc:
+            logging.getLogger("uvicorn.error").error(
+                f"Unhandled exception caught by TauricSecurityMiddleware on {request.method} {request.url.path}: {unhandled_exc}",
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "ERROR",
+                    "detail": "Service temporarily unavailable. Please try again shortly.",
+                    "error_code": "INTERNAL_SERVER_ERROR",
+                },
+            )

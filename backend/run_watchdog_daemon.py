@@ -103,10 +103,28 @@ def main():
                 profit_res = DemoExecutionService.monitor_and_exit_profit_targets(
                     conn=conn,
                     user_id="USR-ADM-B022F490",
-                    profit_target_usd=1.0
+                    profit_target_usd=1.0,
+                    max_loss_usd=1.0
                 )
                 if profit_res.get("closed_count", 0) > 0:
                     logger.info("Phase 7M: Profit target monitor executed exits: %s", profit_res)
+
+                # Evaluate automatic directional entry cycle if no positions are currently open.
+                # Remains strictly DISARMED by default unless auto_entry_armed == 1 in hft_auto_entry_state.
+                if profit_res.get("positions_monitored", 0) == 0:
+                    st_row = conn.execute(
+                        "SELECT auto_entry_armed FROM hft_auto_entry_state WHERE account_id = 'EXN-CONN-A4E7BE39D276'"
+                    ).fetchone()
+                    is_armed = bool(st_row and st_row[0] == 1)
+                    auto_res = DemoExecutionService.run_automated_directional_entry_cycle(
+                        conn=conn,
+                        user_id="USR-ADM-B022F490",
+                        account_id="EXN-CONN-A4E7BE39D276",
+                        symbol="BTCUSDr",
+                        dry_run=(not is_armed),
+                    )
+                    if auto_res.get("dispatched_to_broker"):
+                        logger.info("Automated directional entry dispatched: %s", auto_res.get("execution_status"))
             except Exception as pe:
                 logger.debug("Phase 7M profit monitor check: %s", pe)
 
