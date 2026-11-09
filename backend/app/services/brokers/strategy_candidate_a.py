@@ -1,81 +1,95 @@
 """
-BITDEX Candidate A: Hierarchical Multi-Timeframe Trend Pullback Strategy (Phases 1 & 2)
-======================================================================================
-Strict non-compensatory hierarchical strategy replacing legacy additive scoring.
+BITDEX Candidate A: Hierarchical Multi-Timeframe Trend Pullback Strategy (v2)
+============================================================================
+Strict non-compensatory gates. Any failed gate -> NO_TRADE. No additive scoring.
 
-Hierarchy:
-1. H1 (Overall Trend):
-   - BUY: EMA21 > EMA50, positive slope, established trend
-   - SELL: EMA21 < EMA50, negative slope, established trend
-   - Flat/conflicting -> NO TRADE
-2. M15 (Market Structure):
-   - BUY: Price strictly above M15 EMA50
-   - SELL: Price strictly below M15 EMA50
-   - Failure -> NO TRADE
-3. M5 (Execution & Value Zone Confirmation - MANDATORY):
-   - BUY: M5 EMA9 > EMA21; completed candle touched value zone and formed bullish rejection; not extended
-   - SELL: M5 EMA9 < EMA21; completed candle touched value zone and formed bearish rejection; not extended
-   - Failure -> NO TRADE (Strict veto; higher timeframes CANNOT override)
-4. Dynamic Volatility Stops & Risk Sizing:
-   - SL = max(1.5 * M5_ATR, swing_structure_distance)
-   - TP >= 1.5:1 reward-to-risk after spread and slippage
-   - If minimum lot (0.01) risk exceeds approved risk budget -> ERR_MIN_LOT_EXCEEDS_BUDGET (NO TRADE)
+1. H1 trend  : EMA21 vs EMA50 + EMA21 slope over 3 closed bars + separation >= 0.2 x H1 ATR.
+2. M15 struct: last closed M15 close above (BUY) / below (SELL) M15 EMA50.
+3. M5 entry  : EMA9/EMA21 aligned with H1; pullback into EMA9-EMA21 value zone in the last
+               3 closed bars; last CLOSED bar is a rejection candle closing back beyond EMA21;
+               entry not more than 1.0 x ATR beyond the zone.
+4. Stops     : SL = max(1.5 x M5 ATR, swing distance + 0.3 x ATR). Rejected (never tightened)
+               if SL > 3 x ATR.
+5. Target    : net 2.0R if no opposing M15 swing level lies inside it, otherwise net 1.5R floor.
+6. Sizing    : percentage-of-equity budget via risk_policy.compute_position_size.
+
+Only CLOSED candles are used: a candle is closed when open_time + timeframe <= now.
 """
 
-import math
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+import time as _time
+
+from .risk_policy import (
+    RiskPolicy, compute_position_size, tp_distance_for_net_rr, net_rr, value_per_price_unit_per_lot,
+)
+
+MIN_CLOSED_H1 = 60
+MIN_CLOSED_M15 = 60
+MIN_CLOSED_M5 = 30
+
+
+def ema_series(values: List[float], period: int) -> List[float]:
+    if not values:
+        return []
+    k = 2.0 / (period + 1.0)
+    seed_n = min(period, len(values))
+    ema = sum(values[:seed_n]) / seed_n
+    out = [ema] * seed_n
+    for v in values[seed_n:]:
+        ema = v * k + ema * (1.0 - k)
+        out.append(ema)
+    return out
 
 
 def calc_ema(values: List[float], period: int) -> float:
-    if not values:
-        return 0.0
-    if len(values) < period:
-        return sum(values) / len(values)
-    k = 2.0 / (period + 1.0)
-    ema = values[0]
-    for v in values[1:]:
-        ema = (v * k) + (ema * (1.0 - k))
-    return ema
+    s = ema_series(values, period)
+    return s[-1] if s else 0.0
 
 
 def calc_atr(candles: List[Dict[str, Any]], period: int = 14) -> float:
-    if len(candles) < 2:
-        return 2.0  # Safe default for Gold
     trs = []
     for i in range(1, len(candles)):
-        h = float(candles[i]["high"])
-        l = float(candles[i]["low"])
-        prev_c = float(candles[i - 1]["close"])
-        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
-        trs.append(tr)
+        h, l = float(candles[i]["high"]), float(candles[i]["low"])
+        pc = float(candles[i - 1]["close"])
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
     if not trs:
-        return 2.0
-    if len(trs) < period:
-        return sum(trs) / len(trs)
-    return sum(trs[-period:]) / float(period)
+        return 0.0
+    window = trs[-period:]
+    return sum(window) / len(window)
 
 
-def get_closed_candles(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Returns only completed candles.
-    Filters out any bar explicitly marked as unclosed (`is_closed=False` or `closed=False`).
-    If no explicit flag is present, conservatively excludes the last active bar.
-    """
+def _infer_tf_seconds(candles: List[Dict[str, Any]]) -> Optional[int]:
+    times = [int(c["time"]) for c in candles if isinstance(c.get("time"), (int, float))]
+    if len(times) < 3:
+        return None
+    diffs = sorted(b - a for a, b in zip(times, times[1:]) if b > a)
+    return diffs[len(diffs) // 2] if diffs else None
+
+
+def get_closed_candles(candles: List[Dict[str, Any]], now_ts: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Explicit is_closed flags win; otherwise closed iff open_time + timeframe <= now."""
     if not candles:
         return []
-    has_flag = any("is_closed" in c or "closed" in c for c in candles)
-    if has_flag:
+    if any("is_closed" in c or "closed" in c for c in candles):
         return [c for c in candles if c.get("is_closed", c.get("closed", True)) is not False]
-    if len(candles) <= 1:
-        return candles
-    return candles[:-1]
+    tf = _infer_tf_seconds(candles)
+    if tf is None:
+        return candles[:-1]
+    now_ts = _time.time() if now_ts is None else now_ts
+    return [c for c in candles if int(c["time"]) + tf <= now_ts]
+
+
+def _no_trade(code: str, detail: str, passed: List[str], failed: str, telemetry: Optional[Dict] = None,
+              direction: str = "NONE", extra: Optional[Dict] = None) -> Dict[str, Any]:
+    r = {"outcome": "NO_TRADE", "direction": direction, "error_code": code, "detail": detail,
+         "passed_gates": list(passed), "failed_gate": failed, "telemetry": telemetry or {}}
+    if extra:
+        r.update(extra)
+    return r
 
 
 class CandidateAStrategy:
-    """
-    Hierarchical Trend Pullback Strategy with strict veto gating.
-    """
+    STRATEGY_CODE = "CANDIDATE_A_HTF_PULLBACK_v2"
 
     @classmethod
     def evaluate(
@@ -85,307 +99,197 @@ class CandidateAStrategy:
         m5_candles: List[Dict[str, Any]],
         current_bid: float,
         current_ask: float,
-        approved_risk_budget_usd: float,
         account_equity: float,
         spec: Optional[Dict[str, Any]] = None,
-        estimated_slippage_pts: float = 0.15,
+        policy: Optional[RiskPolicy] = None,
+        now_ts: Optional[float] = None,
+        approved_risk_budget_usd: Optional[float] = None,  # deprecated; ignored (kept for API compat)
+        estimated_slippage_pts: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """
-        Executes Candidate A evaluation.
-        Returns a structured dictionary with outcome: 'BUY', 'SELL', or 'NO_TRADE'.
-        """
-        spec = spec or {}
-        contract_size = float(spec.get("contract_size") or 100.0)
+        policy = policy or RiskPolicy.load()
+        spec = spec or {"contract_size": 100.0, "tick_size": 0.001, "tick_value": 0.1,
+                        "min_volume": 0.01, "volume_step": 0.01, "max_volume": 200.0, "digits": 3}
         digits = int(spec.get("digits", 3))
-        min_volume = float(spec.get("min_volume") or 0.01)
-        volume_step = float(spec.get("volume_step") or 0.01)
-
+        slip = policy.est_slippage_pts_per_side if estimated_slippage_pts is None else estimated_slippage_pts
         spread = round(current_ask - current_bid, digits)
-        mid_price = (current_bid + current_ask) / 2.0
 
-        # Extract strictly completed candles
-        closed_h1 = get_closed_candles(h1_candles)
-        closed_m15 = get_closed_candles(m15_candles)
-        closed_m5 = get_closed_candles(m5_candles)
+        h1 = get_closed_candles(h1_candles, now_ts)
+        m15 = get_closed_candles(m15_candles, now_ts)
+        m5 = get_closed_candles(m5_candles, now_ts)
+        if len(h1) < MIN_CLOSED_H1 or len(m15) < MIN_CLOSED_M15 or len(m5) < MIN_CLOSED_M5:
+            return _no_trade("INSUFFICIENT_HISTORICAL_DATA",
+                             f"Closed candles H1={len(h1)}, M15={len(m15)}, M5={len(m5)} "
+                             f"(need {MIN_CLOSED_H1}/{MIN_CLOSED_M15}/{MIN_CLOSED_M5}).", [], "DATA_COMPLETENESS")
 
-        if len(closed_h1) < 25 or len(closed_m15) < 25 or len(closed_m5) < 20:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "INSUFFICIENT_HISTORICAL_DATA",
-                "detail": f"Insufficient completed candles: H1={len(closed_h1)}, M15={len(closed_m15)}, M5={len(closed_m5)} (min 25/25/20 required)",
-                "passed_gates": [],
-                "failed_gate": "DATA_COMPLETENESS",
-            }
-
-        # ─── GATE 1: H1 Trend Direction ───────────────────────────────────────────
-        h1_closes = [float(c["close"]) for c in closed_h1]
-        h1_ema21 = calc_ema(h1_closes, 21)
-        h1_ema50 = calc_ema(h1_closes, 50)
-        h1_ema21_prev = calc_ema(h1_closes[:-1], 21)
-
-        h1_slope = (h1_ema21 - h1_ema21_prev) / h1_ema21_prev if h1_ema21_prev > 0 else 0.0
-        h1_slope_pct = h1_slope * 100.0
-
-        h1_trend: str = "FLAT"
-        if h1_ema21 > h1_ema50 and h1_slope > 0:
-            h1_trend = "BULLISH"
-        elif h1_ema21 < h1_ema50 and h1_slope < 0:
-            h1_trend = "BEARISH"
+        # ── Gate 1: H1 trend ──
+        h1c = [float(c["close"]) for c in h1]
+        e21 = ema_series(h1c, 21)
+        e50 = ema_series(h1c, 50)
+        h1_atr = calc_atr(h1, 14)
+        sep = e21[-1] - e50[-1]
+        slope3 = e21[-1] - e21[-4]
+        tel = {"h1_ema21": round(e21[-1], 3), "h1_ema50": round(e50[-1], 3), "h1_ema21_slope_3bar": round(slope3, 3),
+               "h1_separation": round(sep, 3), "h1_atr": round(h1_atr, 3), "spread": spread}
+        min_sep = 0.2 * h1_atr
+        if sep > min_sep and slope3 > 0:
+            direction = "BUY"
+        elif sep < -min_sep and slope3 < 0:
+            direction = "SELL"
         else:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "H1_TREND_NOT_ESTABLISHED",
-                "detail": f"H1 trend is flat or conflicting (EMA21={h1_ema21:.3f}, EMA50={h1_ema50:.3f}, slope={h1_slope_pct:+.4f}%).",
-                "passed_gates": [],
-                "failed_gate": "H1_TREND",
-                "telemetry": {
-                    "h1_ema21": h1_ema21, "h1_ema50": h1_ema50, "h1_slope": h1_slope,
-                }
-            }
+            return _no_trade("H1_TREND_NOT_ESTABLISHED",
+                             f"H1 EMA21={e21[-1]:.3f} EMA50={e50[-1]:.3f} sep={sep:+.3f} (need |sep|>{min_sep:.3f}) "
+                             f"slope3={slope3:+.3f}: flat or conflicting.", [], "H1_TREND", tel)
+        passed = ["H1_TREND"]
 
-        candidate_direction = "BUY" if h1_trend == "BULLISH" else "SELL"
+        # ── Gate 2: M15 structure ──
+        m15c = [float(c["close"]) for c in m15]
+        m15_e50 = calc_ema(m15c, 50)
+        tel.update(m15_ema50=round(m15_e50, 3), m15_close=m15c[-1])
+        if direction == "BUY" and m15c[-1] <= m15_e50:
+            return _no_trade("M15_MARKET_STRUCTURE_BEARISH",
+                             f"M15 close {m15c[-1]:.3f} <= M15 EMA50 {m15_e50:.3f} for BUY.", passed, "M15_STRUCTURE", tel)
+        if direction == "SELL" and m15c[-1] >= m15_e50:
+            return _no_trade("M15_MARKET_STRUCTURE_BULLISH",
+                             f"M15 close {m15c[-1]:.3f} >= M15 EMA50 {m15_e50:.3f} for SELL.", passed, "M15_STRUCTURE", tel)
+        passed.append("M15_STRUCTURE")
 
-        # ─── GATE 2: M15 Market Structure ─────────────────────────────────────────
-        m15_closes = [float(c["close"]) for c in closed_m15]
-        m15_ema50 = calc_ema(m15_closes, 50)
-        m15_last_close = m15_closes[-1]
+        # ── Gate 3: M5 confirmation (mandatory veto) ──
+        m5c = [float(c["close"]) for c in m5]
+        m5h = [float(c["high"]) for c in m5]
+        m5l = [float(c["low"]) for c in m5]
+        e9, e21m5 = calc_ema(m5c, 9), calc_ema(m5c, 21)
+        atr = calc_atr(m5, 14)
+        vz_top, vz_bot = max(e9, e21m5), min(e9, e21m5)
+        tel.update(m5_ema9=round(e9, 3), m5_ema21=round(e21m5, 3), m5_atr=round(atr, 3),
+                   value_zone=[round(vz_bot, 3), round(vz_top, 3)])
+        if atr <= 0:
+            return _no_trade("ERR_INVALID_ATR", "M5 ATR is zero.", passed, "M5_ATR", tel)
+        if direction == "BUY" and e9 <= e21m5:
+            return _no_trade("M5_DOWNTREND_ACTIVE_EMA9_BELOW_EMA21",
+                             f"M5 EMA9 {e9:.3f} <= EMA21 {e21m5:.3f}; BUY vetoed.", passed, "M5_EMA_ALIGNMENT", tel)
+        if direction == "SELL" and e9 >= e21m5:
+            return _no_trade("M5_UPTREND_ACTIVE_EMA9_ABOVE_EMA21",
+                             f"M5 EMA9 {e9:.3f} >= EMA21 {e21m5:.3f}; SELL vetoed.", passed, "M5_EMA_ALIGNMENT", tel)
+        passed.append("M5_EMA_ALIGNMENT")
 
-        if candidate_direction == "BUY" and m15_last_close <= m15_ema50:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M15_MARKET_STRUCTURE_BEARISH",
-                "detail": f"M15 structure fails: Last close ({m15_last_close:.3f}) is below M15 EMA50 ({m15_ema50:.3f}) for BUY setup.",
-                "passed_gates": ["H1_TREND"],
-                "failed_gate": "M15_STRUCTURE",
-                "telemetry": {"h1_trend": h1_trend, "m15_ema50": m15_ema50, "m15_last_close": m15_last_close}
-            }
-        elif candidate_direction == "SELL" and m15_last_close >= m15_ema50:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M15_MARKET_STRUCTURE_BULLISH",
-                "detail": f"M15 structure fails: Last close ({m15_last_close:.3f}) is above M15 EMA50 ({m15_ema50:.3f}) for SELL setup.",
-                "passed_gates": ["H1_TREND"],
-                "failed_gate": "M15_STRUCTURE",
-                "telemetry": {"h1_trend": h1_trend, "m15_ema50": m15_ema50, "m15_last_close": m15_last_close}
-            }
+        touched = (min(m5l[-3:]) <= vz_top + 0.25 * atr) if direction == "BUY" else (max(m5h[-3:]) >= vz_bot - 0.25 * atr)
+        if not touched:
+            return _no_trade("M5_NO_VALUE_ZONE_PULLBACK",
+                             f"No pullback into value zone [{vz_bot:.3f}, {vz_top:.3f}] in last 3 closed M5 bars.",
+                             passed, "M5_VALUE_ZONE_PULLBACK", tel)
+        passed.append("M5_VALUE_ZONE_PULLBACK")
 
-        # ─── GATE 3: M5 Execution & Value Zone Confirmation (MANDATORY) ───────────
-        m5_closes = [float(c["close"]) for c in closed_m5]
-        m5_highs = [float(c["high"]) for c in closed_m5]
-        m5_lows = [float(c["low"]) for c in closed_m5]
-        m5_opens = [float(c["open"]) for c in closed_m5]
-
-        m5_ema9 = calc_ema(m5_closes, 9)
-        m5_ema21 = calc_ema(m5_closes, 21)
-        atr_m5 = calc_atr(closed_m5, 14)
-
-        vz_top = max(m5_ema9, m5_ema21)
-        vz_bottom = min(m5_ema9, m5_ema21)
-
-        # Mandatory M5 EMA alignment check (strict veto)
-        if candidate_direction == "BUY" and m5_ema9 <= m5_ema21:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M5_DOWNTREND_ACTIVE_EMA9_BELOW_EMA21",
-                "detail": f"M5 execution veto: M5 EMA9 ({m5_ema9:.3f}) <= EMA21 ({m5_ema21:.3f}). Counter-trend BUY forbidden.",
-                "passed_gates": ["H1_TREND", "M15_STRUCTURE"],
-                "failed_gate": "M5_EMA_ALIGNMENT",
-                "telemetry": {"m5_ema9": m5_ema9, "m5_ema21": m5_ema21, "atr_m5": atr_m5}
-            }
-        elif candidate_direction == "SELL" and m5_ema9 >= m5_ema21:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M5_UPTREND_ACTIVE_EMA9_ABOVE_EMA21",
-                "detail": f"M5 execution veto: M5 EMA9 ({m5_ema9:.3f}) >= EMA21 ({m5_ema21:.3f}). Counter-trend SELL forbidden.",
-                "passed_gates": ["H1_TREND", "M15_STRUCTURE"],
-                "failed_gate": "M5_EMA_ALIGNMENT",
-                "telemetry": {"m5_ema9": m5_ema9, "m5_ema21": m5_ema21, "atr_m5": atr_m5}
-            }
-
-        # Check pullback to value zone in the last 3 completed M5 candles
-        recent_lows = m5_lows[-3:]
-        recent_highs = m5_highs[-3:]
-
-        touched_value_zone = False
-        if candidate_direction == "BUY":
-            # Price must have pulled back into or through the value zone
-            touched_value_zone = min(recent_lows) <= (vz_top + 0.25 * atr_m5)
+        t = m5[-1]
+        to, th, tl, tc = (float(t[k]) for k in ("open", "high", "low", "close"))
+        rng = max(1e-6, th - tl)
+        if direction == "BUY":
+            wick = min(to, tc) - tl
+            ok = (tc > to or wick >= 0.4 * rng) and tc >= tl + 0.5 * rng and tc > e21m5
         else:
-            touched_value_zone = max(recent_highs) >= (vz_bottom - 0.25 * atr_m5)
+            wick = th - max(to, tc)
+            ok = (tc < to or wick >= 0.4 * rng) and tc <= tl + 0.5 * rng and tc < e21m5
+        tel["trigger_candle"] = {"time": t.get("time"), "open": to, "high": th, "low": tl, "close": tc}
+        if not ok:
+            return _no_trade("M5_CANDLE_REJECTION_NOT_CONFIRMED",
+                             f"Last closed M5 bar O={to} H={th} L={tl} C={tc} is not a {direction} rejection.",
+                             passed, "M5_CANDLE_REJECTION", tel)
+        passed.append("M5_CANDLE_REJECTION")
 
-        if not touched_value_zone:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M5_NO_VALUE_ZONE_PULLBACK",
-                "detail": f"M5 pullback missing: Price has not retraced to EMA9-EMA21 value zone [{vz_bottom:.2f} - {vz_top:.2f}].",
-                "passed_gates": ["H1_TREND", "M15_STRUCTURE", "M5_EMA_ALIGNMENT"],
-                "failed_gate": "M5_VALUE_ZONE_PULLBACK",
-                "telemetry": {"vz_bottom": vz_bottom, "vz_top": vz_top, "atr_m5": atr_m5}
-            }
+        entry = current_ask if direction == "BUY" else current_bid
+        ext = (entry - vz_top) if direction == "BUY" else (vz_bot - entry)
+        if ext > 1.0 * atr:
+            return _no_trade("M5_ENTRY_EXCESSIVELY_EXTENDED",
+                             f"Entry {entry:.3f} is {ext:.3f} beyond value zone (> 1.0 x ATR {atr:.3f}).",
+                             passed, "M5_EXTENSION", tel)
+        passed.append("M5_EXTENSION")
 
-        # Completed trigger candle rejection confirmation
-        trigger_bar = closed_m5[-1]
-        t_open = float(trigger_bar["open"])
-        t_high = float(trigger_bar["high"])
-        t_low = float(trigger_bar["low"])
-        t_close = float(trigger_bar["close"])
-        t_body = abs(t_close - t_open)
-        t_range = max(0.01, t_high - t_low)
-
-        rejection_confirmed = False
-        if candidate_direction == "BUY":
-            lower_wick = min(t_open, t_close) - t_low
-            is_bullish_body = t_close > t_open
-            has_long_lower_wick = lower_wick >= 0.40 * t_range
-            closed_in_upper_half = t_close >= (t_low + 0.50 * t_range)
-            rejection_confirmed = (is_bullish_body or has_long_lower_wick) and closed_in_upper_half
+        # ── Gate 4: structural / ATR stop (never tightened) ──
+        lookback = 12
+        if direction == "BUY":
+            swing = min(m5l[-lookback:])
+            swing_dist = entry - swing + 0.3 * atr
         else:
-            upper_wick = t_high - max(t_open, t_close)
-            is_bearish_body = t_close < t_open
-            has_long_upper_wick = upper_wick >= 0.40 * t_range
-            closed_in_lower_half = t_close <= (t_low + 0.50 * t_range)
-            rejection_confirmed = (is_bearish_body or has_long_upper_wick) and closed_in_lower_half
+            swing = max(m5h[-lookback:])
+            swing_dist = swing - entry + 0.3 * atr
+        sl_dist = round(max(1.5 * atr, swing_dist), digits)
+        tel.update(swing_level=swing, swing_distance=round(swing_dist, 3), sl_atr_multiple=round(sl_dist / atr, 2))
+        if sl_dist > policy.max_sl_atr_multiple * atr:
+            return _no_trade("ERR_STRUCTURAL_STOP_TOO_WIDE",
+                             f"Structural SL {sl_dist:.3f} = {sl_dist/atr:.2f} x ATR exceeds {policy.max_sl_atr_multiple} x ATR.",
+                             passed, "DYNAMIC_STOPS", tel, direction)
+        if sl_dist < 10 * max(spread, 0.0):
+            return _no_trade("ERR_STOP_TOO_CLOSE_TO_SPREAD", f"SL {sl_dist:.3f} < 10 x spread {spread:.3f}.",
+                             passed, "DYNAMIC_STOPS", tel, direction)
+        passed.append("DYNAMIC_STOPS")
 
-        if not rejection_confirmed:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M5_CANDLE_REJECTION_NOT_CONFIRMED",
-                "detail": f"Completed M5 candle does not confirm rejection at value zone (open={t_open:.2f}, high={t_high:.2f}, low={t_low:.2f}, close={t_close:.2f}).",
-                "passed_gates": ["H1_TREND", "M15_STRUCTURE", "M5_EMA_ALIGNMENT", "M5_VALUE_ZONE_PULLBACK"],
-                "failed_gate": "M5_CANDLE_REJECTION",
-                "telemetry": {"trigger_candle": trigger_bar}
-            }
+        # ── Gate 5: percentage-of-equity sizing ──
+        sizing = compute_position_size(account_equity, policy.risk_pct_per_trade, sl_dist, spread, slip, spec)
+        if not sizing["feasible"]:
+            return _no_trade(sizing["error_code"],
+                             f"Risk budget ${sizing['risk_budget_usd']:.2f} ({policy.risk_pct_per_trade}% of "
+                             f"${account_equity:.2f}) vs min-lot loss ${sizing.get('min_lot_loss_usd', 0):.2f}. "
+                             "SL is not tightened to force eligibility.",
+                             passed, "RISK_BUDGET_FEASIBILITY", tel, direction, {"risk_sizing": sizing})
+        passed.append("RISK_BUDGET_FEASIBILITY")
 
-        # Extension check: entry not excessively extended from value zone
-        entry_est = current_ask if candidate_direction == "BUY" else current_bid
-        if candidate_direction == "BUY" and (entry_est - vz_top) > (1.5 * atr_m5):
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M5_ENTRY_EXCESSIVELY_EXTENDED",
-                "detail": f"Entry price ({entry_est:.2f}) is overextended from EMA9 ({vz_top:.2f}) by > 1.5x ATR.",
-                "passed_gates": ["H1_TREND", "M15_STRUCTURE", "M5_EMA_ALIGNMENT", "M5_VALUE_ZONE_PULLBACK", "M5_CANDLE_REJECTION"],
-                "failed_gate": "M5_EXTENSION",
-                "telemetry": {"entry_est": entry_est, "vz_top": vz_top, "atr_m5": atr_m5}
-            }
-        elif candidate_direction == "SELL" and (vz_bottom - entry_est) > (1.5 * atr_m5):
-            return {
-                "outcome": "NO_TRADE",
-                "direction": "NONE",
-                "error_code": "M5_ENTRY_EXCESSIVELY_EXTENDED",
-                "detail": f"Entry price ({entry_est:.2f}) is overextended from EMA9 ({vz_bottom:.2f}) by > 1.5x ATR.",
-                "passed_gates": ["H1_TREND", "M15_STRUCTURE", "M5_EMA_ALIGNMENT", "M5_VALUE_ZONE_PULLBACK", "M5_CANDLE_REJECTION"],
-                "failed_gate": "M5_EXTENSION",
-                "telemetry": {"entry_est": entry_est, "vz_bottom": vz_bottom, "atr_m5": atr_m5}
-            }
-
-        # ─── GATE 4: Dynamic Stop Loss & Take Profit Calculation ──────────────────
-        lookback = min(15, len(closed_m5))
-        swing_buffer = 0.30 * atr_m5
-
-        if candidate_direction == "BUY":
-            swing_low = min(m5_lows[-lookback:])
-            swing_distance = max(0.5, (entry_est - swing_low) + swing_buffer)
-            atr_stop_distance = 1.50 * atr_m5
-            sl_distance = max(atr_stop_distance, swing_distance)
-            sl_distance = max(sl_distance, 1.50 * atr_m5)  # Enforce at least 1.5x ATR
-            sl_price = round(entry_est - sl_distance, digits)
-
-            # Minimum 1.5:1 reward-to-risk after spread and slippage
-            friction_pts = spread + estimated_slippage_pts
-            net_sl_distance = sl_distance + friction_pts
-            tp_distance = round(1.50 * net_sl_distance + friction_pts, digits)
-            tp_price = round(entry_est + tp_distance, digits)
+        # ── Gate 6: target / net R:R ──
+        vpu = value_per_price_unit_per_lot(spec)
+        comm = sizing["commission_round_trip_per_lot"]
+        loss_pts = sizing["loss_pts_incl_costs"]
+        tp2 = tp_distance_for_net_rr(policy.preferred_net_rr, loss_pts, slip, comm, vpu)
+        tp15 = tp_distance_for_net_rr(policy.min_net_rr, loss_pts, slip, comm, vpu)
+        recent = m15[-24:]
+        if direction == "BUY":
+            opp = max(float(c["high"]) for c in recent)
+            blocks_2r = entry < opp < entry + tp2
         else:
-            swing_high = max(m5_highs[-lookback:])
-            swing_distance = max(0.5, (swing_high - entry_est) + swing_buffer)
-            atr_stop_distance = 1.50 * atr_m5
-            sl_distance = max(atr_stop_distance, swing_distance)
-            sl_distance = max(sl_distance, 1.50 * atr_m5)  # Enforce at least 1.5x ATR
-            sl_price = round(entry_est + sl_distance, digits)
+            opp = min(float(c["low"]) for c in recent)
+            blocks_2r = entry - tp2 < opp < entry
+        tp_dist = round(tp15 if blocks_2r else tp2, digits)
+        rr = net_rr(tp_dist, loss_pts, slip, comm, vpu)
+        if rr + 1e-9 < policy.min_net_rr:
+            return _no_trade("ERR_NET_RR_BELOW_MINIMUM", f"Net R:R {rr} < {policy.min_net_rr}.",
+                             passed, "NET_REWARD_RISK", tel, direction)
+        passed.append("NET_REWARD_RISK")
 
-            friction_pts = spread + estimated_slippage_pts
-            net_sl_distance = sl_distance + friction_pts
-            tp_distance = round(1.50 * net_sl_distance + friction_pts, digits)
-            tp_price = round(entry_est - tp_distance, digits)
-
-        reward_risk_ratio = round(tp_distance / sl_distance, 2)
-
-        # ─── GATE 5: Risk Feasibility & Position Sizing ───────────────────────────
-        friction_total_pts = sl_distance + spread + estimated_slippage_pts
-        risk_per_min_lot_usd = friction_total_pts * min_volume * contract_size
-
-        if risk_per_min_lot_usd > approved_risk_budget_usd:
-            return {
-                "outcome": "NO_TRADE",
-                "direction": candidate_direction,
-                "error_code": "ERR_MIN_LOT_EXCEEDS_BUDGET",
-                "detail": (
-                    f"Minimum lot ({min_volume} lots) monetary risk (${risk_per_min_lot_usd:.2f} USD) "
-                    f"exceeds approved risk budget (${approved_risk_budget_usd:.2f} USD). "
-                    f"SL distance ({sl_distance:.2f} pts = {sl_distance / atr_m5:.2f}x ATR) cannot be safely compressed."
-                ),
-                "passed_gates": [
-                    "H1_TREND", "M15_STRUCTURE", "M5_EMA_ALIGNMENT",
-                    "M5_VALUE_ZONE_PULLBACK", "M5_CANDLE_REJECTION", "M5_EXTENSION", "DYNAMIC_STOPS"
-                ],
-                "failed_gate": "RISK_BUDGET_FEASIBILITY",
-                "risk_feasibility": {
-                    "approved_risk_budget_usd": approved_risk_budget_usd,
-                    "risk_per_min_lot_usd": risk_per_min_lot_usd,
-                    "min_volume": min_volume,
-                    "sl_distance": sl_distance,
-                    "atr_m5": atr_m5,
-                }
-            }
-
-        # Calculate volume rounded down to volume_step
-        raw_volume = approved_risk_budget_usd / (friction_total_pts * contract_size)
-        volume = math.floor(raw_volume / volume_step) * volume_step
-        volume = round(max(min_volume, volume), 2)
-        total_monetary_risk_usd = round(friction_total_pts * volume * contract_size, 2)
-
-        trigger_time = trigger_bar.get("time") or trigger_bar.get("timestamp") or 0
+        if direction == "BUY":
+            sl_price, tp_price = round(entry - sl_dist, digits), round(entry + tp_dist, digits)
+        else:
+            sl_price, tp_price = round(entry + sl_dist, digits), round(entry - tp_dist, digits)
+        vol = sizing["volume"]
+        exp_net_reward = round((tp_dist - slip) * vpu * vol - comm * vol, 2)
 
         return {
-            "outcome": candidate_direction,
-            "direction": candidate_direction,
+            "outcome": direction,
+            "direction": direction,
             "error_code": None,
-            "detail": f"Qualified Candidate A {candidate_direction} pullback setup.",
-            "passed_gates": [
-                "H1_TREND", "M15_STRUCTURE", "M5_EMA_ALIGNMENT",
-                "M5_VALUE_ZONE_PULLBACK", "M5_CANDLE_REJECTION", "M5_EXTENSION",
-                "DYNAMIC_STOPS", "RISK_BUDGET_FEASIBILITY"
-            ],
+            "detail": f"Qualified {cls.STRATEGY_CODE} {direction} setup.",
+            "passed_gates": passed,
             "failed_gate": None,
+            "telemetry": tel,
+            "risk_sizing": sizing,
             "order_parameters": {
-                "direction": candidate_direction,
-                "entry_price": entry_est,
+                "direction": direction,
+                "entry_price": entry,
                 "sl_price": sl_price,
                 "tp_price": tp_price,
-                "sl_distance_pts": sl_distance,
-                "tp_distance_pts": tp_distance,
-                "volume": volume,
+                "stop_loss_price": sl_price,
+                "take_profit_price": tp_price,
+                "sl_distance_pts": sl_dist,
+                "tp_distance_pts": tp_dist,
+                "volume": vol,
                 "spread_pts": spread,
-                "atr_m5": atr_m5,
-                "sl_atr_ratio": round(sl_distance / atr_m5, 2),
-                "reward_risk_ratio": reward_risk_ratio,
-                "estimated_friction_pts": friction_pts,
-                "total_monetary_risk_usd": total_monetary_risk_usd,
-                "approved_risk_budget_usd": approved_risk_budget_usd,
-                "trigger_candle_time": trigger_time,
+                "atr_m5": round(atr, 3),
+                "sl_atr_ratio": round(sl_dist / atr, 2),
+                "target_rr_selected": policy.min_net_rr if blocks_2r else policy.preferred_net_rr,
+                "structure_supports_2r": not blocks_2r,
+                "opposing_m15_level": opp,
+                "expected_net_rr": rr,
+                "estimated_costs_usd": round((spread + 2 * slip) * vpu * vol + comm * vol, 2),
+                "total_monetary_risk_usd": sizing["planned_loss_usd"],
+                "expected_net_reward_usd": exp_net_reward,
+                "risk_budget_usd": sizing["risk_budget_usd"],
+                "risk_pct": policy.risk_pct_per_trade,
+                "trigger_candle_time": t.get("time"),
             },
-            "telemetry": {
-                "h1_ema21": h1_ema21, "h1_ema50": h1_ema50, "h1_slope": h1_slope,
-                "m15_ema50": m15_ema50, "m15_close": m15_last_close,
-                "m5_ema9": m5_ema9, "m5_ema21": m5_ema21, "atr_m5": atr_m5,
-            }
         }

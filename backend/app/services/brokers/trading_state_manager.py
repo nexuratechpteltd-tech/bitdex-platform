@@ -274,7 +274,6 @@ class TradingStateManager:
         exp_dt = now_dt + timedelta(minutes=ttl)
         now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         exp_iso = exp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
         conn.execute(
             """
             INSERT OR REPLACE INTO invalidated_setups
@@ -286,3 +285,28 @@ class TradingStateManager:
         logger.info(
             f"Invalidated setup {fingerprint} ({symbol} {direction}) for account {account_id} until {exp_iso}. Reason: {reason}"
         )
+
+    @classmethod
+    def compute_direction_lock_fingerprint(cls, symbol: str, direction: str) -> str:
+        raw = f"{symbol.upper()}:{direction.upper()}:DIR_LOCK"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    @classmethod
+    def freeze_account(
+        cls, conn: sqlite3.Connection, account_id: str, reason: str = "EMERGENCY_FREEZE", hours: int = 24
+    ) -> None:
+        cls.ensure_schema(conn)
+        now_dt = datetime.now(timezone.utc)
+        until_dt = now_dt + timedelta(hours=hours)
+        now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        until_iso = until_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute(
+            """
+            UPDATE account_trading_state
+            SET cooldown_until = ?, updated_at = ?
+            WHERE account_id = ?
+            """,
+            (until_iso, now_iso, str(account_id)),
+        )
+        logger.critical(f"ACCOUNT {account_id} FROZEN until {until_iso}. Reason: {reason}")
+
