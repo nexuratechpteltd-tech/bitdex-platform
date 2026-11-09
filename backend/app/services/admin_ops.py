@@ -407,6 +407,7 @@ def get_customer_ai_usage(conn: sqlite3.Connection, user_id: str) -> Dict[str, A
 
 
 def get_customer_connections(conn: sqlite3.Connection, user_id: str) -> List[Dict[str, Any]]:
+    # 1. Exchange connections (Binance, OKX, etc.)
     rows = conn.execute("""
         SELECT c.account_id, c.user_id, c.provider, c.exchange_name, c.label,
                c.environment, c.product_type, c.connection_status, c.verification_status,
@@ -416,4 +417,21 @@ def get_customer_connections(conn: sqlite3.Connection, user_id: str) -> List[Dic
         WHERE c.user_id = ? AND u.role = 'CUSTOMER'
         ORDER BY c.created_at DESC
     """, (user_id,)).fetchall()
-    return [dict(r) for r in rows]
+    conns = [dict(r) for r in rows]
+
+    # 2. Exness broker connections (CFD / Terminal)
+    exn_rows = conn.execute("""
+        SELECT e.connection_id as account_id, e.user_id, 'Exness' as provider, 'Exness' as exchange_name,
+               COALESCE(e.account_label, 'Exness Account') as label,
+               e.account_type as environment, 'CFD' as product_type,
+               CASE WHEN e.is_active = 1 THEN 'CONNECTED' ELSE 'DISCONNECTED' END as connection_status,
+               e.verification_status,
+               SUBSTR(e.account_login, 1, 2) || '****' || SUBSTR(e.account_login, -2) as key_fingerprint,
+               COALESCE(e.last_reconciled_at, e.updated_at) as last_verified_at, e.created_at,
+               e.balance_usd, e.equity_usd, e.margin_free, e.trade_mode, e.server_name, e.account_tier
+        FROM exness_demo_connections e
+        WHERE e.user_id = ?
+        ORDER BY e.created_at DESC
+    """, (user_id,)).fetchall()
+    conns.extend([dict(r) for r in exn_rows])
+    return conns

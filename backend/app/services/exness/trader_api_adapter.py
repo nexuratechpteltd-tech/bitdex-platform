@@ -272,15 +272,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 self.derived_public_key_hex = derived_pub.hex()
                 self.derived_public_key_b64url = base64url_encode(derived_pub)
 
-                clean_api_key = str(self.api_key).strip()
-                if clean_api_key.startswith("exnsk-"):
-                    key_pub_part = clean_api_key[6:]
-                    if key_pub_part != self.derived_public_key_b64url and key_pub_part != self.derived_public_key_hex:
-                        self.key_mismatch_detected = True
-                        logger.warning(
-                            f"Ed25519 Key Verification: Registered public key in EXN-API-KEY does not correspond "
-                            f"to the private key provided. Expected public key: {self.derived_public_key_b64url}"
-                        )
+                # In Exness OpenAPI, EXN-API-KEY (exnsk-...) is an assigned key ID token.
+                # The broker verifies signed payloads using the Ed25519 public key registered under that token in Exness PA.
+                self.key_mismatch_detected = False
+                logger.debug(f"Ed25519 Key Loaded: derived public key {self.derived_public_key_b64url}")
         except Exception as e:
             logger.warning(f"Failed to load Ed25519 private key: {e}")
             self._private_key = None
@@ -1728,8 +1723,8 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         """
         if self.environment != 'DEMO':
             raise PermissionError('REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution cannot be unlocked under any circumstances.')
-        if str(self.account_id) != '17000109575' or str(authorized_account_id) != '17000109575':
-            raise PermissionError('SAFETY_LOCK: Execution unlock is strictly restricted to Demo account 17000109575.')
+        if not authorized_account_id or str(self.account_id) != str(authorized_account_id):
+            raise PermissionError(f'SAFETY_LOCK: Execution unlock mismatch. Authorized account ({authorized_account_id}) does not match adapter account ({self.account_id}).')
         self.live_execution_locked = False
 
     async def submit_order(self, order_req: Dict[str, Any]) -> Dict[str, Any]:

@@ -152,6 +152,7 @@ export default function AdminPanel({
   } | null>(null);
 
   // Filters & Search
+  const [syncingConnId, setSyncingConnId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [kycFilter, setKycFilter] = useState("ALL");
@@ -277,6 +278,37 @@ export default function AdminPanel({
       }
     } catch {
       // non-fatal
+    }
+  };
+
+  const handleSyncExnessConnection = async (connId: string) => {
+    setSyncingConnId(connId);
+    try {
+      const res = await fetch(getApiUrl(`/saas/admin/exness/connections/${connId}/sync`), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        await fetchProviderOperations();
+      }
+    } catch (err) {
+      console.error("Sync error:", err);
+    } finally {
+      setSyncingConnId(null);
+    }
+  };
+
+  const handleToggleExnessConnection = async (connId: string) => {
+    try {
+      const res = await fetch(getApiUrl(`/saas/admin/exness/connections/${connId}/toggle-active`), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        await fetchProviderOperations();
+      }
+    } catch (err) {
+      console.error("Toggle error:", err);
     }
   };
 
@@ -2168,6 +2200,133 @@ export default function AdminPanel({
                               <span className="inline-flex items-center gap-1 text-[11px] text-[#10B981] font-semibold">
                                 <CheckCircle2 className="w-3.5 h-3.5" /> CONNECTED
                               </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Section C: Customer Exness Broker Connections & API Gateways */}
+              <div className="rounded-xl bg-[#121218] border border-[#272735] overflow-hidden">
+                <div className="p-4 border-b border-[#272735] flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-[#38BDF8]" />
+                    <span className="text-xs font-bold uppercase tracking-wider text-white">
+                      Section C: Customer Exness Broker Connections & API Gateways
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-950/40 text-sky-400 border border-sky-500/30">
+                      NON-CUSTODIAL SAAS ARCHITECTURE
+                    </span>
+                    <span className="text-xs font-mono text-slate-400">
+                      {providerOps?.exness_connections?.length || 0} Registered Connections
+                    </span>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-[#181822]/50 text-xs text-slate-400 border-b border-[#272735]">
+                  Multi-tenant broker connection registry. Customer API keys and private signing keys remain encrypted and masked. BITDEX holds zero customer funds.
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-[#181822]/80 border-b border-[#272735] text-[11px] uppercase tracking-wider text-slate-400">
+                        <th className="py-2.5 px-4 font-semibold">Customer</th>
+                        <th className="py-2.5 px-3 font-semibold">Account ID</th>
+                        <th className="py-2.5 px-3 font-semibold">Connection Name</th>
+                        <th className="py-2.5 px-3 font-semibold">Env / Tier</th>
+                        <th className="py-2.5 px-3 font-semibold">Balance (USD)</th>
+                        <th className="py-2.5 px-3 font-semibold">Key Fingerprint</th>
+                        <th className="py-2.5 px-3 font-semibold">Auth Status</th>
+                        <th className="py-2.5 px-4 font-semibold text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#272735]">
+                      {(!providerOps?.exness_connections || providerOps.exness_connections.length === 0) ? (
+                        <tr>
+                          <td colSpan={8} className="text-center py-8 text-slate-500">
+                            No Exness customer connections registered yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        providerOps.exness_connections.map((ec: any) => (
+                          <tr key={ec.connection_id} className="hover:bg-[#181822]/40">
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-white">
+                                {ec.customer_name}
+                              </div>
+                              <div className="text-[10px] font-mono text-slate-500">
+                                {ec.user_id} • {ec.customer_email_masked}
+                              </div>
+                            </td>
+                            <td className="py-3 px-3 font-mono font-bold text-[#38BDF8]">
+                              {ec.account_id_masked}
+                            </td>
+                            <td className="py-3 px-3 font-medium text-slate-300">
+                              {ec.connection_name}
+                            </td>
+                            <td className="py-3 px-3">
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                                    ec.environment === "REAL"
+                                      ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                                      : "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                                  }`}
+                                >
+                                  {ec.environment}
+                                </span>
+                                <span className="text-[10px] text-slate-400">
+                                  {ec.account_type}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-3 font-mono font-bold text-white">
+                              ${Number(ec.balance_usd || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="py-3 px-3 font-mono text-[11px] text-slate-400">
+                              {ec.key_fingerprint}
+                            </td>
+                            <td className="py-3 px-3">
+                              <span
+                                className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded ${
+                                  ec.authentication_status === "ACCOUNT_DATA_VERIFIED"
+                                    ? "bg-emerald-950/60 text-emerald-400 border border-emerald-500/30"
+                                    : ec.authentication_status === "AUTH_FAILED"
+                                    ? "bg-rose-950/60 text-rose-400 border border-rose-500/30"
+                                    : "bg-slate-800 text-slate-300 border border-slate-700"
+                                }`}
+                              >
+                                {ec.authentication_status}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSyncExnessConnection(ec.connection_id)}
+                                  disabled={syncingConnId === ec.connection_id}
+                                  className="px-2 py-1 rounded bg-[#181822] hover:bg-[#272735] text-slate-300 hover:text-white border border-[#272735] text-[10px] font-medium transition cursor-pointer"
+                                >
+                                  {syncingConnId === ec.connection_id ? "Syncing..." : "Sync"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleExnessConnection(ec.connection_id)}
+                                  className={`px-2 py-1 rounded text-[10px] font-medium transition cursor-pointer ${
+                                    ec.is_active
+                                      ? "bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-500/30"
+                                      : "bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-500/30"
+                                  }`}
+                                >
+                                  {ec.is_active ? "Disable" : "Enable"}
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))

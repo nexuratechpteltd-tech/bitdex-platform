@@ -1,0 +1,133 @@
+{
+  "timestamp": "2026-11-09T12:13:04.610551+00:00",
+  "total_tests": 25,
+  "passed": 25,
+  "failed": 0,
+  "results": [
+    {
+      "test": "Test 01: Customer A cannot view Customer B connection via get_exness_status",
+      "passed": true,
+      "detail": "Customer A saw accounts: ['88****01']"
+    },
+    {
+      "test": "Test 02: Customer A cannot view Customer B in get_hft_connected_accounts",
+      "passed": true,
+      "detail": "Returned accounts: ['88800011101']"
+    },
+    {
+      "test": "Test 03: Customer A cannot resync Customer B connection",
+      "passed": true,
+      "detail": "HTTP 404: Exness account connection not found."
+    },
+    {
+      "test": "Test 04: Customer A cannot disconnect Customer B connection",
+      "passed": true,
+      "detail": "HTTP 404: Connection not found or already disconnected."
+    },
+    {
+      "test": "Test 05: Customer A cannot set Customer B connection as preferred",
+      "passed": true,
+      "detail": "HTTP 404: Connection not found or does not belong to user."
+    },
+    {
+      "test": "Test 06: Customer A cannot retrieve Customer B account info",
+      "passed": true,
+      "detail": "Returned account: 88800011101"
+    },
+    {
+      "test": "Test 07: Customer A cannot execute trade against Customer B connection",
+      "passed": true,
+      "detail": "HTTP 400: NO_ACTIVE_CONNECTION: You must connect your own Exness DEMO account before placing trades."
+    },
+    {
+      "test": "Test 08: Customer A cannot resolve Customer B account via _require_acct",
+      "passed": true,
+      "detail": "HTTP 403: TENANT_ISOLATION_VIOLATION: Access denied. The requested broker account belongs to another customer."
+    },
+    {
+      "test": "Test 09: Customer A cannot decrypt Customer B vault credentials",
+      "passed": true,
+      "detail": "Vault rejected with PermissionError: Cryptographic vault verification failed. Credentials tampered or invalid tenant context."
+    },
+    {
+      "test": "Test 10: Vault fails when tenant ID is altered (AAD tamper protection)",
+      "passed": true,
+      "detail": "Cryptographic integrity tag rejected tampered tenant context"
+    },
+    {
+      "test": "Test 11: Customer B cannot view Customer A connection (symmetric)",
+      "passed": true,
+      "detail": "Customer B saw: ['88****02']"
+    },
+    {
+      "test": "Test 12: Customer B cannot execute trade against Customer A connection",
+      "passed": true,
+      "detail": "HTTP 400: NO_ACTIVE_CONNECTION: You must connect your own Exness DEMO account before placing trades."
+    },
+    {
+      "test": "Test 13: Customer B cannot resolve Customer A account via _require_acct",
+      "passed": true,
+      "detail": "HTTP 403: TENANT_ISOLATION_VIOLATION: Access denied. The requested broker account belongs to another customer."
+    },
+    {
+      "test": "Test 14: Customer B cannot decrypt Customer A credentials",
+      "passed": true,
+      "detail": "Cryptographic tag mismatch correctly blocked unauthorized decryption"
+    },
+    {
+      "test": "Test 15: Customer cannot view Platform Owner connections",
+      "passed": true,
+      "detail": "Owner accounts found in Customer A status: False"
+    },
+    {
+      "test": "Test 16: Customer cannot execute against Platform Owner Demo connection",
+      "passed": true,
+      "detail": "HTTP 400: NO_ACTIVE_CONNECTION: You must connect your own Exness DEMO account before placing trades."
+    },
+    {
+      "test": "Test 17: Customer cannot execute against Platform Owner Real connection",
+      "passed": true,
+      "detail": "HTTP 400: NO_ACTIVE_CONNECTION: You must connect your own Exness REAL account before placing trades."
+    },
+    {
+      "test": "Test 18: Real execution remains permanently locked for all users",
+      "passed": true,
+      "detail": "Order blocked by barrier: LIVE_TRADING_LOCKED"
+    },
+    {
+      "test": "Test 19: Arbitrary unowned account ID is strictly rejected",
+      "passed": true,
+      "detail": "HTTP 404: Selected trading account not found for this customer."
+    },
+    {
+      "test": "Test 20: Null account ID strictly resolves only customer's own preferred account",
+      "passed": true,
+      "detail": "Resolved login: 88800011101"
+    },
+    {
+      "test": "Test 21: Historical customer Ali Ajmal account isolated from Platform Owner",
+      "passed": true,
+      "detail": "HTTP 403: TENANT_ISOLATION_VIOLATION: Access denied. The requested broker account belongs to another customer."
+    },
+    {
+      "test": "Test 22: Admin connections metadata masks credentials and omits secrets",
+      "passed": true,
+      "detail": "Plaintext secrets leaked: False, Ciphertexts leaked: False"
+    },
+    {
+      "test": "Test 23: Non-admin customer cannot access admin connections endpoint",
+      "passed": true,
+      "detail": "Role gate verified: customer cannot invoke admin route"
+    },
+    {
+      "test": "Test 24: Demo execution unlock strictly checks account ID match",
+      "passed": true,
+      "detail": "PermissionError: SAFETY_LOCK: Execution unlock mismatch. Authorized account (88800022202) does not match adapter account (88800011101)."
+    },
+    {
+      "test": "Test 25: Demo execution unlock rejects Real environment",
+      "passed": true,
+      "detail": "PermissionError: REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution cannot be unlocked under any circumstances."
+    }
+  ]
+}

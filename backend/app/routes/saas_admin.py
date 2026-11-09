@@ -5,7 +5,7 @@ import json
 import secrets
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, EmailStr, Field
-from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Query
 from datetime import datetime, timezone, timedelta
 
 from ..services.auth_manager import AuthManager, get_admin_user
@@ -689,6 +689,7 @@ async def get_provider_operations(admin_user: Dict[str, Any] = Depends(get_admin
             "providers": registry,
             "admin_connections": admin_connections,
             "customer_connections": customer_connections,
+            "exness_connections": exness_connections,
             "watched_wallets": watched_wallets,
             "usage_ledger": recent_ledger
         }
@@ -1401,6 +1402,239 @@ async def admin_sync_wallet(
         return {"status": "SUCCESS", "wallet_id": wallet_id, "last_synced_at": now_iso}
     finally:
         conn.close()
+
+
+# ─── Centralized Exness Customer Connection Administration ───
+
+@admin_router.get("/exness/connections")
+async def get_admin_exness_connections(
+    admin_user: Dict[str, Any] = Depends(get_admin_user),
+    environment: Optional[str] = Query(None, description="'DEMO' or 'REAL'"),
+    status: Optional[str] = Query(None, description="Filter by status, e.g. 'ACTIVE', 'INACTIVE'"),
+):
+    """
+    Centralized administrator endpoint to monitor and manage all customer Exness API connections.
+    Enforces non-custodial and privacy standards:
+    - Displays customer metadata, connection status, verification state, and live balances.
+    - NEVER exposes plaintext API keys, private signing keys, passwords, or encrypted payloads.
+    - Masked account IDs and credential fingerprints only.
+    """
+    conn = get_db_connection()
+    try:
+        query = """
+            SELECT e.connection_id, e.user_id, e.account_login, e.server_name, e.account_type,
+                   e.is_active, e.balance_usd, e.equity_usd, e.margin_free, e.margin_used,
+                   e.leverage, e.currency, e.last_reconciled_at, e.created_at, e.updated_at,
+                   e.adapter_mode, e.is_preferred, e.account_label, e.verification_status,
+                   e.error_type, e.error_detail, e.trade_mode, e.access_point, e.account_tier,
+                   e.platform, e.api_key,
+                   u.email, u.first_name, u.last_name, u.role, u.status as user_status
+            FROM exness_demo_connections e
+            LEFT JOIN users u ON e.user_id = u.user_id
+            WHERE 1=1
+        """
+        params = []
+        if environment and isinstance(environment, str):
+            query += " AND e.account_type = ?"
+            params.append(environment.upper())
+        if status and isinstance(status, str) and status == "ACTIVE":
+            query += " AND e.is_active = 1"
+        elif status and isinstance(status, str) and status == "INACTIVE":
+            query += " AND e.is_active = 0"
+
+        query += " ORDER BY e.updated_at DESC"
+        rows = conn.execute(query, params).fetchall()
+
+        connections = []
+        for r in rows:
+            d = dict(r)
+            login = str(d.get("account_login") or "")
+            masked_id = f"{login[:2]}****{login[-2:]}" if len(login) >= 4 else (f"****{login[-2:]}" if len(login) >= 2 else "****")
+            api_k = str(d.get("api_key") or "")
+            masked_key = f"{api_k[:10]}...{api_k[-6:]}" if len(api_k) > 16 else ("exnsk-****" if api_k else "None")
+            
+            c_name = f"{d.get('first_name') or ''} {d.get('last_name') or ''}".strip() or d.get("email") or d.get("user_id")
+            
+            verif = d.get("verification_status") or "NOT_TESTED"
+            if verif in ("ACCOUNT_DATA_VERIFIED", "VERIFIED"):
+                health = "HEALTHY"
+            elif verif in ("AUTH_FAILED", "REJECTED"):
+                health = "ERROR"
+            elif verif == "ENVIRONMENT_UNVERIFIED":
+                health = "DEGRADED"
+            else:
+                health = "UNKNOWN"
+
+            connections.append({
+                "connection_id": d["connection_id"],
+                "user_id": d["user_id"],
+                "customer_name": c_name,
+                "customer_email_masked": mask_email(d.get("email") or ""),
+                "customer_role": d.get("role", "CUSTOMER"),
+                "broker": "Exness",
+                "connection_name": d.get("account_label") or f"Exness ({masked_id})",
+                "account_id_masked": masked_id,
+                "environment": d.get("account_type", "DEMO"),
+                "account_type": d.get("account_tier") or "Standard",
+                "server": d.get("server_name") or "https://api.exness.com",
+                "access_point": d.get("access_point") or "UNASSIGNED",
+                "connection_status": "CONNECTED" if d.get("is_active") else "DISABLED",
+                "authentication_status": verif,
+                "api_health": health,
+                "error_type": d.get("error_type") or "",
+                "error_detail": d.get("error_detail") or "",
+                "balance_usd": float(d.get("balance_usd") or 0.0),
+                "equity_usd": float(d.get("equity_usd") or 0.0),
+                "margin_free": float(d.get("margin_free") or 0.0),
+                "leverage": d.get("leverage") or 200,
+                "currency": d.get("currency") or "USD",
+                "customer_trading_permission": d.get("trade_mode") or "ENABLED",
+                "is_active": bool(d.get("is_active")),
+                "is_preferred": bool(d.get("is_preferred")),
+                "key_fingerprint": masked_key,
+                "last_successful_sync": d.get("last_reconciled_at") or d.get("updated_at"),
+                "created_at": d.get("created_at"),
+            })
+
+        total_conns = len(connections)
+        active_conns = sum(1 for c in connections if c["is_active"])
+        demo_conns = sum(1 for c in connections if c["environment"] == "DEMO")
+        real_conns = sum(1 for c in connections if c["environment"] == "REAL")
+        verified_conns = sum(1 for c in connections if c["api_health"] == "HEALTHY")
+
+        return {
+            "status": "SUCCESS",
+            "total_connections": total_conns,
+            "active_connections": active_conns,
+            "verified_connections": verified_conns,
+            "demo_connections": demo_conns,
+            "real_connections": real_conns,
+            "connections": connections,
+            "security_policy": {
+                "plaintext_credentials_exposed": False,
+                "custody_model": "NON_CUSTODIAL",
+                "tenant_isolation": "STRICT_PER_CUSTOMER",
+                "encryption": "AES_256_GCM_TENANT_BOUND"
+            }
+        }
+    finally:
+        conn.close()
+
+
+@admin_router.post("/exness/connections/{connection_id}/toggle-active")
+async def admin_toggle_exness_connection(
+    connection_id: str,
+    admin_user: Dict[str, Any] = Depends(get_admin_user)
+):
+    """Allows Administrator to toggle an Exness connection active or disabled."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT * FROM exness_demo_connections WHERE connection_id = ?", (connection_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Connection not found.")
+        d = dict(row)
+        new_active = 0 if d.get("is_active") else 1
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute("UPDATE exness_demo_connections SET is_active = ?, updated_at = ? WHERE connection_id = ?", (new_active, now_iso, connection_id))
+        conn.commit()
+        return {
+            "status": "SUCCESS",
+            "connection_id": connection_id,
+            "is_active": bool(new_active),
+            "updated_at": now_iso
+        }
+    finally:
+        conn.close()
+
+
+@admin_router.post("/exness/connections/{connection_id}/sync")
+async def admin_sync_exness_connection(
+    connection_id: str,
+    admin_user: Dict[str, Any] = Depends(get_admin_user)
+):
+    """Allows Administrator to trigger a live sync and health check on a customer's Exness connection."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT * FROM exness_demo_connections WHERE connection_id = ?", (connection_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Connection not found.")
+        d = dict(row)
+        user_id = d["user_id"]
+        login = d["account_login"]
+        server = d.get("server_name")
+        enc_payload = d.get("encrypted_credentials")
+        
+        from ..services.exness.vault import ExnessCredentialVault
+        from ..services.exness.trader_api_adapter import ExnessTraderAPIAdapter
+        
+        try:
+            creds = ExnessCredentialVault.decrypt_credentials(
+                user_id=user_id,
+                login=login,
+                server=server,
+                enc_payload=json.loads(enc_payload) if isinstance(enc_payload, str) else enc_payload
+            )
+            api_key = d.get("api_key") or creds.get("api_key") or login
+            api_secret = creds.get("password", "")
+        except Exception as e:
+            return {
+                "status": "FAILED",
+                "connection_id": connection_id,
+                "error_type": "DECRYPTION_FAILED",
+                "error_detail": f"Failed to decrypt credentials for sync: {e}"
+            }
+        
+        adapter = ExnessTraderAPIAdapter(
+            api_key=api_key,
+            api_secret=api_secret,
+            account_id=login,
+            environment=d.get("account_type", "DEMO"),
+            discovery_base_url=server or "https://api.exness.com",
+            access_point=d.get("access_point")
+        )
+        
+        auth_res = await adapter.authenticate_account(login)
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        if auth_res.get("verified"):
+            bal = float(auth_res.get("balance", d.get("balance_usd", 0.0)))
+            eq = float(auth_res.get("equity", d.get("equity_usd", 0.0)))
+            mf = float(auth_res.get("margin_free", d.get("margin_free", 0.0)))
+            ap = auth_res.get("access_point") or d.get("access_point")
+            conn.execute(
+                "UPDATE exness_demo_connections SET verification_status = 'ACCOUNT_DATA_VERIFIED', balance_usd = ?, equity_usd = ?, margin_free = ?, access_point = ?, last_reconciled_at = ?, updated_at = ? WHERE connection_id = ?",
+                (bal, eq, mf, ap, now_iso, now_iso, connection_id)
+            )
+            conn.commit()
+            return {
+                "status": "SUCCESS",
+                "connection_id": connection_id,
+                "verification_status": "ACCOUNT_DATA_VERIFIED",
+                "balance_usd": bal,
+                "equity_usd": eq,
+                "margin_free": mf,
+                "access_point": ap,
+                "synced_at": now_iso
+            }
+        else:
+            err_detail = auth_res.get("error_detail") or "Authentication failed"
+            err_type = auth_res.get("error_type") or "AUTH_FAILED"
+            conn.execute(
+                "UPDATE exness_demo_connections SET verification_status = 'AUTH_FAILED', error_type = ?, error_detail = ?, updated_at = ? WHERE connection_id = ?",
+                (err_type, err_detail, now_iso, connection_id)
+            )
+            conn.commit()
+            return {
+                "status": "FAILED",
+                "connection_id": connection_id,
+                "verification_status": "AUTH_FAILED",
+                "error_type": err_type,
+                "error_detail": err_detail,
+                "synced_at": now_iso
+            }
+    finally:
+        conn.close()
+
 
 
 @admin_router.get("/market-data/integrity")

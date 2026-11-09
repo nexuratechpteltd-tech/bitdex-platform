@@ -290,8 +290,8 @@ class ExnessTerminalBrokerAdapter(UniversalBrokerAdapter):
     def unlock_demo_execution_for_test(self, authorized_account_id: str) -> None:
         if self.environment != 'DEMO':
             raise PermissionError('REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution is permanently locked.')
-        if str(self.account_id) != '17000109575' or str(authorized_account_id) != '17000109575':
-            raise PermissionError('SAFETY_LOCK: Execution unlock is strictly restricted to Demo account 17000109575.')
+        if not authorized_account_id or str(self.account_id) != str(authorized_account_id):
+            raise PermissionError(f'SAFETY_LOCK: Execution unlock mismatch. Authorized account ({authorized_account_id}) does not match adapter account ({self.account_id}).')
         self.client.unlock_demo_execution_for_test(authorized_account_id)
 
     async def modify_position(
