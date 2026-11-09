@@ -31,7 +31,7 @@ In `backend/app/routes/saas_customer.py` (`_resolve_hft_account`), connection st
 
 ## 3. Account-by-Account Audit on Staging
 
-An audit of all connected accounts for the administrator (`designkrao@gmail.com`) was executed via `GET /api/v1/saas/customer/trading/hft/connected-accounts`:
+An audit of all connected accounts for the administrator (`test_customer@bitdex.io`) was executed via `GET /api/v1/saas/customer/trading/hft/connected-accounts`:
 
 ```
 Account 1: Exness — Demo Account — #5550•••011

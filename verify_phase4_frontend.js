@@ -16,8 +16,8 @@ async function verify() {
   const page = await browser.newPage();
   await page.setViewport({ width: 1440, height: 900 });
 
-  const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItMzI4RTE0N0FDQSIsInVzZXJfaWQiOiJVU1ItMzI4RTE0N0FDQSIsImVtYWlsIjoiY3VzdG9tZXJAYml0ZGV4Lmx0ZCIsInJvbGUiOiJDVVNUT01FUiJ9.MB9VyMbWVG7mW870fH1NjVRmA4Gr6Xu3YaQHuCDAllo";
-  const user = JSON.stringify({ user_id: "USR-328E147ACA", email: "customera@example.com", role: "CUSTOMER", status: "ACTIVE" });
+  const token = process.env.BITDEX_TEST_TOKEN || "";
+  const user = JSON.stringify({ user_id: "USR-328E147ACA", email: process.env.BITDEX_TEST_EMAIL || "test_customer@bitdex.io", role: "CUSTOMER", status: "ACTIVE" });
 
   await page.evaluateOnNewDocument((t, u) => {
     localStorage.setItem("tauric_session_token", t);

@@ -3,7 +3,7 @@
 ANTIGRAVITY — BITDEX STAGING 18-PART COMPREHENSIVE REGRESSION TEST SUITE
 Environment: Staging (https://bitdex.ltd, 169.58.218.168)
 Target Users:
-  - Primary Customer: designkrao@gmail.com (USR-402F7BFE6D)
+  - Primary Customer: test_customer@bitdex.io (USR-402F7BFE6D)
   - Administrator: hello@nexura.ltd (USR-ADM-B022F490)
 Safety Invariants: live_trading_locked = True, read_only_mode = True, zero real orders.
 """
@@ -63,7 +63,7 @@ def run_tests():
     # 1. Generate verified JWT tokens
     cust_token = jwt.encode({
         "sub": "USR-402F7BFE6D",
-        "email": "designkrao@gmail.com",
+        "email": "test_customer@bitdex.io",
         "role": "CUSTOMER",
         "exp": datetime.now(timezone.utc) + timedelta(days=7)
     }, JWT_SECRET, algorithm="HS256")

@@ -82,7 +82,7 @@ Role-based access control was verified via automated end-to-end testing against 
 Test 1: Admin Session Validation
 GET /api/backend/saas/customer/me (Bearer admin_token)
 Status: HTTP 200 OK
-Result: user.role = 'ADMIN', user.email = 'designkrao@gmail.com'
+Result: user.role = 'ADMIN', user.email = 'test_customer@bitdex.io'
 
 Test 2: Administrative API Access
 GET /api/backend/saas/admin/customers -> HTTP 200 OK (80 records)

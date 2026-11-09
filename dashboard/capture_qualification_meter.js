@@ -1,17 +1,24 @@
 const puppeteer = require('puppeteer');
+const { execSync } = require('child_process');
 
-const TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItOTA0NDI0QjRGQiIsImVtYWlsIjoiYWxpYWptYWx0Y2EyMkBnbWFpbC5jb20iLCJyb2xlIjoiQ1VTVE9NRVIiLCJzZXNzaW9uX2lkIjoiU0VTLTFBRUNENUVFMUI2NzgxNjUiLCJyZW1lbWJlcl9tZSI6dHJ1ZSwiZXhwIjoxNzk2Nzc1MDQ4fQ.ukAGpEBxMqYMGpV0qhBz45zBp8w0_tJP63807wCW2O0';
+let TOKEN = process.env.BITDEX_TEST_TOKEN || '';
+if (!TOKEN) {
+  try {
+    TOKEN = execSync('/opt/tauric-platform-staging/backend/.venv/bin/python3 /opt/tauric-platform-staging/backend/scripts/create_ephemeral_test_token.py USR-904424B4FB', { encoding: 'utf-8' }).trim();
+  } catch (e) {
+    console.warn('Could not auto-generate test token:', e.message);
+  }
+}
 
-const ALI_USER = {
-  user_id: "USR-904424B4FB",
-  email: "aliajmaltca22@gmail.com",
-  username: "ali_trader",
-  role: "CUSTOMER",
-  status: "ACTIVE",
-  first_name: "Ali",
-  last_name: "Ajmal",
-  country: "AU",
-  session_id: "SES-1AECD5EE1B678165"
+const TEST_USER = process.env.BITDEX_TEST_USER ? JSON.parse(process.env.BITDEX_TEST_USER) : {
+  user_id: process.env.BITDEX_TEST_USER_ID || 'USR-904424B4FB',
+  email: process.env.BITDEX_TEST_EMAIL || 'test_trader@bitdex.io',
+  username: 'test_trader',
+  role: 'CUSTOMER',
+  status: 'ACTIVE',
+  first_name: 'Test',
+  last_name: 'Trader',
+  country: 'AU'
 };
 
 async function run() {
@@ -33,7 +40,7 @@ async function run() {
     localStorage.setItem('tauric_auth_token', tok);
     localStorage.setItem('bitdex_auth_token', tok);
     localStorage.setItem('tauric_session_user', JSON.stringify(usr));
-  }, TOKEN, ALI_USER);
+  }, TOKEN, TEST_USER);
 
   await page.goto('http://127.0.0.1:33900/#hft', { waitUntil: 'networkidle2' });
   await new Promise(r => setTimeout(r, 2000));
@@ -101,7 +108,7 @@ async function run() {
     localStorage.setItem('tauric_auth_token', tok);
     localStorage.setItem('bitdex_auth_token', tok);
     localStorage.setItem('tauric_session_user', JSON.stringify(usr));
-  }, TOKEN, ALI_USER);
+  }, TOKEN, TEST_USER);
 
   await mobilePage.goto('http://127.0.0.1:33900/#hft', { waitUntil: 'networkidle2' });
   await new Promise(r => setTimeout(r, 2000));

@@ -11,8 +11,8 @@ const BASE_URL = "http://127.0.0.1:33900";
 const OUTPUT_DIR = "/opt/tauric-platform-staging/dashboard/redesign_evidence_output";
 
 // Real signed JWTs generated with tauric_super_secret_staging_jwt_key_2026_xyz
-const ADMIN_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItQURNLUIwMjJGNDkwIiwiZW1haWwiOiJoZWxsb0BuZXh1cmEubHRkIiwicm9sZSI6IkFETUlOIiwiZXhwIjoxNzkzOTAyMDgwfQ.hJkwS7s7xZ8Juv6sdPNkWJLMk8njFFtqv750Q9taz5Q";
-const CUSTOMER_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItNDAyRjdCRkU2RCIsImVtYWlsIjoiZGVzaWdua3Jhb0BnbWFpbC5jb20iLCJyb2xlIjoiQ1VTVE9NRVIiLCJleHAiOjE3OTM5MDIwODB9.lceu9H9lU2lnxkbeEO6PenYUN-C9MCoB9f6LO1iaxYQ";
+const ADMIN_JWT = process.env.BITDEX_ADMIN_TOKEN || "";
+const CUSTOMER_JWT = process.env.BITDEX_TEST_TOKEN || "";
 
 const ADMIN_USER = {
   user_id: "USR-ADM-B022F490",
@@ -25,8 +25,8 @@ const ADMIN_USER = {
 };
 
 const CUSTOMER_USER = {
-  user_id: "USR-402F7BFE6D",
-  email: "designkrao@gmail.com",
+  user_id: process.env.BITDEX_TEST_USER_ID || "USR-TEST-CUST",
+  email: process.env.BITDEX_TEST_EMAIL || "test_customer@bitdex.io",
   username: "Customer User",
   role: "CUSTOMER",
   status: "ACTIVE",

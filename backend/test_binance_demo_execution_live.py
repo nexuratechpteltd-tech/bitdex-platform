@@ -30,9 +30,9 @@ async def run_tests():
     except PermissionError as e:
         print(f'✓ TEST 3 PASSED: Live execution hard-locked: {e}')
 
-    # Generate valid authenticated session token for designkrao@gmail.com
+    # Generate valid authenticated session token for test_customer@bitdex.io
     conn = get_db_connection()
-    user = conn.execute("SELECT user_id, email, role FROM users WHERE email = 'designkrao@gmail.com'").fetchone()
+    user = conn.execute("SELECT user_id, email, role FROM users WHERE email = 'test_customer@bitdex.io'").fetchone()
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(days=1)
     session_id = f"SES-{secrets.token_hex(8).upper()}"

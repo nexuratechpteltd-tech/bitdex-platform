@@ -4,7 +4,7 @@ const path = require("path");
 const { execSync } = require("child_process");
 
 function generateAdminSession() {
-  const res = execSync(`/opt/tauric-platform-staging/backend/.venv/bin/python3 /opt/tauric-platform-staging/dashboard/auth_helper.py designkrao@gmail.com`, {
+  const res = execSync(`/opt/tauric-platform-staging/backend/.venv/bin/python3 /opt/tauric-platform-staging/dashboard/auth_helper.py test_customer@bitdex.io`, {
     encoding: "utf-8"
   });
   return JSON.parse(res.trim());

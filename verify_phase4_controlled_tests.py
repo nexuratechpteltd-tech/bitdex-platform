@@ -20,7 +20,7 @@ JWT_SECRET = "tauric_super_secret_staging_jwt_key_2026_xyz"
 ADMIN_USER_ID = "USR-ADM-B022F490"
 ADMIN_EMAIL = "hello@nexura.ltd"
 CUSTOMER_USER_ID = "USR-402F7BFE6D"
-CUSTOMER_EMAIL = "designkrao@gmail.com"
+CUSTOMER_EMAIL = "test_customer@bitdex.io"
 
 results = []
 

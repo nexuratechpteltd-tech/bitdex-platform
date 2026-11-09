@@ -48,7 +48,7 @@ await page.evaluate((jwtToken) => {
   localStorage.setItem("sheltr_token", jwtToken);
   localStorage.setItem("tauric_session_user", JSON.stringify({
     user_id: "USR-402F7BFE6D",
-    email: "designkrao@gmail.com",
+    email: "test_customer@bitdex.io",
     role: "ADMIN",
     username: "billal95"
   }));

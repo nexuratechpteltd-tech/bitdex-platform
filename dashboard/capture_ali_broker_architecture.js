@@ -15,13 +15,13 @@ async function capture() {
     localStorage.setItem('tauric_token', 'mock_token_ali');
     localStorage.setItem('token', 'mock_token_ali');
     localStorage.setItem('tauric_user', JSON.stringify({
-      user_id: 'USR-904424B4FB',
-      email: 'aliajmaltca22@gmail.com',
-      username: 'Ali Ajmal TCA',
+      user_id: process.env.BITDEX_TEST_USER_ID || 'USR-TEST-CUST',
+      email: process.env.BITDEX_TEST_EMAIL || 'test_trader@bitdex.io',
+      username: 'Test Trader',
       role: 'CUSTOMER',
       status: 'ACTIVE',
-      first_name: 'Ali',
-      last_name: 'Ajmal TCA'
+      first_name: 'Test',
+      last_name: 'Trader'
     }));
   });
 
@@ -30,7 +30,7 @@ async function capture() {
   await new Promise(r => setTimeout(r, 2000));
 
   // Navigate to Automated Scalping tab
-  const scalpingTab = await page.;
+  // const scalpingTab = null;
   if (scalpingTab) {
     await scalpingTab.click();
     await new Promise(r => setTimeout(r, 2000));
@@ -40,7 +40,7 @@ async function capture() {
   await page.screenshot({ path: '/tmp/ali_broker_scalping_main.png' });
 
   // Capture 2: Open account selector dropdown to show Demo account ******9575
-  const demoDrop = await page.;
+  // const demoDrop = null;
   if (demoDrop) {
     await demoDrop.click();
     await new Promise(r => setTimeout(r, 1000));

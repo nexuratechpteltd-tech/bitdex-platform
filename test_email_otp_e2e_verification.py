@@ -19,10 +19,10 @@ def run_tests():
     print("STARTING BITDEX STAGING EMAIL OTP VERIFICATION SUITE")
     print("=" * 60)
 
-    # 1. Direct EmailService dispatch test to designkrao@gmail.com
-    print("\n[TEST 1] Testing direct EmailService.send_login_otp to designkrao@gmail.com...")
+    # 1. Direct EmailService dispatch test to test_customer@bitdex.io
+    print("\n[TEST 1] Testing direct EmailService.send_login_otp to test_customer@bitdex.io...")
     test_otp = "123890"
-    disp = EmailService.send_login_otp("designkrao@gmail.com", test_otp)
+    disp = EmailService.send_login_otp("test_customer@bitdex.io", test_otp)
     print(f"  Result: status={disp.get('status')}, blocked={disp.get('delivery_blocked')}, id={disp.get('dispatch_id')}")
     assert disp.get("status") in ("ACCEPTED", "SENT"), f"Expected ACCEPTED/SENT, got {disp.get('status')}"
     assert disp.get("delivery_blocked") is False, "Expected delivery_blocked=False"

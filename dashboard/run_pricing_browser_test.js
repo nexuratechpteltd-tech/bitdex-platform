@@ -95,7 +95,7 @@ async function sleep(ms) {
     console.log("[3] Searching for customer " + TARGET_CUSTOMER_ID + "...");
     const searchInput = await page.$("input[placeholder*='Search']");
     if (searchInput) {
-      await searchInput.type("aliajmaltca22@gmail.com");
+      await searchInput.type("process.env.BITDEX_TARGET_CUSTOMER_EMAIL || "customer_test@bitdex.io"");
       await sleep(1000);
     }
 

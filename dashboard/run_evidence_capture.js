@@ -7,7 +7,7 @@ if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-const ADMIN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItNjZCQ0ZENzM1MCIsImVtYWlsIjoiYWRtaW5AdGF1cmljLmNvbSIsInJvbGUiOiJBRE1JTiIsInNlc3Npb25faWQiOiJTRVMtRDk4RUZBODhDMjFCODVBMCIsInJlbWVtYmVyX21lIjp0cnVlLCJleHAiOjE3OTM3MzExMTl9.rzEU72NAYX5AqBgX80xypBM4Dik29Ypja6mVlUbi0WM";
+const ADMIN_TOKEN = process.env.BITDEX_ADMIN_TOKEN || "";
 const ADMIN_USER = {
   user_id: "USR-66BCFD7350",
   email: "admin@tauric.com",

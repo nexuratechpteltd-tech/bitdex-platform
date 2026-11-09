@@ -7,7 +7,7 @@ from app.services.auth_manager import JWT_SECRET_KEY, JWT_ALGORITHM
 async def test_fill():
     print('=== TESTING REAL BINANCE DEMO MARKET FILL & POSITION RECONCILIATION ===')
     conn = sqlite3.connect('/opt/tauric-platform-staging/backend/data/tauric_saas.db')
-    user = conn.execute("SELECT user_id, email, role FROM users WHERE email = 'designkrao@gmail.com'").fetchone()
+    user = conn.execute("SELECT user_id, email, role FROM users WHERE email = 'test_customer@bitdex.io'").fetchone()
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(days=1)
     session_id = f"SES-{secrets.token_hex(8).upper()}"

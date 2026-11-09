@@ -12,13 +12,13 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 let custToken = process.argv[2];
 if (!custToken) {
   custToken = execSync(
-    "/opt/tauric-platform-staging/backend/.venv/bin/python3 -c \"import jwt, datetime, os; print(jwt.encode({'sub': 'USR-402F7BFE6D', 'email': 'designkrao@gmail.com', 'role': 'CUSTOMER', 'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)}, os.getenv('TAURIC_JWT_SECRET', 'tauric_super_secret_staging_jwt_key_2026_xyz'), algorithm='HS256'))\""
+    "/opt/tauric-platform-staging/backend/.venv/bin/python3 -c \"import jwt, datetime, os; print(jwt.encode({'sub': 'USR-402F7BFE6D', 'email': 'test_customer@bitdex.io', 'role': 'CUSTOMER', 'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)}, os.getenv('TAURIC_JWT_SECRET', 'tauric_super_secret_staging_jwt_key_2026_xyz'), algorithm='HS256'))\""
   ).toString().trim();
 }
 
 const testUser = {
   user_id: "USR-402F7BFE6D",
-  email: "designkrao@gmail.com",
+  email: "test_customer@bitdex.io",
   username: "designkrao",
   role: "CUSTOMER",
   status: "ACTIVE",

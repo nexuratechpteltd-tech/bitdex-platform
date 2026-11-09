@@ -7,10 +7,10 @@ if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-const TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItNDAyRjdCRkU2RCIsImVtYWlsIjoiZGVzaWdua3Jhb0BnbWFpbC5jb20iLCJyb2xlIjoiQ1VTVE9NRVIiLCJzZXNzaW9uX2lkIjoiU0VTLURDRTZEMTkxRkYyNjIxQTciLCJyZW1lbWJlcl9tZSI6dHJ1ZSwiZXhwIjoxNzkzNzIyNzIzfQ.pONNZK9T9m9oNx1fyo-MXm6SxZxPL2CoMYhl2_yu4D0';
+const TOKEN = process.env.BITDEX_TEST_TOKEN || '';
 const USER = {
-  user_id: 'USR-402F7BFE6D',
-  email: 'designkrao@gmail.com',
+  user_id: process.env.BITDEX_TEST_USER_ID || 'USR-TEST-CUST',
+  email: process.env.BITDEX_TEST_EMAIL || 'test_customer@bitdex.io',
   username: 'billal95',
   role: 'CUSTOMER',
   status: 'ACTIVE',

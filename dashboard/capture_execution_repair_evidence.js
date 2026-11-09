@@ -8,11 +8,11 @@ if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-// Valid active token for designkrao@gmail.com
-const CUSTOMER_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItNDAyRjdCRkU2RCIsImVtYWlsIjoiZGVzaWdua3Jhb0BnbWFpbC5jb20iLCJyb2xlIjoiQ1VTVE9NRVIiLCJleHAiOjE3OTM5MDIwODB9.lceu9H9lU2lnxkbeEO6PenYUN-C9MCoB9f6LO1iaxYQ';
+// Valid active token for test_customer@bitdex.io
+const CUSTOMER_JWT = process.env.BITDEX_TEST_TOKEN || '';
 const CUSTOMER_USER = {
-  user_id: 'USR-402F7BFE6D',
-  email: 'designkrao@gmail.com',
+  user_id: process.env.BITDEX_TEST_USER_ID || 'USR-TEST-CUST',
+  email: process.env.BITDEX_TEST_EMAIL || 'test_customer@bitdex.io',
   username: 'Design Krao',
   role: 'ADMIN',
   status: 'ACTIVE',

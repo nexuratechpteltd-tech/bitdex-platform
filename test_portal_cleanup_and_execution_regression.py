@@ -73,9 +73,9 @@ def run_tests():
     c = conn.cursor()
     
     # Identify Customer and Admin
-    c.execute("SELECT user_id, email, role FROM users WHERE email = 'designkrao@gmail.com'")
+    c.execute("SELECT user_id, email, role FROM users WHERE email = 'test_customer@bitdex.io'")
     cust_row = c.fetchone()
-    assert cust_row, "designkrao@gmail.com must exist!"
+    assert cust_row, "test_customer@bitdex.io must exist!"
     cust_id, cust_email, cust_role = cust_row
     cust_token = make_token(cust_id, cust_email, cust_role)
     print(f"[OK] Customer identified: {cust_id} ({cust_email})")

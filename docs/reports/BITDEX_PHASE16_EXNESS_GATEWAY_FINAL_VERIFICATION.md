@@ -47,7 +47,7 @@ In Phase 16, comprehensive end-to-end browser verification, root-cause diagnosti
 ### Key Visual Observations
 1. **Admin Settings Workspace** (`admin_settings_workspace.png`):
    - Red `LOCKED` badge and `SIMULATED / DEMO` banner are **100% absent** from the top header.
-   - Clean enterprise header featuring `[BX BITDEX ADMIN]`, `• TENANT ISOLATION ACTIVE`, latency telemetry `TAURIC: ONLINE (8ms)`, permanent `Trading Terminal ->` switch button, and the admin profile dropdown (`designkrao@gmail.com`).
+   - Clean enterprise header featuring `[BX BITDEX ADMIN]`, `• TENANT ISOLATION ACTIVE`, latency telemetry `TAURIC: ONLINE (8ms)`, permanent `Trading Terminal ->` switch button, and the admin profile dropdown (`test_customer@bitdex.io`).
    - All modules (Customers, Support Inbox, AI Telemetry & Pricing, Exchanges, Audit Trail) loaded with live backend data.
 2. **HFT Trading Interface** (`hft_trading_interface.png`):
    - Blank screen exception is completely resolved. The full execution canvas, order forms, and market quotes render without error.

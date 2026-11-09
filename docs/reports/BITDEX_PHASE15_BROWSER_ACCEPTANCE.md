@@ -25,7 +25,7 @@ All five reported regressions and administrative requirements were rigorously te
 
 ### Test Suite 1: Original Administrator Portal Restoration
 - **Target URL**: `https://bitdex.ltd/#admin`
-- **Authenticated Account**: `designkrao@gmail.com` (`USR-402F7BFE6D`, role: `ADMIN`)
+- **Authenticated Account**: `test_customer@bitdex.io` (`USR-402F7BFE6D`, role: `ADMIN`)
 - **Evidence**:
   1. `GET /api/backend/saas/customer/me` returns HTTP 200 with `role: "ADMIN"`.
   2. `portalMode` initializes to `"ADMIN"` for administrator accounts upon login.

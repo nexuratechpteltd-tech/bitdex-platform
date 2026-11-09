@@ -12,7 +12,7 @@ from app.services.saas_db import get_db_connection
 
 # 1. Create valid Admin token
 conn = get_db_connection()
-user = conn.execute("SELECT * FROM users WHERE email = 'designkrao@gmail.com'").fetchone()
+user = conn.execute("SELECT * FROM users WHERE email = 'test_customer@bitdex.io'").fetchone()
 if not user:
     print('Admin user not found')
     sys.exit(1)

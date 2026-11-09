@@ -7,10 +7,10 @@ if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-const CUST_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItNDAyRjdCRkU2RCIsInVzZXJfaWQiOiJVU1ItNDAyRjdCRkU2RCIsImVtYWlsIjoiZGVzaWdua3Jhb0BnbWFpbC5jb20iLCJyb2xlIjoiQ1VTVE9NRVIiLCJleHAiOjE3OTM3OTc1MTZ9.RLuKv9nNnSQjeP0N0jgp18boSLHvWcDhi1dHKLsQuIg";
+const CUST_TOKEN = process.env.BITDEX_TEST_TOKEN || "";
 const CUST_USER = {
-  user_id: "USR-402F7BFE6D",
-  email: "designkrao@gmail.com",
+  user_id: process.env.BITDEX_TEST_USER_ID || "USR-TEST-CUST",
+  email: process.env.BITDEX_TEST_EMAIL || "test_customer@bitdex.io",
   username: "billal95",
   role: "CUSTOMER",
   status: "ACTIVE",
@@ -23,7 +23,7 @@ const CUST_USER = {
   kyc_status: "NOT_REQUIRED"
 };
 
-const ADMIN_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJVU1ItQURNLUIwMjJGNDkwIiwidXNlcl9pZCI6IlVTUi1BRE0tQjAyMkY0OTAiLCJlbWFpbCI6ImhlbGxvQG5leHVyYS5sdGQiLCJyb2xlIjoiQURNSU4iLCJleHAiOjE3OTM3OTc1MTZ9.yvmQWMW4hZFudBBGnTyZWQV2fPZDw-IoIFgFgTuOvLo";
+const ADMIN_TOKEN = process.env.BITDEX_ADMIN_TOKEN || "";
 const ADMIN_USER = {
   user_id: "USR-ADM-B022F490",
   email: "hello@nexura.ltd",
