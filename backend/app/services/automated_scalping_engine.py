@@ -805,11 +805,19 @@ class AutomatedHighFrequencyScalpingEngine:
                     tie_break_reason = f"Tie-break: 1-bar delta ({delta_1:+.2f}) < 0 -> SELL"
             winning_score = buy_score
 
+        # Determine contract size & asset scaling (Gold/Metals vs Crypto vs Forex)
+        is_gold = "XAU" in symbol.upper() or "GOLD" in symbol.upper()
+        contract_size = 100.0 if is_gold else 1.0
+        effective_units = max(0.0001, volume * contract_size)
+        effective_min_atr = 0.25 if is_gold else min_atr_points
+        effective_max_spread = 2.0 if is_gold else 15.0
+        effective_max_extension_mult = 2.0 if is_gold else max_extension_atr_mult
+
         # Expected movement & Minimum Net-Edge-After-Costs Calculation
         extension_pts = abs(last_close - ema9)
         expected_15m_swing_pts = round(atr14 * 3.8, 2)
         remaining_move_pts = round(max(0.0, expected_15m_swing_pts - extension_pts), 2)
-        expected_gross_edge_usd = round(remaining_move_pts * volume, 4)
+        expected_gross_edge_usd = round(remaining_move_pts * effective_units, 4)
         expected_net_edge_usd = round(expected_gross_edge_usd - round_trip_cost_usd, 4)
 
         # Evaluate Entry Qualification Gates
@@ -818,13 +826,13 @@ class AutomatedHighFrequencyScalpingEngine:
             skip_reasons.append(f"OPEN_POSITION_ACTIVE: {existing_positions_count} position(s) currently open (single-position limit enforced)")
         if tick_age_ms > max_tick_age_ms:
             skip_reasons.append(f"STALE_MARKET_DATA: Tick age {tick_age_ms}ms exceeds maximum {max_tick_age_ms}ms")
-        if spread_usd > 15.0:
-            skip_reasons.append(f"EXCESSIVE_SPREAD: Spread ${spread_usd:.2f} exceeds $15.00 limit")
-        if atr14 < min_atr_points:
+        if spread_usd > effective_max_spread:
+            skip_reasons.append(f"EXCESSIVE_SPREAD: Spread ${spread_usd:.2f} exceeds ${effective_max_spread:.2f} limit")
+        if atr14 < effective_min_atr:
             skip_reasons.append(
-                f"LOW_VOLATILITY_REGIME: M1 ATR(14) is {atr14:.2f} pts (< {min_atr_points:.2f} pts required to overcome ${round_trip_cost_usd:.2f} round-trip friction)"
+                f"LOW_VOLATILITY_REGIME: M1 ATR(14) is {atr14:.2f} pts (< {effective_min_atr:.2f} pts required to overcome ${round_trip_cost_usd:.2f} round-trip friction)"
             )
-        if atr14 > 0 and extension_pts > (max_extension_atr_mult * atr14):
+        if atr14 > 0 and extension_pts > (effective_max_extension_mult * atr14):
             skip_reasons.append(
                 f"IMPULSE_EXHAUSTION: Price extended {extension_pts:.2f} pts from EMA9 (> {max_extension_atr_mult:.2f}x ATR = {max_extension_atr_mult * atr14:.2f} pts)"
             )
@@ -836,10 +844,10 @@ class AutomatedHighFrequencyScalpingEngine:
         entry_qualified = len(skip_reasons) == 0
         cycle_status = "ENTRY_QUALIFIED" if entry_qualified else "NO_ENTRY_THIS_CYCLE"
 
-        # Compute exact SL and TP prices for 0.01 lot ($1.00 net target, $1.00 max loss)
-        comm_pts = round(round_trip_commission_usd / max(0.01, volume), 2)
-        sl_distance_pts = round(max(10.0, (max_loss_usd / max(0.01, volume)) - comm_pts), 2)
-        tp_distance_pts = round((profit_target_usd / max(0.01, volume)) + comm_pts, 2)
+        # Compute exact SL and TP prices for volume lot ($1.00 net target, $1.00 max loss)
+        comm_pts = round(round_trip_commission_usd / effective_units, 2)
+        sl_distance_pts = round(max(0.5, (max_loss_usd / effective_units) - comm_pts), 2)
+        tp_distance_pts = round(max(0.5, (profit_target_usd / effective_units) + comm_pts), 2)
 
         if selected_direction == "BUY":
             entry_price = round(current_ask, 2)
@@ -876,7 +884,7 @@ class AutomatedHighFrequencyScalpingEngine:
             "skip_reasons": skip_reasons,
             "net_edge_evaluation": {
                 "atr14_points": round(atr14, 2),
-                "min_atr_required_points": min_atr_points,
+                "min_atr_required_points": effective_min_atr,
                 "extension_from_ema9_points": round(extension_pts, 2),
                 "max_allowed_extension_points": round(max_extension_atr_mult * atr14, 2),
                 "expected_15m_swing_points": expected_15m_swing_pts,
@@ -885,7 +893,7 @@ class AutomatedHighFrequencyScalpingEngine:
                 "estimated_round_trip_cost_usd": round_trip_cost_usd,
                 "expected_net_edge_usd": expected_net_edge_usd,
                 "min_net_edge_required_usd": min_net_edge_usd,
-                "passes_net_edge_gate": expected_net_edge_usd >= min_net_edge_usd and atr14 >= min_atr_points and extension_pts <= (max_extension_atr_mult * atr14),
+                "passes_net_edge_gate": expected_net_edge_usd >= min_net_edge_usd and atr14 >= effective_min_atr and extension_pts <= (effective_max_extension_mult * atr14),
             },
             "proposed_levels": {
                 "direction": selected_direction,
