@@ -1692,6 +1692,17 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             return data
         return {"operation_id": operation_id, "status": "unknown", "http_status": code, "detail": data}
 
+    def unlock_demo_execution_for_test(self, authorized_account_id: str) -> None:
+        """
+        Unlocks controlled Demo trading execution exclusively for the explicitly authorized Demo account.
+        Strictly rejects Real accounts and any account other than 17000109575.
+        """
+        if self.environment != 'DEMO':
+            raise PermissionError('REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution cannot be unlocked under any circumstances.')
+        if str(self.account_id) != '17000109575' or str(authorized_account_id) != '17000109575':
+            raise PermissionError('SAFETY_LOCK: Execution unlock is strictly restricted to Demo account 17000109575.')
+        self.live_execution_locked = False
+
     async def submit_order(self, order_req: Dict[str, Any]) -> Dict[str, Any]:
         """
         Official Exness Trader API v1.0.2 Market / Pending Order Placement:
@@ -1865,6 +1876,49 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
         code, data = await self._ap_request("PATCH", path, body=payload, idempotency_key=idem_key)
         _SNAPSHOT_CACHE.pop(self.account_id, None)
         return {"status": "MODIFIED" if code in (200, 202) else "REJECTED", "http_status": code, "response": data}
+
+    async def modify_position(
+        self,
+        position_id: str,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        symbol: str = 'BTCUSD',
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Official Exness Trader API v1.0.2 Position SL/TP Modification:
+        Attempts PATCH /v1/trading/accounts/{account_id}/positions/{position_id} with updated stop_loss_price / take_profit_price.
+        Falls back to child order attachment if required.
+        """
+        if self.environment == 'REAL':
+            raise PermissionError('REAL_TRADING_PERMANENTLY_LOCKED: Real-account modification is permanently locked.')
+        if dry_run or self.live_execution_locked:
+            return {
+                'status': 'DRY_RUN_VERIFIED',
+                'position_id': str(position_id),
+                'sl': sl,
+                'tp': tp,
+                'dry_run': True,
+            }
+
+        clean_sym = normalize_exness_terminal_symbol(symbol)
+        spec = await self.get_symbol_info(clean_sym)
+        digits = int((spec or {}).get('digits', 2))
+
+        payload: Dict[str, Any] = {}
+        if sl is not None and float(sl) > 0:
+            payload['stop_loss_price'] = f'{float(sl):.{digits}f}'
+        if tp is not None and float(tp) > 0:
+            payload['take_profit_price'] = f'{float(tp):.{digits}f}'
+
+        pos_path = f'/v1/trading/accounts/{self.account_id}/positions/{position_id}'
+        code, data = await self._ap_request('PATCH', pos_path, body=payload)
+        _SNAPSHOT_CACHE.pop(self.account_id, None)
+        if code in (200, 202) and isinstance(data, dict):
+            return {'status': 'MODIFIED', 'method': 'PATCH_POSITION', 'http_status': code, 'data': data}
+
+        attach_res = await self.attach_sl_tp(position_id=position_id, sl=sl, tp=tp, symbol=symbol, dry_run=False)
+        return {'status': attach_res.get('status', 'MODIFIED'), 'method': 'ATTACH_SLTP_ORDER', 'response': attach_res}
 
     async def close_position(
         self, ticket: str, volume: Optional[float] = None, dry_run: bool = True

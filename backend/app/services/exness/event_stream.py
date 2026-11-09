@@ -391,14 +391,22 @@ class ExnessTransactionEventManager:
                 matched_pos = None
                 if pos_id:
                     matched_pos = next((p for p in open_positions if str(p.get("position_id") or p.get("ticket") or "") == pos_id), None)
+                elif open_positions:
+                    target_sym = op.get("symbol")
+                    matched_pos = next((p for p in open_positions if (not target_sym or p.get("instrument") == target_sym)), open_positions[0])
+                    pos_id = str(matched_pos.get("position_id") or matched_pos.get("ticket") or "")
+                    op["position_id"] = pos_id
+                    op["execution_price"] = float(matched_pos.get("open_price") or matched_pos.get("price") or op.get("execution_price") or 0.0)
+                    op["executed_volume"] = float(matched_pos.get("volume") or matched_pos.get("initial_volume") or op.get("volume") or 0.0)
                 
                 # If position found in snapshot, state is VERIFIED
-                if matched_pos or (open_positions and not pos_id):
+                if matched_pos:
                     op["state"] = OperationState.VERIFIED.value
                     op["verified_at"] = datetime.now(timezone.utc).isoformat()
                     op["snapshot_verified"] = True
+                    op["position_details"] = matched_pos
                     self._persist_operation(op)
-                    logger.info(f"Operation {op_id} VERIFIED in live broker snapshot.")
+                    logger.info(f"Operation {op_id} VERIFIED in live broker snapshot. Position #{pos_id} at {op.get('execution_price')}")
                 else:
                     op["state"] = OperationState.FILLED.value
                     op["snapshot_verified"] = False

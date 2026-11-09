@@ -279,6 +279,25 @@ class ExnessTerminalBrokerAdapter(UniversalBrokerAdapter):
             ticket=order_id, sl=sl, tp=tp, price=price, symbol=symbol, dry_run=dry_run
         )
 
+    def unlock_demo_execution_for_test(self, authorized_account_id: str) -> None:
+        if self.environment != 'DEMO':
+            raise PermissionError('REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution is permanently locked.')
+        if str(self.account_id) != '17000109575' or str(authorized_account_id) != '17000109575':
+            raise PermissionError('SAFETY_LOCK: Execution unlock is strictly restricted to Demo account 17000109575.')
+        self.client.unlock_demo_execution_for_test(authorized_account_id)
+
+    async def modify_position(
+        self,
+        position_id: str,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        symbol: str = 'BTCUSD',
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        return await self.client.modify_position(
+            position_id=position_id, sl=sl, tp=tp, symbol=symbol, dry_run=dry_run
+        )
+
     async def close_position(
         self, position_id: str, volume: Optional[float] = None, dry_run: bool = True
     ) -> Dict[str, Any]:

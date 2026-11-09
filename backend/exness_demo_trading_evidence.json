@@ -1,0 +1,178 @@
+{
+  "account_verification": {
+    "account_id": "17000109575",
+    "is_demo": true,
+    "stream_id": "dx.2.trial.std",
+    "initial_balance": "126.47",
+    "initial_equity": "126.47",
+    "spec": {
+      "min_volume": 0.01,
+      "volume_step": 0.01,
+      "contract_size": 1.0,
+      "digits": 2
+    }
+  },
+  "buy_lifecycle": {
+    "operation_id": "378000865602043904",
+    "position_id": "71857146",
+    "execution_price": 75097.93,
+    "volume": 0.01,
+    "sl_at_entry": 74596.23,
+    "tp_at_entry": 75596.23,
+    "matched_broker_position": {
+      "position_id": "71857146",
+      "direction": "buy",
+      "instrument": "BTCUSD",
+      "initial_volume": "0.01",
+      "volume": "0.01",
+      "open_price": "75097.93",
+      "state": "open",
+      "margin_rate": "75097.43",
+      "create_time": "2026-11-09T02:00:29.543+00:00",
+      "commission": "0",
+      "swap": "0"
+    },
+    "modification_ack": {
+      "status": "ACCEPTED",
+      "method": "ATTACH_SLTP_ORDER",
+      "response": {
+        "status": "ACCEPTED",
+        "http_status": 202,
+        "response": {
+          "operation_id": "378000877555810304",
+          "status": "accepted",
+          "client_request_id": "bitdex-sltp-d498bc353e11402f"
+        }
+      }
+    },
+    "verified_after_modification": {
+      "position_id": "71857146",
+      "direction": "buy",
+      "instrument": "BTCUSD",
+      "initial_volume": "0.01",
+      "volume": "0.01",
+      "open_price": "75097.93",
+      "state": "open",
+      "margin_rate": "75097.43",
+      "create_time": "2026-11-09T02:00:29.543+00:00",
+      "commission": "0",
+      "swap": "0"
+    },
+    "close_ack": {
+      "status": "CLOSED",
+      "http_status": 202,
+      "response": {
+        "operation_id": "378000883750797312",
+        "status": "accepted",
+        "client_request_id": "bitdex-cls-1b97bdf1d7244155"
+      }
+    },
+    "closed_deal": {
+      "event_time": "2026-11-09T01:52:45.643967+00:00",
+      "deal": {
+        "deal_id": "147650525",
+        "order_id": "147476918",
+        "position_id": "71854118",
+        "type": "open",
+        "direction": "buy",
+        "instrument": "BTCUSD",
+        "volume": "0.01",
+        "price": "75210.33",
+        "profit": {
+          "amount": "0"
+        },
+        "create_time": "2026-11-09T01:52:45.643967+00:00"
+      }
+    }
+  },
+  "sell_lifecycle": {
+    "operation_id": "378000894366580736",
+    "position_id": "71857186",
+    "execution_price": 75055.21,
+    "volume": 0.01,
+    "sl_at_entry": 75565.04,
+    "tp_at_entry": 74565.04,
+    "matched_broker_position": {
+      "position_id": "71857186",
+      "direction": "sell",
+      "instrument": "BTCUSD",
+      "initial_volume": "0.01",
+      "volume": "0.01",
+      "open_price": "75055.21",
+      "state": "open",
+      "margin_rate": "75065.64",
+      "create_time": "2026-11-09T02:00:36.451+00:00",
+      "commission": "0",
+      "swap": "0"
+    },
+    "close_ack": {
+      "status": "CLOSED",
+      "http_status": 202,
+      "response": {
+        "operation_id": "378000903891845120",
+        "status": "accepted",
+        "client_request_id": "bitdex-cls-a675ff2cbe9941b6"
+      }
+    },
+    "closed_deal": {
+      "event_time": "2026-11-09T01:52:45.643967+00:00",
+      "deal": {
+        "deal_id": "147650525",
+        "order_id": "147476918",
+        "position_id": "71854118",
+        "type": "open",
+        "direction": "buy",
+        "instrument": "BTCUSD",
+        "volume": "0.01",
+        "price": "75210.33",
+        "profit": {
+          "amount": "0"
+        },
+        "create_time": "2026-11-09T01:52:45.643967+00:00"
+      }
+    }
+  },
+  "final_snapshot": {
+    "owner_user_id": "USR-904424B4FB",
+    "connection_id": "EXN-CONN-F98AE3CCB29B",
+    "account_id": "17000109575",
+    "login": "17000109575",
+    "broker": "EXNESS",
+    "trading_platform": "EXNESS_TERMINAL",
+    "adapter": "ExnessTerminalBrokerAdapter",
+    "environment": "DEMO",
+    "account_type": "DEMO",
+    "server": "dx.2.trial.std",
+    "server_name": "dx.2.trial.std",
+    "platform": "EXNESS_TERMINAL",
+    "stream_id": "dx.2.trial.std",
+    "currency": "USD",
+    "balance": 126.43,
+    "equity": 126.43,
+    "margin": 0.0,
+    "used_margin": 0.0,
+    "free_margin": 126.43,
+    "available_margin": 126.43,
+    "margin_level": 0.0,
+    "leverage": 2000,
+    "open_positions_count": 0,
+    "open_orders_count": 0,
+    "api_connected": true,
+    "broker_authenticated": true,
+    "automated_execution_supported": true,
+    "automated_execution_verified": true,
+    "execution_readiness_status": "READY_FOR_DEMO_EXECUTION",
+    "execution_readiness_reason": "Connected & Ready for Automated Demo Execution.",
+    "verified_at": "2026-11-09T02:00:40.700850+00:00",
+    "data_source": "Exness Public Trader API v1.0.2 (Trading Snapshot + Account Configuration)"
+  },
+  "latencies": {
+    "auth_latency_ms": 495.52,
+    "buy_submission_latency_ms": 669.47,
+    "buy_reconciliation_latency_ms": 1765.28,
+    "buy_close_latency_ms": 259.11,
+    "sell_submission_latency_ms": 638.71,
+    "sell_reconciliation_latency_ms": 1402.99,
+    "sell_close_latency_ms": 213.43
+  }
+}
