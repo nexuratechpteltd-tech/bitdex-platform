@@ -559,6 +559,73 @@ class CentralExecutionRouter:
 
 
     @classmethod
+    async def route_candidate_a_execution(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        symbol: str,
+        account_id: Optional[str] = None,
+        approved_risk_budget_usd: float = 1.0,
+        comment: str = "BITDEX-CDA",
+        idempotency_key: Optional[str] = None,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Official Candidate A execution route:
+        1. Resolves customer adapter with strict tenant isolation.
+        2. Retrieves live quote, spec, and multi-timeframe candles (H1, M15, M5).
+        3. Invokes CentralRiskGate.execute_order_with_fail_safe_protection().
+        4. Returns structured execution outcome.
+        """
+        adapter, ctx, doc = cls.resolve_adapter_for_customer(conn, user_id, account_id)
+        await adapter.verify_ownership_and_environment(user_id)
+
+        if adapter.environment == "REAL":
+            raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution is permanently locked.")
+
+        from .central_risk_gate import CentralRiskGate
+
+        # Fetch required data
+        quote = await adapter.get_live_quote(symbol)
+        spec = await adapter.get_instrument_specification(symbol)
+        
+        # Multi-timeframe candles
+        h1_candles = await adapter.get_historical_candles(symbol, timeframe="H1", count=30)
+        await asyncio.sleep(0.3)
+        m15_candles = await adapter.get_historical_candles(symbol, timeframe="M15", count=30)
+        await asyncio.sleep(0.3)
+        m5_candles = await adapter.get_historical_candles(symbol, timeframe="M5", count=30)
+
+        res = await CentralRiskGate.execute_order_with_fail_safe_protection(
+            conn=conn,
+            adapter=adapter,
+            authenticated_user_id=user_id,
+            account_id=adapter.account_id,
+            symbol=symbol,
+            approved_risk_budget_usd=approved_risk_budget_usd,
+            h1_candles=h1_candles,
+            m15_candles=m15_candles,
+            m5_candles=m5_candles,
+            quote=quote,
+            spec=spec,
+            comment=comment,
+            idempotency_key=idempotency_key,
+            dry_run=dry_run,
+        )
+
+        ctx.record_event(
+            "CANDIDATE_A_EXECUTION_ROUTED",
+            {
+                "symbol": symbol,
+                "dry_run": dry_run,
+                "status": res.get("status"),
+                "passed": res.get("passed"),
+                "error_code": res.get("error_code"),
+            },
+        )
+        return res
+
+    @classmethod
     def get_tenant_isolation_snapshot(cls) -> Dict[str, Any]:
         """Returns diagnostic proof of isolated per-customer execution contexts."""
         return {

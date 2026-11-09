@@ -250,20 +250,79 @@ class CommonStrategyAndRiskEngine:
         else:
             sell_status = "; ".join(sell_reasons)
 
-        directional_cycle = self._core_engine.evaluate_directional_scalp_cycle(
-            symbol=broker_sym,
-            klines=klines,
-            current_bid=current_bid,
-            current_ask=current_ask,
-            allocated_capital_usd=allocated_capital_usd,
-            risk_pct_per_trade=risk_pct_per_trade,
-            max_loss_usd=max_loss_usd,
-            profit_target_usd=profit_target_usd,
-            min_net_edge_usd=min_net_edge_usd,
-            tick_age_ms=tick_age_ms,
-            max_tick_age_ms=15000,
-            existing_positions_count=len(open_positions),
-        )
+        # Multi-timeframe Candidate A integration (Phases 1 & 2)
+        if "XAU" in broker_sym.upper() or "GOLD" in broker_sym.upper():
+            try:
+                from .strategy_candidate_a import CandidateAStrategy
+                h1_c = await adapter.get_historical_candles(symbol, timeframe="H1", count=30)
+                m15_c = await adapter.get_historical_candles(symbol, timeframe="M15", count=30)
+                m5_c = await adapter.get_historical_candles(symbol, timeframe="M5", count=30)
+                approved_budget = max_loss_usd if max_loss_usd > 0 else (allocated_capital_usd * (risk_pct_per_trade / 100.0))
+                cda_res = CandidateAStrategy.evaluate(
+                    h1_candles=h1_c,
+                    m15_candles=m15_c,
+                    m5_candles=m5_c,
+                    current_bid=current_bid,
+                    current_ask=current_ask,
+                    approved_risk_budget_usd=approved_budget,
+                    account_equity=equity,
+                    spec=spec,
+                )
+                if cda_res.get("outcome") in ("BUY", "SELL"):
+                    directional_cycle = {
+                        "selected_direction": cda_res["outcome"],
+                        "entry_qualified": True,
+                        "directional_score": 90.0,
+                        "rationale": f"Candidate A Hierarchical Trend Pullback qualified for {cda_res['outcome']}.",
+                        "cycle_status": "ENTRY_QUALIFIED",
+                        "no_entry_reason": None,
+                        "net_edge_evaluation": {"expected_net_edge_usd": cda_res["order_parameters"]["total_monetary_risk_usd"]},
+                        "proposed_order": cda_res["order_parameters"],
+                        "candidate_a": cda_res,
+                    }
+                else:
+                    directional_cycle = {
+                        "selected_direction": cda_res.get("direction", "NONE"),
+                        "entry_qualified": False,
+                        "directional_score": 25.0,
+                        "rationale": f"Candidate A Veto: {cda_res.get('detail')}",
+                        "cycle_status": "WAITING_FOR_EDGE",
+                        "no_entry_reason": cda_res.get("detail", "Candidate A requirements not met."),
+                        "net_edge_evaluation": {"expected_net_edge_usd": 0.0},
+                        "candidate_a": cda_res,
+                    }
+            except Exception as e:
+                import logging
+                logging.getLogger("bitdex.strategy_risk_engine").warning(f"Candidate A evaluation error: {e}")
+                directional_cycle = self._core_engine.evaluate_directional_scalp_cycle(
+                    symbol=broker_sym,
+                    klines=klines,
+                    current_bid=current_bid,
+                    current_ask=current_ask,
+                    allocated_capital_usd=allocated_capital_usd,
+                    risk_pct_per_trade=risk_pct_per_trade,
+                    max_loss_usd=max_loss_usd,
+                    profit_target_usd=profit_target_usd,
+                    min_net_edge_usd=min_net_edge_usd,
+                    tick_age_ms=tick_age_ms,
+                    max_tick_age_ms=15000,
+                    existing_positions_count=len(open_positions),
+                )
+        else:
+            directional_cycle = self._core_engine.evaluate_directional_scalp_cycle(
+                symbol=broker_sym,
+                klines=klines,
+                current_bid=current_bid,
+                current_ask=current_ask,
+                allocated_capital_usd=allocated_capital_usd,
+                risk_pct_per_trade=risk_pct_per_trade,
+                max_loss_usd=max_loss_usd,
+                profit_target_usd=profit_target_usd,
+                min_net_edge_usd=min_net_edge_usd,
+                tick_age_ms=tick_age_ms,
+                max_tick_age_ms=15000,
+                existing_positions_count=len(open_positions),
+            )
 
         if directional_cycle["entry_qualified"]:
             exact_waiting_reason = (

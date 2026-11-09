@@ -521,7 +521,32 @@ def init_saas_db():
                 WHERE verification_status IN ('VERIFIED', 'ACCOUNT_DATA_VERIFIED');
             """)
 
-        logger.info("Bitdex SaaS database schema, support tickets, AI analysis runs, and immutability triggers initialized successfully.")
+                    # Phase 7 & 8: Account Trading State & Setup Invalidation Memory
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS account_trading_state (
+                    account_id TEXT PRIMARY KEY,
+                    consecutive_losses INTEGER DEFAULT 0,
+                    last_loss_timestamp TEXT,
+                    cooldown_until TEXT,
+                    daily_starting_equity REAL DEFAULT 0.0,
+                    daily_equity_date TEXT,
+                    daily_realized_pnl REAL DEFAULT 0.0,
+                    updated_at TEXT
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS invalidated_setups (
+                    fingerprint TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    invalidated_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                );
+            """)
+
+            logger.info("Bitdex SaaS database schema, support tickets, AI analysis runs, and immutability triggers initialized successfully.")
     finally:
         conn.close()
 

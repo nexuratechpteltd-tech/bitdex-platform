@@ -258,6 +258,39 @@ class ExnessTerminalBrokerAdapter(UniversalBrokerAdapter):
     ) -> Dict[str, Any]:
         if self.environment == "REAL":
             raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution is permanently locked.")
+
+        # Phase 3 & 4: Adapter Execution Boundary Risk Checks
+        if not dry_run:
+            if sl is None or float(sl) <= 0:
+                raise ValueError("SL_MANDATORY: Naked unprotected market orders are strictly prohibited. Stop Loss must be provided.")
+            
+            # 1-position-at-a-time restriction
+            existing_pos = await self.get_open_positions()
+            if existing_pos and len(existing_pos) > 0:
+                raise RuntimeError(f"CONCURRENT_POSITIONS_BLOCKED: Account has {len(existing_pos)} active open positions. Max 1 position permitted.")
+
+            # Cooldown and daily loss limit enforcement
+            try:
+                from .trading_state_manager import TradingStateManager
+                from ..saas_db import get_db_connection
+                conn = get_db_connection()
+                try:
+                    in_cd, cd_until, rem = TradingStateManager.check_cooldown(conn, str(self.account_id))
+                    if in_cd:
+                        raise PermissionError(f"COOLDOWN_ACTIVE: Account {self.account_id} is in consecutive-loss cooldown until {cd_until}.")
+                    summary = await self.get_account_summary()
+                    eq = float(summary.get("equity") or summary.get("balance") or 0.0)
+                    exceeded, daily_pnl, max_loss, start_eq = TradingStateManager.check_daily_loss_limit(conn, str(self.account_id), eq)
+                    if exceeded:
+                        raise PermissionError(f"DAILY_LOSS_LIMIT_REACHED: Daily realized loss ${abs(daily_pnl):.2f} reached 3% limit (${max_loss:.2f}).")
+                finally:
+                    conn.close()
+            except (PermissionError, ValueError, RuntimeError):
+                raise
+            except Exception as e:
+                import logging
+                logging.getLogger("bitdex.exness_adapter").warning(f"Error checking state manager in place_market_order: {e}")
+
         return await self.client.submit_order({
             "symbol": normalize_exness_terminal_symbol(symbol),
             "side": side,
