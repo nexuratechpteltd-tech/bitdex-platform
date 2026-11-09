@@ -121,7 +121,7 @@ export default function ExchangeConnectionsView({
 
   const handleOpenDiscover = () => {
     setStatusMsg(null);
-    setDiscoverInputIds("16000629657, 460310009, 478461031, 17000660016, 473001359");
+    setDiscoverInputIds("16000629657, 17000660016");
     setIsDiscoverModalOpen(true);
   };
 
@@ -955,7 +955,7 @@ export default function ExchangeConnectionsView({
                   type="text"
                   value={discoverInputIds}
                   onChange={(e) => setDiscoverInputIds(e.target.value)}
-                  placeholder="16000629657, 460310009, 478461031, 17000660016, 473001359"
+                  placeholder="16000629657, 17000660016"
                   required
                   className="w-full px-3 py-2.5 rounded-lg bg-[#151C28] border border-[#1E2736] text-[#F1F5F9] focus:outline-none focus:border-[#38BDF8]"
                 />

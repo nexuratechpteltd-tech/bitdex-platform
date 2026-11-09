@@ -2226,7 +2226,7 @@ async def get_hft_eligible_pairs(account_id: Optional[str] = None, current_user:
             headers = {"X-Gateway-Auth-Token": gw_token}
             try:
                 client = get_gateway_client()
-                r = client.get(f"{gw_url}/symbols", headers=headers, timeout=15.0)
+                raise HTTPException(status_code=400, detail="PLATFORM_UNSUPPORTED: MT5 is unsupported for direct Exness.")
                 if r.status_code == 200:
                     gw_data = r.json()
                     gw_syms = gw_data.get("symbols", [])
@@ -2377,7 +2377,7 @@ async def get_hft_tick_route(
         res = client.get(
             f"http://10.88.0.2:8095/tick/{clean_sym}",
             headers={"X-Gateway-Auth-Token": "a955da9c16abc0478643fa862ffff9d6e42122587c23f78ab3713801f14facf9"},
-            timeout=8.0,
+            timeout=0.3,
         )
         if res.status_code == 200:
             t = res.json().get("latest_tick", {})
@@ -5402,6 +5402,12 @@ async def get_hft_connected_accounts(
             elif a["environment"] == "REAL":
                 real_accounts.append(a)
 
+        failed_rows = conn.execute(
+            "SELECT connection_id, account_login, account_type, verification_status, error_type, error_detail FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 AND verification_status = 'AUTH_FAILED' ORDER BY updated_at DESC",
+            (user_id,),
+        ).fetchall()
+        failed_accounts = [dict(r) for r in failed_rows]
+
         return {
             "status": "SUCCESS",
             "user_id": user_id,
@@ -5411,6 +5417,7 @@ async def get_hft_connected_accounts(
             "accounts": accounts,
             "demo_accounts": demo_accounts,
             "real_accounts": real_accounts,
+            "failed_accounts": failed_accounts,
             "empty_state_message": "NO VERIFIED TRADING ACCOUNTS CONNECTED" if len(accounts) == 0 else None,
             "custody_model": "NON_CUSTODIAL",
             "custodian": "Exness (broker-held funds)",

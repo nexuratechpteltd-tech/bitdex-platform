@@ -706,12 +706,18 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
                 pass
 
             # Classify platform eligibility / Trader API scoping limitation transparently
-            if bal_probe_status == 400 and bal_probe_err == "REQUEST_INVALID_PARAMETERS":
-                err_type = "UNSUPPORTED_ACCOUNT_PLATFORM"
+            if disc.get("error_type") == "INVALID_API_KEY" or disc.get("http_status") == 401 or disc.get("exness_error") == "AUTH_INVALID_API_KEY":
+                err_type = "API_KEY_SCOPE_MISMATCH"
                 limitation_note = (
-                    f"Account {clean_id} is a MetaTrader 5 (MT5) Real account and cannot be authenticated via the Exness Trader REST API. "
-                    f"Exness Trader REST API keys are strictly scoped to Exness Terminal accounts (such as 16000629657). "
-                    f"MetaTrader 5 accounts require direct connection via the Windows MT5 Gateway ({'; '.join(diag_parts)})."
+                    f"Account {clean_id} is not accessible with this Exness Trader API key (Broker rejected: 401 AUTH_INVALID_API_KEY). "
+                    f"Exness API keys are strictly account-scoped. In Exness Personal Area, this API key is linked to another account. "
+                    f"Please generate a dedicated API Key and Ed25519 signing key in Exness Personal Area specifically for account #{clean_id}."
+                )
+            elif bal_probe_status == 400 and bal_probe_err == "REQUEST_INVALID_PARAMETERS":
+                err_type = "INVALID_ACCOUNT_PARAMETERS"
+                limitation_note = (
+                    f"Account {clean_id} was rejected by Exness broker ({'; '.join(diag_parts)}). "
+                    f"Please verify the account number is an eligible Exness Standard Native Terminal account."
                 )
             else:
                 limitation_note = f"{disc.get('detail') or 'Gateway Access Point discovery failed.'} ({'; '.join(diag_parts)})"

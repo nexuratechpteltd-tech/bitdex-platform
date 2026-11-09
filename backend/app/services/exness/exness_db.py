@@ -268,17 +268,18 @@ def get_user_exness_connection(
 
 
 def get_all_user_exness_connections(
-    conn: sqlite3.Connection, user_id: str, account_type: Optional[str] = None
+    conn: sqlite3.Connection, user_id: str, account_type: Optional[str] = None, include_inactive: bool = False
 ) -> List[Dict[str, Any]]:
-    """Retrieves all active genuine Exness connections for a user, isolated by user_id."""
+    """Retrieves all genuine Exness connections for a user, isolated by user_id."""
+    active_clause = "" if include_inactive else "AND is_active = 1"
     if account_type:
         rows = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY is_preferred DESC, updated_at DESC",
+            f"SELECT * FROM exness_demo_connections WHERE user_id = ? AND account_type = ? {active_clause} AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY is_preferred DESC, updated_at DESC",
             (user_id, account_type.upper()),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY account_type ASC, is_preferred DESC, updated_at DESC",
+            f"SELECT * FROM exness_demo_connections WHERE user_id = ? {active_clause} AND adapter_mode != 'DETERMINISTIC_MOCK_DEMO' ORDER BY account_type ASC, is_preferred DESC, updated_at DESC",
             (user_id,),
         ).fetchall()
     return [dict(r) for r in rows]

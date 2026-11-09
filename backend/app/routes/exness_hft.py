@@ -201,7 +201,7 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
         demo_conn = get_user_exness_connection(conn, user["user_id"], "DEMO")
         real_conn = get_user_exness_connection(conn, user["user_id"], "REAL")
         trader_conn = get_user_exness_connection_by_mode(conn, user["user_id"], "EXNESS_TRADER_API")
-        all_conns = get_all_user_exness_connections(conn, user["user_id"])
+        all_conns = get_all_user_exness_connections(conn, user["user_id"], include_inactive=True)
     finally:
         conn.close()
 
@@ -354,20 +354,30 @@ async def get_exness_status(user: Dict[str, Any] = Depends(get_current_user)):
             "data_source": "Exness REST/WS Gateway" if c.get("adapter_mode") == "EXNESS_TRADER_API" else "Windows MT5 IPC Bridge",
         }
 
-    # Deduplicate formatted_all by account_login_raw (preserving verified/latest entry per account)
+    # Deduplicate formatted_all by account_login_raw (preserving verified and active entries first)
+    sorted_raw = sorted(
+        [format_conn(r) for r in all_conns if r],
+        key=lambda x: (
+            1 if (x.get("is_verified") and x.get("is_active")) else 0,
+            1 if x.get("is_active") else 0,
+            1 if x.get("is_preferred") else 0,
+            x.get("last_reconciled_at") or "",
+        ),
+        reverse=True,
+    )
     seen_logins = set()
     formatted_all = []
-    for c in [format_conn(r) for r in all_conns if r]:
+    for c in sorted_raw:
         raw_login = c["account_login_raw"]
         if raw_login not in seen_logins:
             seen_logins.add(raw_login)
             formatted_all.append(c)
 
-    verified_all = [c for c in formatted_all if c.get("is_verified") is True and c.get("account_type") in ("DEMO", "REAL")]
+    verified_all = [c for c in formatted_all if c.get("is_verified") is True and c.get("is_active") is True and c.get("account_type") in ("DEMO", "REAL")]
     exness_demos = [c for c in verified_all if c["account_type"] == "DEMO"]
     exness_reals = [c for c in verified_all if c["account_type"] == "REAL"]
-    unverified_conns = [c for c in formatted_all if not c.get("is_verified") and c.get("connection_state") in ("ENVIRONMENT_UNVERIFIED", "BROKER_AUTHENTICATED", "CREDENTIALS_SAVED", "NODE_CONNECTED", "AUTHENTICATING")]
-    failed_conns = [c for c in formatted_all if c.get("connection_state") == "AUTH_FAILED"]
+    unverified_conns = [c for c in formatted_all if c.get("is_active") and not c.get("is_verified") and c.get("connection_state") in ("ENVIRONMENT_UNVERIFIED", "BROKER_AUTHENTICATED", "CREDENTIALS_SAVED", "NODE_CONNECTED", "AUTHENTICATING")]
+    failed_conns = [c for c in formatted_all if c.get("is_active") and c.get("connection_state") == "AUTH_FAILED"]
     has_any_verified = len(verified_all) > 0
     has_saved_credentials = any(bool(r.get("api_key")) for r in all_conns)
 
@@ -1177,7 +1187,7 @@ async def sync_all_exness_accounts(user: Dict[str, Any] = Depends(get_current_us
     failed_count = 0
 
     try:
-        rows = get_all_user_exness_connections(conn, user_id)
+        rows = get_all_user_exness_connections(conn, user_id, include_inactive=True)
         if not rows:
             return {
                 "status": "SUCCESS",
@@ -1367,14 +1377,15 @@ async def discover_saved_exness_accounts(
 ):
     """
     Task 3: Discover Accounts — Probes one or more candidate Exness Account IDs using the user's
-    already-saved Exness API Key & Ed25519 signing key without requiring the user to re-enter secrets.
+    already-saved Exness API Key(s) & Ed25519 signing key(s).
+    Matches account-specific saved credentials where available to respect Exness account-level key scoping.
     """
     user_id = user["user_id"]
     conn = get_db_connection()
     try:
-        rows = get_all_user_exness_connections(conn, user_id)
-        cred_row = next((r for r in rows if r.get("api_key") and r.get("encrypted_credentials") and r.get("encrypted_credentials") != "{}"), None)
-        if not cred_row:
+        rows = get_all_user_exness_connections(conn, user_id, include_inactive=True)
+        cred_rows = [r for r in rows if r.get("api_key") and r.get("encrypted_credentials") and r.get("encrypted_credentials") != "{}"]
+        if not cred_rows:
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -1384,25 +1395,70 @@ async def discover_saved_exness_accounts(
                 },
             )
 
-        creds = ExnessCredentialVault.decrypt_credentials(
-            user_id=user_id,
-            login=cred_row["account_login"],
-            server=cred_row["server_name"],
-            enc_payload=json.loads(cred_row["encrypted_credentials"]),
-        )
-        api_key = cred_row["api_key"]
-        api_secret = creds.get("password", "")
-        gateway_host = cred_row.get("server_name") or "https://api.exness.com"
+        # Build credential lookup map by account_login
+        creds_by_login = {}
+        for r in cred_rows:
+            try:
+                dec = ExnessCredentialVault.decrypt_credentials(
+                    user_id=user_id,
+                    login=r["account_login"],
+                    server=r["server_name"],
+                    enc_payload=json.loads(r["encrypted_credentials"]),
+                )
+                creds_by_login[str(r["account_login"])] = {
+                    "api_key": r["api_key"],
+                    "api_secret": dec.get("password", ""),
+                    "gateway_host": r.get("server_name") or "https://api.exness.com",
+                }
+            except Exception:
+                pass
+
+        default_cred = next(iter(creds_by_login.values())) if creds_by_login else None
+        if not default_cred:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "FAILED",
+                    "error_type": "DECRYPTION_FAILED",
+                    "error_detail": "Failed to decrypt saved credentials. Please re-enter via 'Connect Exness API'.",
+                },
+            )
     finally:
         conn.close()
 
-    attach_req = ExnessAttachDiscoverRequest(
-        api_key=api_key,
-        api_secret=api_secret,
-        gateway_host=gateway_host,
-        account_ids=req.account_ids,
-    )
-    return await attach_and_discover_accounts(attach_req, user)
+    # Partition target account IDs by matching credential
+    groups = {}
+    for aid in req.account_ids:
+        s_aid = str(aid).strip()
+        if not s_aid:
+            continue
+        c_info = creds_by_login.get(s_aid) or default_cred
+        key_tuple = (c_info["api_key"], c_info["api_secret"], c_info["gateway_host"])
+        if key_tuple not in groups:
+            groups[key_tuple] = []
+        groups[key_tuple].append(s_aid)
+
+    combined_res = None
+    for (k_api, k_sec, k_gw), aids in groups.items():
+        sub_req = ExnessAttachDiscoverRequest(
+            api_key=k_api,
+            api_secret=k_sec,
+            gateway_host=k_gw,
+            account_ids=aids,
+        )
+        res = await attach_and_discover_accounts(sub_req, user)
+        if combined_res is None:
+            combined_res = res
+        else:
+            combined_res["demo_accounts"].extend(res.get("demo_accounts", []))
+            combined_res["real_accounts"].extend(res.get("real_accounts", []))
+            combined_res["unverified_accounts"].extend(res.get("unverified_accounts", []))
+            combined_res["failed_accounts"].extend(res.get("failed_accounts", []))
+            combined_res["total_verified"] = len(combined_res["demo_accounts"]) + len(combined_res["real_accounts"])
+            combined_res["total_unverified"] = len(combined_res["unverified_accounts"])
+            combined_res["total_failed"] = len(combined_res["failed_accounts"])
+
+    return combined_res or {"status": "SUCCESS", "total_verified": 0, "total_failed": 0}
 
 @router.post("/disconnect")
 async def disconnect_account(
