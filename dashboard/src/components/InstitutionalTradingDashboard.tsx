@@ -24,6 +24,7 @@ import {
   Lock,
   OctagonAlert,
 } from "lucide-react";
+import LiveOpportunityQualificationMeter, { StrategySignalData } from "./LiveOpportunityQualificationMeter";
 
 /**
  * Shared Safe API Response Parser (Requirement 9):
@@ -333,6 +334,10 @@ export default function InstitutionalTradingDashboard({
   const [allocatedCapitalUsd, setAllocatedCapitalUsd] = useState<number>(100);
   const [strategyModalOpen, setStrategyModalOpen] = useState<boolean>(false);
 
+  // ─── Step 4: Live Opportunity Qualification State ─────────────────────────
+  const [strategySignal, setStrategySignal] = useState<StrategySignalData | null>(null);
+  const [loadingSignal, setLoadingSignal] = useState<boolean>(false);
+
   // ─── Execution & Confirmation State ───────────────────────────────────────
   const [executeModalOpen, setExecuteModalOpen] = useState<boolean>(false);
   const [executingStrategy, setExecutingStrategy] = useState<boolean>(false);
@@ -615,12 +620,35 @@ export default function InstitutionalTradingDashboard({
     [getAuthToken, activeAccountId]
   );
 
+  // ─── 5. Fetch Live Strategy Signal & Opportunity Qualification ────────────
+  const fetchStrategySignal = useCallback(
+    async (sym?: string, acctOverride?: string) => {
+      const targetSym = sym || selectedPair || "BTCUSDr";
+      const targetAcct = acctOverride || activeAccountId;
+      const acctParam = targetAcct ? `&account_id=${encodeURIComponent(targetAcct)}` : "";
+      const authToken = getAuthToken();
+      setLoadingSignal(true);
+      const res = await safeApiFetch<StrategySignalData>(
+        `/api/backend/saas/customer/trading/hft/strategy/signal?symbol=${encodeURIComponent(targetSym)}${acctParam}`,
+        {
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+        }
+      );
+      if (res.ok && res.data) {
+        setStrategySignal(res.data);
+      }
+      setLoadingSignal(false);
+    },
+    [selectedPair, activeAccountId, getAuthToken]
+  );
+
   // Initial load
   useEffect(() => {
     fetchConnectedAccounts(true);
     fetchBrokerPairs();
     fetchLiveQuote("BTCUSDr");
     fetchSystemSafetyStatus("BTCUSDr");
+    fetchStrategySignal("BTCUSDr");
   }, []);
 
   // Whenever selectedAccountId changes, refresh the entire workflow for that account
@@ -629,16 +657,18 @@ export default function InstitutionalTradingDashboard({
     fetchPerformanceAndPositions(activeAccountId);
     fetchLiveQuote(selectedPair, activeAccountId);
     fetchSystemSafetyStatus(selectedPair, activeAccountId);
+    fetchStrategySignal(selectedPair, activeAccountId);
   }, [activeAccountId]);
 
-  // Poll live tick & performance every 3 seconds
+  // Poll live tick, performance & strategy qualification every 3 seconds
   useEffect(() => {
     const timer = setInterval(() => {
       fetchLiveQuote(selectedPair);
       fetchPerformanceAndPositions();
+      fetchStrategySignal(selectedPair);
     }, 3000);
     return () => clearInterval(timer);
-  }, [selectedPair, fetchLiveQuote, fetchPerformanceAndPositions]);
+  }, [selectedPair, fetchLiveQuote, fetchPerformanceAndPositions, fetchStrategySignal]);
 
   // Poll system status, symbol prices & connected accounts every 12 seconds
   useEffect(() => {
@@ -654,6 +684,7 @@ export default function InstitutionalTradingDashboard({
   const handleSelectPair = (sym: string) => {
     setSelectedPair(sym);
     fetchLiveQuote(sym);
+    fetchStrategySignal(sym);
   };
 
   // Filtered & displayed pairs for Step 1
@@ -1873,6 +1904,18 @@ export default function InstitutionalTradingDashboard({
             </div>
           </section>
         </div>
+
+        {/* ═══════════════════════════════════════════════════════════════════
+            D. LIVE OPPORTUNITY QUALIFICATION METER (Mandatory Section 1-7 & 13)
+        ═══════════════════════════════════════════════════════════════════ */}
+        <LiveOpportunityQualificationMeter
+          symbol={selectedPair}
+          accountLabel={selectedAccountObj?.account_type_label || selectedAccountObj?.environment || "Demo"}
+          brokerPlatform={selectedAccountObj?.trading_platform || selectedAccountObj?.provider || "Exness Terminal"}
+          strategySignal={strategySignal}
+          isLoading={loadingSignal}
+          onRefresh={() => fetchStrategySignal(selectedPair)}
+        />
 
         {/* ═══════════════════════════════════════════════════════════════════
             E. EXECUTION CONFIRMATION & PRIMARY CTA BUTTON
