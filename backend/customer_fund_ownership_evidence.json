@@ -1,0 +1,41 @@
+{
+  "timestamp_utc": "2026-11-09T02:53:53.031497+00:00",
+  "user_id": "USR-904424B4FB",
+  "account_id": "17000109575",
+  "results": {
+    "passed": 8,
+    "failed": 0,
+    "checks": {
+      "broker_custody": "PASSED",
+      "inaccessible_transfers": "PASSED",
+      "trading_only_permissions": "PASSED",
+      "pnl_reflection": "PASSED",
+      "platform_compatibility": "PASSED",
+      "customer_disclosure": "PASSED",
+      "tenant_isolation": "PASSED",
+      "final_invariants": "PASSED"
+    }
+  },
+  "verifications": {
+    "custody_model": "NON_CUSTODIAL",
+    "broker": "EXNESS",
+    "custodian": "Exness (broker-held funds)",
+    "external_deposits_accepted_by_bitdex": false,
+    "external_withdrawals_handled_by_bitdex": false,
+    "external_transfers_handled_by_bitdex": false,
+    "personal_area_deposit_url": "https://my.exness.com/pa/deposit",
+    "personal_area_withdrawal_url": "https://my.exness.com/pa/withdrawal",
+    "disclosure_matches": true,
+    "disclosure_text": "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected Exness account using authorised API access. Trading involves financial risk.",
+    "platform_matrix": {
+      "EXNESS_TERMINAL": "SUPPORTED",
+      "DXTRADE": "SUPPORTED",
+      "MT4": "REJECTED (PLATFORM_UNSUPPORTED)",
+      "MT5": "REJECTED (PLATFORM_UNSUPPORTED FOR NATIVE API)"
+    },
+    "final_balance": 126.43,
+    "final_equity": 126.43,
+    "open_positions": 0,
+    "open_orders": 0
+  }
+}

@@ -1432,6 +1432,43 @@ export default function InstitutionalTradingDashboard({
                 </div>
               </div>
 
+              {/* NON-CUSTODIAL FUND OWNERSHIP DISCLOSURE */}
+              <div
+                id="non-custodial-fund-ownership-disclosure"
+                className="p-3.5 rounded-xl bg-[#0D1117] border border-[#21262D] text-xs text-[#8B949E] leading-relaxed space-y-2"
+              >
+                <div className="flex items-center justify-between text-white font-medium">
+                  <div className="flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-[#10B981]" />
+                    <span className="font-semibold text-[13px]">Non-Custodial Architecture &amp; Fund Ownership</span>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-[#10B981]/10 text-[#10B981] font-mono border border-[#10B981]/20">
+                    EXNESS CUSTODY
+                  </span>
+                </div>
+                <p className="text-[12px] text-[#C9D1D9]">
+                  BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected Exness account using authorised API access. Trading involves financial risk.
+                </p>
+                <div className="pt-2 border-t border-[#21262D] flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <div>
+                    <span className="text-[#8B949E]">Supported: </span>
+                    <span className="text-[#10B981] font-semibold">Native Exness Terminal / DXtrade</span>
+                    <span className="text-[#8B949E] ml-2 text-[10px]">(MT4 &amp; MT5 direct execution unsupported)</span>
+                  </div>
+                  <div className="text-[11px] text-[#8B949E]">
+                    <span>Deposits &amp; Withdrawals: </span>
+                    <a
+                      href="https://my.exness.com/pa/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[#58A6FF] hover:underline font-medium"
+                    >
+                      Exness Personal Area &rarr;
+                    </a>
+                  </div>
+                </div>
+              </div>
+
               {/* 1. DEMO ACCOUNT DROPDOWN TRIGGER & LIST */}
               <div className="space-y-2">
                 <button
@@ -1488,10 +1525,22 @@ export default function InstitutionalTradingDashboard({
                     </div>
 
                     {demoAccountsList.length === 0 ? (
-                      <div className="p-4 rounded-lg bg-[#161B22] border border-[#21262D] text-center space-y-2">
+                      <div className="p-4 rounded-lg bg-[#161B22] border border-[#21262D] text-left space-y-3">
                         <p className="text-xs text-[#8B949E]">
-                          No verified Demo trading account is currently connected.
+                          No verified Native Exness Demo trading account is currently connected.
                         </p>
+                        <div className="p-3 rounded-lg bg-[#0D1117] border border-[#30363D]/60 text-xs text-[#8B949E] space-y-1.5">
+                          <div className="flex items-center gap-1.5 text-white font-semibold text-[11px] uppercase tracking-wider">
+                            <Info className="w-3.5 h-3.5 text-[#58A6FF]" />
+                            <span>How to Open an Eligible Exness Account</span>
+                          </div>
+                          <ol className="list-decimal list-inside space-y-1 text-[11px] text-[#8B949E]">
+                            <li>Log in to your official <a href="https://my.exness.com" target="_blank" rel="noopener noreferrer" className="text-[#58A6FF] hover:underline font-medium">Exness Personal Area</a>.</li>
+                            <li>Open a <strong className="text-white">Native Exness Terminal / DXtrade</strong> account (existing MT4/MT5 accounts are not compatible with native Trader API).</li>
+                            <li>Navigate to <em>Settings &rarr; API &rarr; API Keys</em> and generate an Ed25519 key pair with <strong className="text-white">Trading-only</strong> permissions.</li>
+                            <li>Connect your trading account below. All funds remain in your Exness account.</li>
+                          </ol>
+                        </div>
                         <a
                           href="#connections"
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#10B981] text-[#0D1117] text-xs font-bold"

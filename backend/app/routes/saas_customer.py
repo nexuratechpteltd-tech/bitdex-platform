@@ -4331,6 +4331,13 @@ async def get_hft_system_safety_status_route(
                 "risk_protection": {"ok": risk_protection_ok, "state": prot_state, "label": prot_state},
                 "trade_monitoring": {"ok": trade_monitoring_ok, "state": "CONNECTED" if trade_monitoring_ok else "DEGRADED", "label": "CONNECTED" if trade_monitoring_ok else "DEGRADED"},
             },
+            "custody_model": "NON_CUSTODIAL",
+            "custodian": "Exness (broker-held funds)",
+            "non_custodial_disclosure": (
+                "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. "
+                "BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected "
+                "Exness account using authorised API access. Trading involves financial risk."
+            ),
             "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
     finally:
@@ -5318,7 +5325,15 @@ async def _hft_scoped_summary(user_id, account_id):
             "today_trades_count": today_trades,
             "win_rate_percent": win_rate,
             "open_positions_count": len(open_pos),
-            "last_exit_reason": "NONE" if len(closed_pos) == 0 else "PROFIT_TARGET_1_USD"
+            "last_exit_reason": "NONE" if len(closed_pos) == 0 else "PROFIT_TARGET_1_USD",
+            "custody_model": "NON_CUSTODIAL",
+            "custodian": "Exness (broker-held funds)",
+            "non_custodial_disclosure": (
+                "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. "
+                "BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected "
+                "Exness account using authorised API access. Trading involves financial risk."
+            ),
+            "deposit_withdrawal_route": "Directly in Exness Personal Area (https://my.exness.com/pa/)"
         }
     finally:
         conn.close()
@@ -5397,6 +5412,21 @@ async def get_hft_connected_accounts(
             "demo_accounts": demo_accounts,
             "real_accounts": real_accounts,
             "empty_state_message": "NO VERIFIED TRADING ACCOUNTS CONNECTED" if len(accounts) == 0 else None,
+            "custody_model": "NON_CUSTODIAL",
+            "custodian": "Exness (broker-held funds)",
+            "non_custodial_disclosure": (
+                "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. "
+                "BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected "
+                "Exness account using authorised API access. Trading involves financial risk."
+            ),
+            "supported_platforms": ["EXNESS_TERMINAL", "DXTRADE"],
+            "unsupported_platforms": ["MT4", "MT5"],
+            "onboarding_instructions": (
+                "To connect an eligible account: 1. Log in to Exness Personal Area (https://my.exness.com). "
+                "2. Open a Native Exness Terminal / DXtrade account (not MT4/MT5). "
+                "3. In Settings -> API, generate a Trading-only API key and Ed25519 key pair with Trading permissions only (never Partnership or Payments/Transfers). "
+                "4. Connect your account in BITDEX. Deposits and withdrawals remain directly managed in your Exness Personal Area."
+            ),
             "live_trading_locked": True,
             "emergency_lock_active": True,
             "read_only_mode": True,

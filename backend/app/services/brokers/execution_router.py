@@ -150,6 +150,13 @@ class CentralExecutionRouter:
             platform = str(d.get("platform") or ("MT5" if adapter_mode == "EXNESS_MT5_GATEWAY" else "EXNESS_TERMINAL")).upper()
             server_name = str(d.get("server_name") or d.get("stream_id") or "")
 
+            if platform == "MT4":
+                raise PermissionError(
+                    "PLATFORM_UNSUPPORTED: MT4 accounts are not compatible with the native Exness Trader API. "
+                    "Direct native Exness execution requires an eligible Native Exness Terminal / DXtrade account. "
+                    "Please open a Native Exness Terminal account in your Exness Personal Area (https://my.exness.com)."
+                )
+
             if platform == "MT5" or adapter_mode == "EXNESS_MT5_GATEWAY":
                 adapter: UniversalBrokerAdapter = ExnessMT5BrokerAdapter(
                     owner_user_id=user_id,
@@ -270,8 +277,61 @@ class CentralExecutionRouter:
         adapter, ctx, _ = cls.resolve_adapter_for_customer(conn, user_id, account_id)
         await adapter.verify_ownership_and_environment(user_id)
         summary = await adapter.get_account_summary(force_refresh=force_refresh)
+        summary["custody_model"] = "NON_CUSTODIAL"
+        summary["custodian"] = "Exness (broker-held funds)"
+        summary["non_custodial_disclosure"] = (
+            "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. "
+            "BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected "
+            "Exness account using authorised API access. Trading involves financial risk."
+        )
+        summary["deposit_withdrawal_route"] = "Directly in Exness Personal Area (https://my.exness.com/pa/)"
         ctx.record_event("ACCOUNT_SUMMARY_READ", {"balance": summary.get("balance"), "equity": summary.get("equity")})
         return summary
+
+    @classmethod
+    def verify_platform_compatibility(cls, platform: str) -> Dict[str, Any]:
+        """
+        Authoritatively identifies which Exness account types are supported:
+        - Native Exness Terminal / eligible DXtrade accounts: SUPPORTED
+        - MT4 accounts: REJECTED (unsupported)
+        - MT5 accounts: REJECTED for Native Trader API direct execution
+        """
+        plat = str(platform).strip().upper()
+        if plat in ("EXNESS_TERMINAL", "DXTRADE", "BINANCE_FUTURES"):
+            return {
+                "supported": True,
+                "platform": plat,
+                "status": "SUPPORTED",
+                "message": f"Platform {plat} is fully supported for direct automated execution.",
+                "onboarding_instructions": "Account is eligible. Connect directly using your API key and signed credentials.",
+            }
+        elif plat == "MT4":
+            return {
+                "supported": False,
+                "platform": "MT4",
+                "status": "UNSUPPORTED",
+                "error_code": "PLATFORM_UNSUPPORTED",
+                "message": "MT4 accounts are not compatible with the native Exness Trader API. Direct native Exness execution requires an eligible Native Exness Terminal / DXtrade account.",
+                "onboarding_instructions": "Log in to your Exness Personal Area (https://my.exness.com) and open a Native Exness Terminal / DXtrade account (not MT4/MT5).",
+            }
+        elif plat == "MT5":
+            return {
+                "supported": False,
+                "platform": "MT5",
+                "status": "UNSUPPORTED_FOR_NATIVE_API",
+                "error_code": "PLATFORM_UNSUPPORTED",
+                "message": "Direct MT5 accounts cannot be executed through the native Exness Trader API. Existing MT4/MT5 accounts do not automatically work with the native Trader API.",
+                "onboarding_instructions": "Log in to your Exness Personal Area (https://my.exness.com) and open a Native Exness Terminal / DXtrade account.",
+            }
+        else:
+            return {
+                "supported": False,
+                "platform": plat,
+                "status": "UNSUPPORTED",
+                "error_code": "PLATFORM_UNSUPPORTED",
+                "message": f"Platform '{plat}' is not supported.",
+                "onboarding_instructions": "Please open an eligible Native Exness Terminal / DXtrade account in your Exness Personal Area.",
+            }
 
     @classmethod
     async def route_supported_instruments(

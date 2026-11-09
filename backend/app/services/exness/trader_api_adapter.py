@@ -953,17 +953,36 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             env = "ENVIRONMENT UNVERIFIED"
             env_confirmed = "UNVERIFIED"
 
-        # Step 5b: Authoritative Platform & MT5 Eligibility Classification (Task 4)
-        # stream_id starting with "dx." (e.g. "dx.2.real.std") identifies Exness Terminal engine (NOT MT5!)
+        # Step 5b: Authoritative Platform & MT5 Eligibility Classification
+        # stream_id starting with "dx." (e.g. "dx.2.real.std") identifies Native Exness Terminal / DXtrade
         if stream_id.startswith("dx."):
             platform = "EXNESS_TERMINAL"
             mt5_eligible = False
-        elif stream_id.startswith("mt5."):
+            platform_supported = True
+            platform_status = "SUPPORTED"
+            platform_message = "Eligible Native Exness Terminal / DXtrade account verified for direct API execution."
+            onboarding_instructions = "Account is eligible. Connect directly with Trading-only API key."
+        elif stream_id.startswith("mt4.") or "mt4" in stream_id:
+            platform = "MT4"
+            mt5_eligible = False
+            platform_supported = False
+            platform_status = "UNSUPPORTED"
+            platform_message = "MT4 accounts are not compatible with the native Exness Trader API. Direct native Exness execution requires an eligible Native Exness Terminal / DXtrade account."
+            onboarding_instructions = "Log in to your Exness Personal Area (https://my.exness.com) and open a Native Exness Terminal / DXtrade account (not MT4/MT5)."
+        elif stream_id.startswith("mt5.") or "mt5" in stream_id:
             platform = "MT5"
             mt5_eligible = True
+            platform_supported = False
+            platform_status = "UNSUPPORTED_FOR_NATIVE_API"
+            platform_message = "Direct MT5 accounts cannot be executed through the native Exness Trader API. Existing MT4/MT5 accounts do not automatically work with the native API."
+            onboarding_instructions = "Log in to your Exness Personal Area (https://my.exness.com) and open a Native Exness Terminal / DXtrade account."
         else:
             platform = "EXNESS_TERMINAL"
             mt5_eligible = False
+            platform_supported = True
+            platform_status = "SUPPORTED"
+            platform_message = "Native Exness platform verified."
+            onboarding_instructions = "Account is eligible. Connect directly with Trading-only API key."
 
         # Step 6: Account Tier Classification strictly from provider fields (account_name / account_type / tier)
         raw_tier = str(
@@ -1017,6 +1036,10 @@ class ExnessTraderAPIAdapter(ExnessBaseAdapter):
             "environment": env,
             "environment_confirmed_by": env_confirmed,
             "platform": platform,
+            "platform_supported": platform_supported,
+            "platform_status": platform_status,
+            "platform_message": platform_message,
+            "onboarding_instructions": onboarding_instructions,
             "mt5_eligible": mt5_eligible,
             "trade_mode": settings_trade_mode,
             "stream_id": str(acct_data.get("stream_id") or ""),

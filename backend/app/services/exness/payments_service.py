@@ -114,11 +114,21 @@ class ExnessPaymentsService:
         """
         return {
             "status": "SUCCESS",
+            "custody_model": "NON_CUSTODIAL",
+            "custodian": "Exness (broker-held funds)",
+            "customer_facing_disclosure": (
+                "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. "
+                "BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected "
+                "Exness account using authorised API access. Trading involves financial risk."
+            ),
             "personal_area_deposit_url": PERSONAL_AREA_DEPOSIT_URL,
+            "personal_area_withdrawal_url": "https://my.exness.com/pa/withdrawal",
             "external_deposits_accepted_by_bitdex": False,
+            "external_withdrawals_handled_by_bitdex": False,
+            "external_transfers_handled_by_bitdex": False,
             "disclaimer": (
-                "All deposits must be executed directly through your personal Exness Personal Area. "
-                "BITDEX is an institutional trading software terminal and does not collect, process, hold, or forward customer deposits."
+                "All deposits and withdrawals must be executed directly through your personal Exness Personal Area. "
+                "BITDEX is a non-custodial trading software platform and does not collect, process, hold, transfer, or forward customer funds."
             ),
             "crypto_and_alternative_methods": [
                 {
@@ -269,62 +279,16 @@ class ExnessPaymentsService:
         idempotency_key: str,
     ) -> Dict[str, Any]:
         """
-        Creates and processes a customer transfer with strict idempotency verification.
+        NON-CUSTODIAL SAFETY ENFORCEMENT:
+        BITDEX does not receive, custody, hold, withdraw, or transfer customer funds.
+        All deposits, withdrawals, and transfers must be performed directly in Exness Personal Area.
         """
-        # 1. Validate inputs
-        if amount <= 0:
-            raise ValueError("Transfer amount must be strictly positive.")
-        if not idempotency_key or len(idempotency_key.strip()) < 8:
-            raise ValueError("Idempotency key is mandatory (min 8 characters) to prevent duplicate transfers.")
-
-        clean_idemp = str(idempotency_key).strip()
-
-        # 2. Check for duplicate idempotency key in database
-        existing = get_exness_transfer_by_idempotency(conn, clean_idemp)
-        if existing:
-            logger.info(f"Duplicate transfer request caught by idempotency key {clean_idemp}.")
-            return {
-                "status": "DUPLICATE_IDEMPOTENT_REQUEST",
-                "message": "Transfer with this idempotency key was already submitted.",
-                "transfer": existing,
-            }
-
-        # 3. Check transfer eligibility
-        eligibility = self.get_transfer_eligibility(conn, user_id, source_id, dest_id, transfer_type)
-        if not eligibility["eligible"]:
-            raise ValueError(eligibility["message"])
-
-        # 4. Record transfer in database as PROCESSING
-        transfer = create_exness_transfer(
-            conn=conn,
-            user_id=user_id,
-            transfer_type=transfer_type.upper(),
-            source_id=source_id,
-            destination_id=dest_id,
-            amount=round(float(amount), 2),
-            currency=currency.upper(),
-            idempotency_key=clean_idemp,
-            status="PROCESSING",
+        raise PermissionError(
+            "NON_CUSTODIAL_ARCHITECTURE: Fund transfers are permanently disabled in BITDEX software. "
+            "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. "
+            "BITDEX does not hold customer deposits or custody customer funds. "
+            "All fund transfers, deposits, and withdrawals must be performed directly in your official Exness Personal Area (https://my.exness.com/pa/)."
         )
-
-        # 5. Process transfer via Exness Payments API (or simulated settlement if offline)
-        broker_transfer_id = f"EXN-TRF-{uuid.uuid4().hex[:12].upper()}"
-        update_exness_transfer_status(
-            conn=conn,
-            transfer_id=transfer["transfer_id"],
-            status="COMPLETED",
-            broker_transfer_id=broker_transfer_id,
-        )
-
-        transfer["status"] = "COMPLETED"
-        transfer["broker_transfer_id"] = broker_transfer_id
-
-        return {
-            "status": "SUCCESS",
-            "message": f"Successfully executed {SUPPORTED_TRANSFER_TYPES.get(transfer_type.upper(), transfer_type)} of {amount:.2f} {currency.upper()}.",
-            "transfer": transfer,
-            "irreversible_notice": "Transfer executed and settled. Exness Payments API transfers are irreversible.",
-        }
 
     def get_transfer_history(
         self, conn: sqlite3.Connection, user_id: str, limit: int = 50

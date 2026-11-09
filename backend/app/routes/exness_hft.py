@@ -1925,26 +1925,18 @@ async def initiate_payment_transfer(
     req: CustomerTransferRequest, user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Initiates an Exness Payments API customer transfer with strict idempotency verification.
+    NON-CUSTODIAL SAFETY LOCK:
+    BITDEX does not receive, custody, hold, withdraw, or transfer customer funds.
+    All deposits, withdrawals, and transfers must be performed directly in Exness Personal Area.
     """
-    svc = ExnessPaymentsService()
-    conn = get_db_connection()
-    try:
-        res = svc.initiate_transfer(
-            conn=conn,
-            user_id=user["user_id"],
-            transfer_type=req.transfer_type,
-            source_id=req.source_id,
-            dest_id=req.destination_id,
-            amount=req.amount,
-            currency=req.currency,
-            idempotency_key=req.idempotency_key,
-        )
-        return res
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
-    finally:
-        conn.close()
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "NON_CUSTODIAL_ARCHITECTURE: BITDEX is an automated trading software platform. "
+            "Your trading funds remain in your own Exness brokerage account. BITDEX does not hold customer deposits or custody customer funds. "
+            "Fund transfers, deposits, and withdrawals cannot be performed via BITDEX and must be executed directly in your official Exness Personal Area (https://my.exness.com/pa/)."
+        ),
+    )
 
 
 @router.get("/payments/history")

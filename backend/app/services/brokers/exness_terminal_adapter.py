@@ -168,6 +168,14 @@ class ExnessTerminalBrokerAdapter(UniversalBrokerAdapter):
                     else "Unable to reach broker trading stream."
                 )
             ),
+            "custody_model": "NON_CUSTODIAL",
+            "custodian": "Exness (broker-held funds)",
+            "non_custodial_disclosure": (
+                "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. "
+                "BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected "
+                "Exness account using authorised API access. Trading involves financial risk."
+            ),
+            "deposit_withdrawal_route": "Directly in Exness Personal Area (https://my.exness.com/pa/)",
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "data_source": info.get("data_source"),
         }
