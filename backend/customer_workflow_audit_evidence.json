@@ -1,5 +1,5 @@
 {
-  "timestamp_utc": "2026-11-09T02:27:03.126005+00:00",
+  "timestamp_utc": "2026-11-09T02:56:04.650346+00:00",
   "user_id": "USR-904424B4FB",
   "account_id": "17000109575",
   "phases": {
@@ -47,12 +47,16 @@
     "automated_execution_verified": true,
     "execution_readiness_status": "READY_FOR_DEMO_EXECUTION",
     "execution_readiness_reason": "Connected & Ready for Automated Demo Execution.",
-    "verified_at": "2026-11-09T02:27:03.123308+00:00",
+    "custody_model": "NON_CUSTODIAL",
+    "custodian": "Exness (broker-held funds)",
+    "non_custodial_disclosure": "BITDEX is an automated trading software platform. Your trading funds remain in your own Exness brokerage account. BITDEX does not hold customer deposits or custody customer funds. Trading instructions are sent to your connected Exness account using authorised API access. Trading involves financial risk.",
+    "deposit_withdrawal_route": "Directly in Exness Personal Area (https://my.exness.com/pa/)",
+    "verified_at": "2026-11-09T02:56:04.650119+00:00",
     "data_source": "Exness Public Trader API v1.0.2 (Trading Snapshot + Account Configuration)"
   },
   "performance": {
-    "concurrent_5_quotes_ms": 4.94,
-    "avg_quote_ms": 0.99,
-    "concurrent_5_summaries_ms": 6.35
+    "concurrent_5_quotes_ms": 7.92,
+    "avg_quote_ms": 1.58,
+    "concurrent_5_summaries_ms": 2.11
   }
 }
