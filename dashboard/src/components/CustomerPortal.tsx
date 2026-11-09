@@ -64,6 +64,7 @@ import HelpSupportView from "./dashboard/HelpSupportView";
 import StatusBadge from "./common/StatusBadge";
 
 import InstitutionalOrderLedger from "./InstitutionalOrderLedger";
+import LongTermStrategyView from "./LongTermStrategyView";
 
 interface CustomerPortalProps {
   token: string;
@@ -1761,7 +1762,7 @@ export default function CustomerPortal({ token, user, onSignOut, children, onSwi
 
           {currentNav === "LONG_TERM" && (
             <div className="space-y-4">
-              {children}
+              <LongTermStrategyView token={token} />
             </div>
           )}
 

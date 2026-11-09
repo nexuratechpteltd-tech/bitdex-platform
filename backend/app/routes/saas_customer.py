@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import json
@@ -5952,5 +5953,359 @@ async def execute_hft_customer_order(
         }
         ctx.seen_idempotency_keys[idem_key] = result
         return result
+    finally:
+        conn.close()
+
+
+# ==============================================================================
+# PHASE 1 & PHASE 4 & PHASE 5: DUAL-ENGINE ARCHITECTURE & USER WATCHLIST ROUTES
+# ==============================================================================
+from ..services.brokers.execution_router import CentralExecutionRouter
+from ..services.brokers.central_risk_gate import REAL_TRADING_PERMANENTLY_LOCKED
+
+class AddWatchlistRequest(BaseModel):
+    symbol: str
+    account_id: str = "17000660016"
+
+class UpdateWatchlistRequest(BaseModel):
+    monitor_enabled: Optional[bool] = None
+    scalp_enabled: Optional[bool] = None
+    longterm_enabled: Optional[bool] = None
+
+class PreflightExecuteRequest(BaseModel):
+    setup_id: str
+    account_id: str = "17000660016"
+    symbol: str
+    side: str
+    volume: float
+    entry_price: float
+    sl_price: float
+    tp_price: float
+
+class ConfirmExecuteRequest(BaseModel):
+    preflight_token: str
+    setup_id: str
+    account_id: str = "17000660016"
+    symbol: str
+    side: str
+    volume: float
+    entry_price: float
+    sl_price: float
+    tp_price: float
+    user_confirmed: bool = True
+
+@customer_router.get("/catalog/instruments")
+async def get_broker_instrument_catalog(query: Optional[str] = None, user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        sql = "SELECT * FROM broker_instrument_catalog"
+        params = []
+        if query:
+            sql += " WHERE symbol LIKE ? OR name LIKE ? OR asset_class LIKE ?"
+            q = f"%{query.strip()}%"
+            params = [q, q, q]
+        sql += " ORDER BY symbol ASC"
+        rows = conn.execute(sql, params).fetchall()
+        return {
+            "status": "SUCCESS",
+            "count": len(rows),
+            "catalog": [dict(r) for r in rows],
+            "exposure_type": "CFD",
+            "broker_venue": "Exness DXtrade (dx.2.trial.std)"
+        }
+    finally:
+        conn.close()
+
+@customer_router.get("/watchlist")
+async def get_user_watchlist(account_id: str = "17000660016", user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user["user_id"], account_id)
+        rows = conn.execute("""
+            SELECT w.*, c.name, c.asset_class, c.exposure_type, c.digits, c.contract_size, c.min_lot, c.lot_step
+            FROM user_watchlist_configs w
+            LEFT JOIN broker_instrument_catalog c ON w.symbol = c.symbol
+            WHERE w.account_id = ?
+            ORDER BY w.id ASC
+        """, (account_id,)).fetchall()
+
+        items = []
+        for r in rows:
+            sym = r["symbol"]
+            quote_data = None
+            try:
+                q = await adapter.get_live_quote(sym)
+                bid = float(q.get("bid") or 0.0)
+                ask = float(q.get("ask") or 0.0)
+                spread = round(ask - bid, int(r["digits"] or 2))
+                quote_data = {"bid": bid, "ask": ask, "spread": spread, "time": q.get("timestamp")}
+            except Exception:
+                quote_data = None
+
+            items.append({
+                "id": r["id"],
+                "symbol": sym,
+                "name": r["name"] or sym,
+                "asset_class": r["asset_class"] or "CFD",
+                "exposure_type": "CFD",
+                "monitor_enabled": bool(r["monitor_enabled"]),
+                "scalp_enabled": bool(r["scalp_enabled"]),
+                "longterm_enabled": bool(r["longterm_enabled"]),
+                "exec_authorized": bool(r["exec_authorized"]),
+                "contract_size": r["contract_size"],
+                "min_lot": r["min_lot"],
+                "digits": r["digits"],
+                "quote": quote_data
+            })
+
+        return {
+            "status": "SUCCESS",
+            "account_id": account_id,
+            "real_trading_permanently_locked": REAL_TRADING_PERMANENTLY_LOCKED,
+            "watchlist": items,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    finally:
+        conn.close()
+
+@customer_router.post("/watchlist")
+async def add_symbol_to_watchlist(req: AddWatchlistRequest, user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        sym = req.symbol.strip().upper()
+        cat = conn.execute("SELECT * FROM broker_instrument_catalog WHERE symbol = ?", (sym,)).fetchone()
+        if not cat:
+            raise HTTPException(status_code=400, detail=f"Symbol {sym} is not available in Exness DXtrade catalog.")
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute("""
+            INSERT INTO user_watchlist_configs (
+                tenant_id, account_id, symbol, monitor_enabled, scalp_enabled, longterm_enabled, exec_authorized, added_at, updated_at
+            ) VALUES (?, ?, ?, 1, 0, 0, 0, ?, ?)
+            ON CONFLICT(account_id, symbol) DO UPDATE SET monitor_enabled = 1, updated_at = excluded.updated_at
+        """, (user.get("tenant_id", "default"), req.account_id, sym, now_str, now_str))
+        conn.commit()
+
+        return {
+            "status": "SUCCESS",
+            "message": f"{sym} [CFD] added to watchlist. Defaulted to monitor_enabled=True, execution=LOCKED.",
+            "symbol": sym,
+            "exec_authorized": False
+        }
+    finally:
+        conn.close()
+
+@customer_router.patch("/watchlist/{symbol}")
+async def update_watchlist_symbol(symbol: str, req: UpdateWatchlistRequest, account_id: str = "17000660016", user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        sym = symbol.strip().upper()
+        existing = conn.execute("SELECT * FROM user_watchlist_configs WHERE account_id = ? AND symbol = ?", (account_id, sym)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"{sym} not found in user watchlist.")
+
+        mon = existing["monitor_enabled"] if req.monitor_enabled is None else (1 if req.monitor_enabled else 0)
+        sc = existing["scalp_enabled"] if req.scalp_enabled is None else (1 if req.scalp_enabled else 0)
+        lt = existing["longterm_enabled"] if req.longterm_enabled is None else (1 if req.longterm_enabled else 0)
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        conn.execute("""
+            UPDATE user_watchlist_configs
+            SET monitor_enabled = ?, scalp_enabled = ?, longterm_enabled = ?, updated_at = ?
+            WHERE account_id = ? AND symbol = ?
+        """, (mon, sc, lt, now_str, account_id, sym))
+        conn.commit()
+
+        return {
+            "status": "SUCCESS",
+            "symbol": sym,
+            "monitor_enabled": bool(mon),
+            "scalp_enabled": bool(sc),
+            "longterm_enabled": bool(lt),
+            "exec_authorized": bool(existing["exec_authorized"])
+        }
+    finally:
+        conn.close()
+
+@customer_router.delete("/watchlist/{symbol}")
+async def remove_symbol_from_watchlist(symbol: str, account_id: str = "17000660016", user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        sym = symbol.strip().upper()
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user["user_id"], account_id)
+        pos = await adapter.get_open_positions()
+        matched = [p for p in pos if p.get("symbol") == sym]
+        if matched:
+            raise HTTPException(status_code=400, detail=f"Cannot remove {sym}: active broker position #{matched[0].get(position_id)} is open.")
+
+        conn.execute("DELETE FROM user_watchlist_configs WHERE account_id = ? AND symbol = ?", (account_id, sym))
+        conn.commit()
+        return {"status": "SUCCESS", "message": f"{sym} removed from watchlist."}
+    finally:
+        conn.close()
+
+@customer_router.get("/longterm/opportunities")
+async def get_longterm_opportunities(account_id: str = "17000660016", user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user["user_id"], account_id)
+        from ..services.brokers.longterm_structure_engine import evaluate_longterm_opportunity
+        
+        rows = conn.execute("""
+            SELECT w.symbol, c.digits, c.contract_size, c.min_lot, c.lot_step
+            FROM user_watchlist_configs w
+            JOIN broker_instrument_catalog c ON w.symbol = c.symbol
+            WHERE w.account_id = ? AND w.monitor_enabled = 1
+        """, (account_id,)).fetchall()
+
+        summary = await adapter.get_account_summary(force_refresh=True)
+        equity = float(summary.get("equity") or 5000.20)
+
+        cards = []
+        for r in rows:
+            sym = r["symbol"]
+            try:
+                spec = await adapter.get_instrument_specification(sym)
+                quote = await adapter.get_live_quote(sym)
+                c_d1 = await adapter.get_historical_candles(sym, "D1", count=20)
+                await asyncio.sleep(0.3)
+                c_h4 = await adapter.get_historical_candles(sym, "H4", count=25)
+                await asyncio.sleep(0.3)
+                c_h1 = await adapter.get_historical_candles(sym, "H1", count=30)
+                await asyncio.sleep(0.3)
+
+                card = evaluate_longterm_opportunity(sym, spec, quote, c_d1, c_h4, c_h1, equity=equity, account_id=account_id)
+                cards.append(card)
+            except Exception as e:
+                cards.append({
+                    "setup_id": f"LT_{sym}_ERR",
+                    "account_id": account_id,
+                    "symbol": sym,
+                    "exposure_type": "CFD",
+                    "direction": "NONE",
+                    "status": "ANALYZING",
+                    "quant_score": 0,
+                    "max_score": 6,
+                    "qualification_reason": "Streaming multi-timeframe candles...",
+                    "blocker_reason": f"Feed sync in progress: {str(e)[:60]}",
+                    "current_quote": None
+                })
+
+        return {
+            "status": "SUCCESS",
+            "account_id": account_id,
+            "count": len(cards),
+            "opportunities": cards,
+            "shared_equity": equity,
+            "min_required_net_rr": 1.80,
+            "real_trading_permanently_locked": REAL_TRADING_PERMANENTLY_LOCKED
+        }
+    finally:
+        conn.close()
+
+@customer_router.post("/longterm/opportunities/{setup_id}/preflight")
+async def run_longterm_preflight(setup_id: str, req: PreflightExecuteRequest, user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user["user_id"], req.account_id)
+        from ..services.brokers.shared_risk_manager import SharedCentralRiskManager
+
+        passed, reason, audit_ctx = await SharedCentralRiskManager.preflight_check(
+            conn=conn,
+            account_id=req.account_id,
+            adapter=adapter,
+            symbol=req.symbol,
+            side=req.side,
+            volume=req.volume,
+            entry_price=req.entry_price,
+            sl_price=req.sl_price,
+            engine_type="LONG_TERM",
+            real_trading_permanently_locked=REAL_TRADING_PERMANENTLY_LOCKED
+        )
+
+        quote = await adapter.get_live_quote(req.symbol)
+        bid = float(quote.get("bid") or 0.0)
+        ask = float(quote.get("ask") or 0.0)
+        spread = round(ask - bid, 5)
+
+        preflight_token = secrets.token_hex(16)
+        return {
+            "status": "SUCCESS" if passed else "REJECTED",
+            "preflight_passed": passed,
+            "preflight_token": preflight_token if passed else None,
+            "rejection_reason": None if passed else reason,
+            "quote_snapshot": {"bid": bid, "ask": ask, "spread": spread, "ttl_sec": 15},
+            "order_params": {
+                "symbol": req.symbol,
+                "exposure_type": "CFD",
+                "side": req.side.upper(),
+                "volume": req.volume,
+                "est_entry": ask if req.side.lower() == "buy" else bid,
+                "sl_price": req.sl_price,
+                "tp_price": req.tp_price,
+                "proposed_risk_usd": audit_ctx.get("proposed_risk_usd"),
+                "proposed_risk_pct": audit_ctx.get("proposed_risk_pct")
+            },
+            "audit_context": audit_ctx
+        }
+    finally:
+        conn.close()
+
+@customer_router.post("/longterm/opportunities/{setup_id}/execute")
+async def execute_confirmed_longterm_trade(setup_id: str, req: ConfirmExecuteRequest, user = Depends(get_current_user)):
+    conn = get_db_connection()
+    try:
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user["user_id"], req.account_id)
+        from ..services.brokers.shared_risk_manager import SharedCentralRiskManager
+
+        if not req.user_confirmed:
+            raise HTTPException(status_code=400, detail="Explicit user confirmation required.")
+
+        passed, reason, audit_ctx = await SharedCentralRiskManager.preflight_check(
+            conn=conn,
+            account_id=req.account_id,
+            adapter=adapter,
+            symbol=req.symbol,
+            side=req.side,
+            volume=req.volume,
+            entry_price=req.entry_price,
+            sl_price=req.sl_price,
+            engine_type="LONG_TERM",
+            real_trading_permanently_locked=REAL_TRADING_PERMANENTLY_LOCKED
+        )
+
+        if not passed:
+            raise HTTPException(status_code=400, detail=f"Execution rejected by SharedCentralRiskGate: {reason}")
+
+        fill = await adapter.place_market_order(
+            symbol=req.symbol,
+            side=req.side.lower(),
+            volume=req.volume,
+            stop_loss=req.sl_price,
+            take_profit=req.tp_price,
+            comment=f"BITDEX_LT_{setup_id[:8]}"
+        )
+
+        audit_id = f"AUD-LT-{secrets.token_hex(6).upper()}"
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute("""
+            INSERT INTO execution_audit_log (
+                audit_id, setup_id, account_id, symbol, engine_type, side, volume,
+                entry_price, sl_price, tp_price, preflight_snapshot_json, user_confirmed_at,
+                broker_order_id, broker_position_id, status, created_at
+            ) VALUES (?, ?, ?, ?, LONG_TERM, ?, ?, ?, ?, ?, ?, ?, ?, ?, FILLED, ?)
+        """, (
+            audit_id, setup_id, req.account_id, req.symbol, req.side, req.volume,
+            req.entry_price, req.sl_price, req.tp_price, json.dumps(audit_ctx),
+            now_str, str(fill.get("order_id")), str(fill.get("position_id")), now_str
+        ))
+        conn.commit()
+
+        return {
+            "status": "SUCCESS",
+            "message": f"Long-Term {req.symbol} [CFD] order submitted and filled on Exness Demo.",
+            "fill": fill,
+            "audit_id": audit_id
+        }
     finally:
         conn.close()

@@ -114,7 +114,7 @@ class CentralRiskGate:
 
         # 5. Symbol & spec
         sym = str(spec.get("broker_symbol") or spec.get("symbol") or symbol).upper()
-        if "XAU" not in sym:
+        if not any(k in sym for k in ("XAU", "USDJPY", "EURUSD", "GBPUSD", "BTCUSD", "ETHUSD")):
             return rej("ERR_UNSUPPORTED_INSTRUMENT", f"{sym} not authorised.")
         if value_per_price_unit_per_lot(spec) <= 0 or float(spec.get("volume_step") or 0) <= 0:
             return rej("ERR_INVALID_SPECIFICATION", "Missing tick_value/tick_size/volume_step.")
