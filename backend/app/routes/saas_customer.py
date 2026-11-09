@@ -2536,7 +2536,8 @@ async def get_hft_strategy_signal_route(
 
         if sel_acct:
             from ..services.brokers.execution_router import CentralExecutionRouter
-            return await CentralExecutionRouter.route_strategy_signal(
+            from ..services.demo_forward_test import DemoForwardTestTracker
+            sig_res = await CentralExecutionRouter.route_strategy_signal(
                 conn=conn,
                 user_id=user_id,
                 symbol=symbol,
@@ -2544,6 +2545,20 @@ async def get_hft_strategy_signal_route(
                 allocated_capital_usd=allocated_margin,
                 leverage=leverage,
             )
+            dc = sig_res.get("directional_cycle") or {}
+            DemoForwardTestTracker.record_event(
+                conn=conn,
+                user_id=user_id,
+                account_id=sel_acct["account_id"],
+                symbol=symbol,
+                event_type="STRATEGY_QUALIFICATION",
+                direction=dc.get("selected_direction"),
+                score=dc.get("directional_score"),
+                entry_qualified=bool(dc.get("entry_qualified")),
+                rejection_reason=dc.get("no_entry_reason"),
+                details=dc,
+            )
+            return sig_res
 
         broker_type = "EXNESS_MT5"
         equity = 5072.87
@@ -3460,18 +3475,30 @@ async def emergency_disarm_hft_demo_route(
 ):
     """
     Emergency Stop control: immediately disarms Demo execution authorization,
-    sets emergency_stop_triggered = 1, and records an immutable audit trail.
+    sets emergency_stop_triggered = 1, and records an immutable audit trail
+    WITHOUT falsely claiming existing open positions were closed.
     """
     user_id = current_user["user_id"]
     conn = get_db_connection()
     try:
-        from ..services.demo_execution_service import DemoExecutionService
-        return DemoExecutionService.emergency_disarm(
+        from ..services.brokers.execution_router import CentralExecutionRouter
+        from ..services.demo_forward_test import DemoForwardTestTracker
+
+        res = CentralExecutionRouter.route_emergency_disarm(
             conn=conn,
             user_id=user_id,
             account_id=req.account_id,
             reason=req.reason or "User triggered emergency disarm"
         )
+        DemoForwardTestTracker.record_event(
+            conn=conn,
+            user_id=user_id,
+            account_id=res.get("account_id") or req.account_id or "DEFAULT",
+            symbol="ALL",
+            event_type="EMERGENCY_DISARM",
+            details=res,
+        )
+        return res
     finally:
         conn.close()
 
@@ -3600,18 +3627,54 @@ async def close_hft_demo_position_route(
     req: HftDemoClosePositionRequest,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Phase 7M: Dedicated Demo position closure endpoint with $1.00 profit-target exit support."""
+    """Explicit Demo position closure endpoint with multi-broker routing and forward-test audit."""
     user_id = current_user["user_id"]
     conn = get_db_connection()
     try:
+        acct = _require_acct(conn, user_id, req.account_id)
+        if acct["environment"] == "REAL":
+            raise HTTPException(status_code=403, detail="REAL_TRADING_PERMANENTLY_LOCKED: Real account position closure is permanently locked.")
+
+        from ..services.demo_forward_test import DemoForwardTestTracker
+
+        if acct.get("adapter_mode") == "EXNESS_TRADER_API" or acct.get("platform") == "EXNESS_TERMINAL" or acct.get("source") != "EXNESS":
+            from ..services.brokers.execution_router import CentralExecutionRouter
+            res = await CentralExecutionRouter.route_close_position(
+                conn=conn,
+                user_id=user_id,
+                position_id=req.ticket,
+                account_id=acct["account_id"],
+                dry_run=False,
+            )
+            DemoForwardTestTracker.record_event(
+                conn=conn,
+                user_id=user_id,
+                account_id=acct["account_id"],
+                symbol="BTCUSD",
+                event_type="POSITION_CLOSED",
+                position_id=req.ticket,
+                details=res,
+            )
+            return res
+
         from ..services.demo_execution_service import DemoExecutionService
-        return DemoExecutionService.close_demo_position(
+        res = DemoExecutionService.close_demo_position(
             conn=conn,
             user_id=user_id,
-            account_id=req.account_id,
+            account_id=acct["account_id"],
             ticket=req.ticket,
             close_reason=req.close_reason or "PROFIT_TARGET_1_USD"
         )
+        DemoForwardTestTracker.record_event(
+            conn=conn,
+            user_id=user_id,
+            account_id=acct["account_id"],
+            symbol="BTCUSD",
+            event_type="POSITION_CLOSED",
+            position_id=req.ticket,
+            details=res,
+        )
+        return res
     finally:
         conn.close()
 
@@ -3807,31 +3870,43 @@ async def close_all_hft_demo_positions_route(
         acct = _require_acct(conn, user_id, req.account_id)
         if acct["environment"] == "REAL":
             raise HTTPException(status_code=403, detail="REAL_TRADING_PERMANENTLY_LOCKED: Real account order operations are permanently locked.")
+        from ..services.demo_forward_test import DemoForwardTestTracker
+
         if acct.get("adapter_mode") == "EXNESS_TRADER_API" or acct.get("platform") == "EXNESS_TERMINAL" or acct.get("source") != "EXNESS":
             from ..services.brokers.execution_router import CentralExecutionRouter
-            adapter, _, _ = CentralExecutionRouter.resolve_adapter_for_customer(conn, user_id, acct["account_id"])
-            res = await adapter.close_all_positions(symbol=req.symbol, dry_run=True)
-            return {
-                "status": "SUCCESS",
-                "account_id": acct["account_id"],
-                "broker_login": acct["account_login"],
-                "masked_account_number": acct["masked_account_number"],
-                "server_name": acct["server_name"],
-                "adapter": adapter.adapter_name,
-                "open_positions_found": res.get("closed_count", 0),
-                "closed_count": res.get("closed_count", 0),
-                "failed_count": 0,
-                "all_closed": True,
-                "message": f"All open positions reconciled on {acct['broker_name']} {acct['account_type_label']} ({acct['masked_account_number']}).",
-            }
+            res = await CentralExecutionRouter.route_close_all_positions(
+                conn=conn,
+                user_id=user_id,
+                account_id=acct["account_id"],
+                symbol=req.symbol,
+                dry_run=False,
+            )
+            DemoForwardTestTracker.record_event(
+                conn=conn,
+                user_id=user_id,
+                account_id=acct["account_id"],
+                symbol=req.symbol or "ALL",
+                event_type="CLOSE_ALL_POSITIONS",
+                details=res,
+            )
+            return res
         from ..services.demo_execution_service import DemoExecutionService
-        return DemoExecutionService.close_all_demo_positions(
+        res = DemoExecutionService.close_all_demo_positions(
             conn=conn,
             user_id=user_id,
             account_id=acct["account_id"],
             symbol=req.symbol,
             close_reason="CUSTOMER_CLOSE_ALL_TRADES"
         )
+        DemoForwardTestTracker.record_event(
+            conn=conn,
+            user_id=user_id,
+            account_id=acct["account_id"],
+            symbol=req.symbol or "ALL",
+            event_type="CLOSE_ALL_POSITIONS",
+            details=res,
+        )
+        return res
     finally:
         conn.close()
 
@@ -3904,6 +3979,25 @@ async def approve_and_execute_hft_demo_strategy_route(
                     """,
                     (exec_status, reason, now_iso, acct_id, user_id),
                 )
+
+            from ..services.demo_forward_test import DemoForwardTestTracker
+            DemoForwardTestTracker.record_event(
+                conn=conn,
+                user_id=user_id,
+                account_id=acct_id,
+                symbol=req.symbol,
+                event_type="CUSTOMER_APPROVAL",
+                direction=dc.get("selected_direction"),
+                score=dc.get("directional_score"),
+                entry_qualified=bool(dc.get("entry_qualified")),
+                rejection_reason=reason if not dc.get("entry_qualified") else None,
+                details={
+                    "strategy_id": req.strategy_id,
+                    "allocated_capital_usd": req.allocated_capital_usd,
+                    "execution_status": exec_status,
+                }
+            )
+
             return {
                 "status": "SUCCESS",
                 "strategy_id": req.strategy_id,
@@ -4385,14 +4479,14 @@ async def admin_override_hft_activation(
 async def get_hft_positions_route(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
     if account_id:
-        return _hft_scoped_positions(user_id, account_id)
+        return await _hft_scoped_positions(user_id, account_id)
     conn = get_db_connection()
     try:
         default_id = _resolve_user_default_account_id(conn, user_id)
     finally:
         conn.close()
     if default_id:
-        return _hft_scoped_positions(user_id, default_id)
+        return await _hft_scoped_positions(user_id, default_id)
     return {"status": "SUCCESS", "account_id": None, "count": 0, "open_count": 0, "open_positions": [], "closed_positions": []}
 
 
@@ -4400,14 +4494,14 @@ async def get_hft_positions_route(account_id: Optional[str] = None, current_user
 async def get_hft_orders_route(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
     if account_id:
-        return _hft_scoped_orders(user_id, account_id)
+        return await _hft_scoped_orders(user_id, account_id)
     conn = get_db_connection()
     try:
         default_id = _resolve_user_default_account_id(conn, user_id)
     finally:
         conn.close()
     if default_id:
-        return _hft_scoped_orders(user_id, default_id)
+        return await _hft_scoped_orders(user_id, default_id)
     return {"status": "SUCCESS", "account_id": None, "count": 0, "open_orders": [], "closed_orders": []}
 
 
@@ -4415,14 +4509,14 @@ async def get_hft_orders_route(account_id: Optional[str] = None, current_user: D
 async def get_hft_account_summary_route(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user["user_id"]
     if account_id:
-        return _hft_scoped_summary(user_id, account_id)
+        return await _hft_scoped_summary(user_id, account_id)
     conn = get_db_connection()
     try:
         default_id = _resolve_user_default_account_id(conn, user_id)
     finally:
         conn.close()
     if default_id:
-        return _hft_scoped_summary(user_id, default_id)
+        return await _hft_scoped_summary(user_id, default_id)
     return {
         "status": "SUCCESS",
         "account_id": None,
@@ -4883,7 +4977,7 @@ def _has_real_consent(conn, user_id: str, account_id: str) -> bool:
 PNL_CLEAN_RESET_DEAL_TICKET_CUTOFF = 2505549817
 
 
-def _scoped_rows(conn, user_id: str, acct: dict):
+async def _scoped_rows(conn, user_id: str, acct: dict):
     """
     Positions and completed trades strictly for the customer's selected account.
     - Never queries the MT5 gateway unless the selected account is an MT5 Gateway Demo account (`mt5_account_connected == True`) owned by `user_id`.
@@ -4999,72 +5093,88 @@ def _scoped_rows(conn, user_id: str, acct: dict):
     elif acct["source"] == "EXNESS" and acct.get("adapter_mode") == "EXNESS_TRADER_API":
         # Query official Exness Public Trader API snapshot and deal history for this customer's account
         try:
-            from ..services.exness.vault import ExnessCredentialVault
-            from ..services.exness.trader_api_adapter import ExnessTraderAPIAdapter
-            login_str = str(acct.get("account_login") or "").strip()
-            conn_id = str(acct.get("account_id") or "")
-            row = conn.execute(
-                "SELECT * FROM exness_demo_connections WHERE connection_id = ? AND user_id = ?",
-                (conn_id, user_id)
-            ).fetchone()
-            if row:
-                rd = dict(row)
-                enc_str = rd.get("encrypted_credentials") or "{}"
-                creds = ExnessCredentialVault.decrypt_credentials(
-                    user_id=user_id,
-                    login=login_str,
-                    server=str(rd.get("server_name") or "https://api.exness.com"),
-                    enc_payload=json.loads(enc_str),
-                )
-                adapter = ExnessTraderAPIAdapter(
-                    api_key=str(rd.get("api_key") or login_str),
-                    api_secret=creds.get("password", ""),
-                    account_id=login_str,
-                    discovery_base_url=str(rd.get("server_name") or "https://api.exness.com"),
-                    access_point=str(rd.get("access_point") or "")
-                )
-                open_pos = adapter.get_open_positions()
-                for p in open_pos:
-                    unreal_pnl = float(p.get("unrealized_pnl", 0.0))
+            from ..services.brokers.execution_router import CentralExecutionRouter
+            adapter, _, rd = CentralExecutionRouter.resolve_adapter_for_customer(conn, user_id, acct.get("account_id"))
+            open_pos = await adapter.get_open_positions()
+            for p in open_pos:
+                unreal_pnl = float(p.get("unrealized_pnl", 0.0))
+                positions.append({
+                    "position_id": str(p.get("position_id") or p.get("ticket")),
+                    "symbol": p.get("symbol"),
+                    "direction": p.get("direction") or p.get("side", "BUY"),
+                    "size": float(p.get("volume", p.get("size", 0.0))),
+                    "entry_price": float(p.get("entry_price", p.get("open_price", 0.0))),
+                    "mark_price": float(p.get("mark_price", p.get("current_price", p.get("entry_price", 0.0)))),
+                    "unrealized_pnl": unreal_pnl,
+                    "net_pnl": unreal_pnl,
+                    "profit_target_usd": 1.0,
+                    "profit_target_reached": unreal_pnl >= 1.0,
+                    "target_exit_active": True,
+                    "realized_pnl": 0.0,
+                    "isolated_margin": float(p.get("margin", 0.0)),
+                    "leverage": int(rd.get("leverage") or 2000),
+                    "status": "OPEN",
+                    "stop_loss_price": float(p["stop_loss_price"]) if p.get("stop_loss_price") else (float(p["sl"]) if p.get("sl") else None),
+                    "take_profit_price": float(p["take_profit_price"]) if p.get("take_profit_price") else (float(p["tp"]) if p.get("tp") else None),
+                    "opened_at": p.get("open_time", ""),
+                    "source": "EXNESS",
+                    "comment": p.get("comment", "")
+                })
+            history_data = await adapter.get_commissions_swaps_and_pnl(limit=100)
+            deals = history_data.get("deals", [])
+            for d in deals:
+                deal_info = d.get("deal") if "deal" in d else d
+                prof_obj = deal_info.get("profit")
+                deal_prof = float(prof_obj.get("amount", 0.0)) if isinstance(prof_obj, dict) else float(prof_obj or 0.0)
+                deal_type = str(deal_info.get("type", "DEAL")).upper()
+                deal_id = str(deal_info.get("deal_id") or deal_info.get("id") or "")
+                pos_id = str(deal_info.get("position_id") or "")
+                orders.append({
+                    "order_id": deal_id,
+                    "position_id": pos_id,
+                    "symbol": deal_info.get("instrument") or deal_info.get("symbol"),
+                    "side": str(deal_info.get("direction") or deal_info.get("side", "")).upper(),
+                    "entry": "IN" if deal_type == "OPEN" else "OUT",
+                    "type": "DEAL",
+                    "quantity": float(deal_info.get("volume", 0.0)),
+                    "price": float(deal_info.get("price", 0.0)),
+                    "status": "FILLED",
+                    "profit": deal_prof,
+                    "commission": 0.0,
+                    "swap": 0.0,
+                    "comment": deal_info.get("comment", ""),
+                    "created_at": deal_info.get("create_time") or deal_info.get("time", "")
+                })
+                if deal_type in ("CLOSE", "OUT"):
                     positions.append({
-                        "position_id": str(p.get("position_id") or p.get("id")),
-                        "symbol": p.get("symbol"),
-                        "direction": p.get("direction", "BUY"),
-                        "size": float(p.get("volume", p.get("size", 0.0))),
-                        "entry_price": float(p.get("entry_price", p.get("open_price", 0.0))),
-                        "mark_price": float(p.get("mark_price", p.get("current_price", p.get("entry_price", 0.0)))),
-                        "unrealized_pnl": unreal_pnl,
-                        "net_pnl": unreal_pnl,
-                        "profit_target_usd": 1.0,
-                        "profit_target_reached": unreal_pnl >= 1.0,
-                        "target_exit_active": True,
-                        "realized_pnl": 0.0,
-                        "isolated_margin": float(p.get("margin", 0.0)),
+                        "position_id": pos_id,
+                        "deal_ticket": deal_id,
+                        "symbol": deal_info.get("instrument") or deal_info.get("symbol"),
+                        "direction": str(deal_info.get("direction") or deal_info.get("side", "")).upper(),
+                        "size": float(deal_info.get("volume", 0.0)),
+                        "entry_price": float(deal_info.get("price", 0.0)),
+                        "exit_price": float(deal_info.get("price", 0.0)),
+                        "mark_price": float(deal_info.get("price", 0.0)),
+                        "unrealized_pnl": 0.0,
+                        "gross_pnl": deal_prof,
+                        "commission_usd": 0.0,
+                        "swap_usd": 0.0,
+                        "realized_pnl": deal_prof,
+                        "net_pnl": deal_prof,
+                        "isolated_margin": 0.0,
                         "leverage": int(rd.get("leverage") or 2000),
-                        "status": "OPEN",
-                        "stop_loss_price": float(p["stop_loss"]) if p.get("stop_loss") else None,
-                        "take_profit_price": float(p["take_profit"]) if p.get("take_profit") else None,
-                        "opened_at": p.get("open_time", ""),
-                        "source": "EXNESS",
-                        "comment": p.get("comment", "")
-                    })
-                deals = adapter.get_trade_history()
-                for d in deals:
-                    orders.append({
-                        "order_id": str(d.get("deal_id") or d.get("id") or ""),
-                        "position_id": str(d.get("position_id") or ""),
-                        "symbol": d.get("symbol", ""),
-                        "side": d.get("direction", ""),
-                        "entry": d.get("entry", ""),
-                        "type": "DEAL",
-                        "quantity": float(d.get("volume", 0.0)),
-                        "price": float(d.get("price", 0.0)),
-                        "status": "FILLED",
-                        "profit": float(d.get("profit", 0.0)),
-                        "commission": float(d.get("commission", 0.0)),
-                        "swap": float(d.get("swap", 0.0)),
-                        "comment": d.get("comment", ""),
-                        "created_at": d.get("time", "")
+                        "status": "CLOSED",
+                        "stop_loss_price": None,
+                        "take_profit_price": None,
+                        "opened_at": deal_info.get("create_time", ""),
+                        "closed_at": deal_info.get("create_time", ""),
+                        "comment": deal_info.get("comment", ""),
+                        "result_label": (
+                            "Closed automatically (Profit Target Reached)"
+                            if deal_prof > 0
+                            else "Closed automatically (Stop-Loss Protection)"
+                        ),
+                        "source": "EXNESS"
                     })
         except Exception as ex:
             logger.warning(f"Error querying Exness Trader API for scoped rows: {ex}")
@@ -5072,8 +5182,8 @@ def _scoped_rows(conn, user_id: str, acct: dict):
     return positions, orders
 
 
-def _hft_account_has_symbol_exposure(conn, user_id, acct, symbol) -> bool:
-    positions, orders = _scoped_rows(conn, user_id, acct)
+async def _hft_account_has_symbol_exposure(conn, user_id, acct, symbol) -> bool:
+    positions, orders = await _scoped_rows(conn, user_id, acct)
     sym = symbol.upper()
     return any(p["symbol"].upper().replace("/", "") == sym and p["status"] == "OPEN" for p in positions) or \
         any(o["symbol"].upper().replace("/", "") == sym and o["status"] in ("NEW", "OPEN", "PARTIALLY_FILLED", "PENDING") for o in orders)
@@ -5108,11 +5218,11 @@ def _require_acct(conn, user_id: str, account_id: Optional[str] = None, verify_l
     return acct
 
 
-def _hft_scoped_positions(user_id, account_id):
+async def _hft_scoped_positions(user_id, account_id):
     conn = get_db_connection()
     try:
         acct = _require_acct(conn, user_id, account_id)
-        positions, _ = _scoped_rows(conn, user_id, acct)
+        positions, _ = await _scoped_rows(conn, user_id, acct)
         op = [p for p in positions if p["status"] == "OPEN"]
         return {"status": "SUCCESS", "account_id": acct["account_id"], "count": len(positions), "open_count": len(op),
                 "open_positions": op, "closed_positions": [p for p in positions if p["status"] != "OPEN"]}
@@ -5120,11 +5230,11 @@ def _hft_scoped_positions(user_id, account_id):
         conn.close()
 
 
-def _hft_scoped_orders(user_id, account_id):
+async def _hft_scoped_orders(user_id, account_id):
     conn = get_db_connection()
     try:
         acct = _require_acct(conn, user_id, account_id)
-        _, orders = _scoped_rows(conn, user_id, acct)
+        _, orders = await _scoped_rows(conn, user_id, acct)
         oo = [o for o in orders if o["status"] in ("NEW", "OPEN", "PARTIALLY_FILLED", "PENDING")]
         return {"status": "SUCCESS", "account_id": acct["account_id"], "count": len(orders),
                 "open_orders": oo, "closed_orders": [o for o in orders if o not in oo]}
@@ -5132,7 +5242,7 @@ def _hft_scoped_orders(user_id, account_id):
         conn.close()
 
 
-def _hft_scoped_summary(user_id, account_id):
+async def _hft_scoped_summary(user_id, account_id):
     conn = get_db_connection()
     try:
         a = _require_acct(conn, user_id, account_id)
@@ -5141,7 +5251,7 @@ def _hft_scoped_summary(user_id, account_id):
         free_m = float(a["margin_free"]) if a.get("margin_free") is not None else eq
         used_m = float(a["margin_used"]) if a.get("margin_used") is not None else 0.0
 
-        positions, orders = _scoped_rows(conn, user_id, a)
+        positions, orders = await _scoped_rows(conn, user_id, a)
         open_pos = [p for p in positions if p.get("status") == "OPEN"]
         closed_pos = [p for p in positions if p.get("status") == "CLOSED"]
         unrealized_pnl = round(sum(p.get("unrealized_pnl", 0.0) for p in open_pos), 2)
@@ -5418,3 +5528,40 @@ async def record_real_trading_consent(req: RealTradingConsentRequest, request: R
         }
     finally:
         conn.close()
+
+
+@customer_router.get("/customer/trading/hft/forward-test-audit")
+async def get_forward_test_audit_route(
+    account_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    limit: int = 100,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Phase 5: Demo forward-test event log and quantitative execution telemetry."""
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.demo_forward_test import DemoForwardTestTracker
+        records = DemoForwardTestTracker.get_records(
+            conn=conn,
+            user_id=user_id,
+            account_id=account_id,
+            symbol=symbol,
+            limit=limit,
+        )
+        stats = DemoForwardTestTracker.get_summary_statistics(
+            conn=conn,
+            user_id=user_id,
+            account_id=account_id,
+        )
+        return {
+            "status": "SUCCESS",
+            "user_id": user_id,
+            "account_id": account_id,
+            "count": len(records),
+            "statistics": stats,
+            "records": records,
+        }
+    finally:
+        conn.close()
+

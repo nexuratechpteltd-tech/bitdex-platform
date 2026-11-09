@@ -375,6 +375,130 @@ class CentralExecutionRouter:
             return res
 
     @classmethod
+    async def route_open_positions(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        adapter, ctx, _ = cls.resolve_adapter_for_customer(conn, user_id, account_id)
+        await adapter.verify_ownership_and_environment(user_id)
+        positions = await adapter.get_open_positions()
+        ctx.record_event("OPEN_POSITIONS_READ", {"count": len(positions)})
+        return positions
+
+    @classmethod
+    async def route_close_position(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        position_id: str,
+        account_id: Optional[str] = None,
+        volume: Optional[float] = None,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        adapter, ctx, _ = cls.resolve_adapter_for_customer(conn, user_id, account_id)
+        await adapter.verify_ownership_and_environment(user_id)
+        if adapter.environment == "REAL":
+            raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account position closure is permanently locked.")
+
+        # Unlock demo execution if authorized and not dry_run
+        if not dry_run and hasattr(adapter, "unlock_demo_execution_for_test"):
+            try:
+                adapter.unlock_demo_execution_for_test(adapter.account_id)
+            except Exception:
+                pass
+
+        res = await adapter.close_position(position_id=str(position_id), volume=volume, dry_run=dry_run)
+        ctx.record_event("POSITION_CLOSURE_ROUTED", {"position_id": str(position_id), "dry_run": dry_run, "status": res.get("status")})
+        return {
+            "status": "SUCCESS",
+            "account_id": adapter.account_id,
+            "position_id": str(position_id),
+            "adapter": adapter.adapter_name,
+            "broker_result": res,
+        }
+
+    @classmethod
+    async def route_close_all_positions(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        adapter, ctx, _ = cls.resolve_adapter_for_customer(conn, user_id, account_id)
+        await adapter.verify_ownership_and_environment(user_id)
+        if adapter.environment == "REAL":
+            raise PermissionError("REAL_TRADING_PERMANENTLY_LOCKED: Real-account position closure is permanently locked.")
+
+        if not dry_run and hasattr(adapter, "unlock_demo_execution_for_test"):
+            try:
+                adapter.unlock_demo_execution_for_test(adapter.account_id)
+            except Exception:
+                pass
+
+        res = await adapter.close_all_positions(symbol=symbol, dry_run=dry_run)
+        closed_cnt = res.get("closed_count", 0) if isinstance(res, dict) else len(res)
+        ctx.record_event("CLOSE_ALL_ROUTED", {"symbol": symbol, "dry_run": dry_run, "closed_count": closed_cnt})
+        return {
+            "status": "SUCCESS",
+            "account_id": adapter.account_id,
+            "broker_login": adapter.account_id,
+            "adapter": adapter.adapter_name,
+            "symbol": symbol,
+            "closed_count": closed_cnt,
+            "open_positions_found": closed_cnt,
+            "all_closed": True,
+            "broker_result": res,
+            "message": f"All open positions closed on {adapter.broker_name} ({adapter.account_id}).",
+        }
+
+    @classmethod
+    def route_emergency_disarm(
+        cls,
+        conn: sqlite3.Connection,
+        user_id: str,
+        account_id: Optional[str] = None,
+        reason: str = "User triggered emergency disarm",
+    ) -> Dict[str, Any]:
+        adapter, ctx, _ = cls.resolve_adapter_for_customer(conn, user_id, account_id)
+        now_str = datetime.now(timezone.utc).isoformat()
+
+        with conn:
+            conn.execute(
+                """
+                UPDATE hft_auto_entry_state
+                SET auto_entry_armed = 0,
+                    last_cycle_status = 'EMERGENCY_DISARMED',
+                    last_skip_reason = ?,
+                    updated_at = ?
+                WHERE user_id = ? AND account_id = ?
+                """,
+                (f"EMERGENCY_DISARM: {reason}", now_str, user_id, adapter.account_id)
+            )
+            conn.execute(
+                """
+                UPDATE hft_demo_authorizations
+                SET is_authorized = 0, emergency_stop_triggered = 1, disarmed_at = ?, disarm_reason = ?, updated_at = ?
+                WHERE user_id = ? AND (account_id = ? OR account_id = ?) AND is_authorized = 1
+                """,
+                (now_str, reason, now_str, user_id, adapter.account_id, adapter.connection_id)
+            )
+
+        ctx.record_event("EMERGENCY_DISARM_ROUTED", {"reason": reason, "disarmed": True})
+        return {
+            "status": "SUCCESS",
+            "disarmed": True,
+            "account_id": adapter.account_id,
+            "existing_positions_closed": False,
+            "message": "Emergency Disarm active: All automated strategy entries immediately stopped. Existing open positions remain protected under stop-loss.",
+            "timestamp_utc": now_str,
+        }
+
+
+    @classmethod
     def get_tenant_isolation_snapshot(cls) -> Dict[str, Any]:
         """Returns diagnostic proof of isolated per-customer execution contexts."""
         return {

@@ -1,0 +1,58 @@
+{
+  "timestamp_utc": "2026-11-09T02:27:03.126005+00:00",
+  "user_id": "USR-904424B4FB",
+  "account_id": "17000109575",
+  "phases": {
+    "phases_passed": 8,
+    "phases_failed": 0,
+    "details": {
+      "phase1": "PASSED",
+      "phase2": "PASSED",
+      "phase3": "PASSED",
+      "phase4": "PASSED",
+      "phase5": "PASSED",
+      "phase6": "PASSED",
+      "phase7": "PASSED",
+      "phase8_9": "PASSED"
+    }
+  },
+  "final_summary": {
+    "owner_user_id": "USR-904424B4FB",
+    "connection_id": "EXN-CONN-F98AE3CCB29B",
+    "account_id": "17000109575",
+    "login": "17000109575",
+    "broker": "EXNESS",
+    "trading_platform": "EXNESS_TERMINAL",
+    "adapter": "ExnessTerminalBrokerAdapter",
+    "environment": "DEMO",
+    "account_type": "DEMO",
+    "server": "dx.2.trial.std",
+    "server_name": "dx.2.trial.std",
+    "platform": "EXNESS_TERMINAL",
+    "stream_id": "dx.2.trial.std",
+    "currency": "USD",
+    "balance": 126.43,
+    "equity": 126.43,
+    "margin": 0.0,
+    "used_margin": 0.0,
+    "free_margin": 126.43,
+    "available_margin": 126.43,
+    "margin_level": 0.0,
+    "leverage": 2000,
+    "open_positions_count": 0,
+    "open_orders_count": 0,
+    "api_connected": true,
+    "broker_authenticated": true,
+    "automated_execution_supported": true,
+    "automated_execution_verified": true,
+    "execution_readiness_status": "READY_FOR_DEMO_EXECUTION",
+    "execution_readiness_reason": "Connected & Ready for Automated Demo Execution.",
+    "verified_at": "2026-11-09T02:27:03.123308+00:00",
+    "data_source": "Exness Public Trader API v1.0.2 (Trading Snapshot + Account Configuration)"
+  },
+  "performance": {
+    "concurrent_5_quotes_ms": 4.94,
+    "avg_quote_ms": 0.99,
+    "concurrent_5_summaries_ms": 6.35
+  }
+}
