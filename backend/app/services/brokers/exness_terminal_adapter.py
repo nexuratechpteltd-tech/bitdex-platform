@@ -65,6 +65,14 @@ class ExnessTerminalBrokerAdapter(UniversalBrokerAdapter):
             account_tier=account_tier,
             access_point=access_point,
         )
+        self._event_manager = None
+
+    @property
+    def event_manager(self):
+        if self._event_manager is None:
+            from ..exness.event_stream import ExnessTransactionEventManager
+            self._event_manager = ExnessTransactionEventManager(self.client)
+        return self._event_manager
 
     @property
     def adapter_name(self) -> str:

@@ -861,28 +861,7 @@ export default function InstitutionalTradingDashboard({
     const d = res.data;
     safetyStatusSeqRef.current += 1;
 
-    if (d.customer_status === "MT5_EXECUTION_BRIDGE_REQUIRED") {
-      setStrategyArmed(false);
-      setExecutionStatusBanner({
-        status: "WAITING",
-        headline:
-          d.customer_headline ||
-          `Account ${selectedAccountObj?.masked_account_number || ""} is API-verified — MT5 execution terminal required for automated order dispatch.`,
-        detail:
-          d.customer_detail ||
-          "Your Exness Trader API account is authenticated and synchronized, but runs on Exness Terminal rather than MetaTrader 5 (MT5).",
-        timestamp: d.timestamp_utc,
-      });
-      setActionFeedback({
-        type: "info",
-        message:
-          d.customer_headline ||
-          "Account API-verified. Connect an Exness MT5 account or enable the Exness Terminal execution bridge for automated order dispatch.",
-      });
-      fetchPerformanceAndPositions(targetAcctId);
-      fetchSystemSafetyStatus(selectedPair, targetAcctId);
-      return;
-    }
+    // Direct Native Exness execution path (MT5 execution bridge no longer required)
 
     const isNowArmed = Boolean(d.strategy_armed);
     setStrategyArmed(isNowArmed);
@@ -1214,7 +1193,7 @@ export default function InstitutionalTradingDashboard({
                 </button>
               </div>
 
-              {/* Search across complete 313-instrument Exness MT5 catalogue */}
+              {/* Search across complete 313-instrument Exness catalogue */}
               <div className="relative min-w-[240px] sm:min-w-[280px]">
                 <Search className="w-4 h-4 text-[#8B949E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
@@ -1252,7 +1231,7 @@ export default function InstitutionalTradingDashboard({
           ) : filteredPairs.length === 0 ? (
             <div className="text-center py-8 bg-[#0D1117] rounded-xl border border-[#21262D]">
               <p className="text-sm text-[#8B949E]">
-                No broker instruments matched &ldquo;{pairSearch}&rdquo; across {allPairs.length} connected Exness MT5 symbols.
+                No broker instruments matched &ldquo;{pairSearch}&rdquo; across {allPairs.length} connected Exness symbols.
               </p>
             </div>
           ) : (
@@ -1566,7 +1545,7 @@ export default function InstitutionalTradingDashboard({
                               <div className="col-span-2 sm:col-span-1">
                                 <span className="text-[#8B949E]">Server: </span>
                                 <span className="font-semibold text-white">
-                                  {acct.mt5_server || acct.server_name || "Exness-MT5Trial15"}
+                                  {acct.server_name || acct.stream_id || "Exness Direct"}
                                 </span>
                               </div>
                               <div>
@@ -2301,7 +2280,7 @@ export default function InstitutionalTradingDashboard({
                 <div className="text-[#8B949E]">Market Data</div>
                 <div className="font-semibold text-[#10B981] mt-1 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-[#10B981]" />
-                  {systemStatus.indicators.market_data.label} (Live MT5)
+                  {systemStatus.indicators.market_data.label} (Direct Exness Stream)
                 </div>
               </div>
 
@@ -2369,7 +2348,7 @@ export default function InstitutionalTradingDashboard({
                 <span className="text-[#8B949E]">Selected Account:</span>
                 <span className="font-bold text-[#10B981]">
                   {selectedAccountObj
-                    ? `${selectedAccountObj.broker_name || "Exness"} ${selectedAccountObj.account_type_label || "Demo"} ${selectedAccountObj.masked_account_number || selectedAccountObj.masked_id} (${selectedAccountObj.mt5_server || selectedAccountObj.server_name || "Exness-MT5Trial15"})`
+                    ? `${selectedAccountObj.broker_name || "Exness"} ${selectedAccountObj.account_type_label || "Demo"} ${selectedAccountObj.masked_account_number || selectedAccountObj.masked_id} (${selectedAccountObj.server_name || selectedAccountObj.stream_id || "Exness Direct"})`
                     : "Exness Demo"}
                 </span>
               </div>
