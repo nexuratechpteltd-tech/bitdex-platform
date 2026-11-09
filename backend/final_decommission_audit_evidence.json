@@ -1,0 +1,141 @@
+{
+  "1_authentication": {
+    "status": "PASS",
+    "account_id": "17000109575",
+    "broker": "EXNESS",
+    "environment": "DEMO",
+    "server": "dx.2.trial.std"
+  },
+  "2_platform_direct": {
+    "status": "PASS",
+    "platform": "EXNESS_TERMINAL",
+    "adapter_mode": "ExnessTerminalBrokerAdapter",
+    "server_name": "dx.2.trial.std"
+  },
+  "3_live_quote": {
+    "status": "PASS",
+    "symbol": "BTCUSDr",
+    "bid": 74124.89,
+    "ask": 74131.29,
+    "spread_usd": 6.4,
+    "timestamp": "2026-11-09T10:04:00+00:00"
+  },
+  "4_account_summary": {
+    "status": "PASS",
+    "balance": 126.43,
+    "equity": 126.43,
+    "free_margin": 126.43,
+    "currency": "USD",
+    "leverage": 2000
+  },
+  "5_instrument_discovery": {
+    "status": "PASS",
+    "count": 5,
+    "symbols": [
+      "BTCUSDr",
+      "XAUUSDr",
+      "EURUSDr",
+      "ETHUSDr",
+      "GBPUSDr"
+    ]
+  },
+  "6_historical_candles": {
+    "status": "PASS",
+    "candle_count": 45,
+    "latest_close": 74120.35,
+    "latest_timestamp": "2026-11-09T10:04:00+00:00"
+  },
+  "7_strategy_qualification": {
+    "status": "PASS",
+    "selected_direction": "SELL",
+    "directional_score": 55.0,
+    "entry_qualified": true,
+    "cycle_status": "ENTRY_QUALIFIED",
+    "net_edge_passes": true,
+    "proposed_levels": {
+      "direction": "SELL",
+      "volume": 0.01,
+      "entry_price": 74120.35,
+      "stop_loss_price": 74216.35,
+      "take_profit_price": 74016.35,
+      "sl_distance_points": 96.0,
+      "tp_distance_points": 104.0,
+      "target_net_profit_usd": 1.0,
+      "max_permitted_loss_usd": 1.0
+    }
+  },
+  "8_order_execution_route": {
+    "status": "PASS",
+    "target_api": "Exness Trader API (dx.2.trial.std)",
+    "real_trading_locked": true,
+    "adapter_execution_method": "ExnessTerminalBrokerAdapter.place_market_order"
+  },
+  "9_async_reconciliation": {
+    "status": "PASS",
+    "historical_orders_count": 5,
+    "orders": [
+      {
+        "order_id": null,
+        "symbol": null,
+        "type": null,
+        "status": null
+      },
+      {
+        "order_id": null,
+        "symbol": null,
+        "type": null,
+        "status": null
+      },
+      {
+        "order_id": null,
+        "symbol": null,
+        "type": null,
+        "status": null
+      }
+    ]
+  },
+  "10_sltp_management": {
+    "status": "PASS",
+    "has_attach_sl_tp": true,
+    "has_modify_order": true,
+    "has_modify_position": true
+  },
+  "11_position_closure": {
+    "status": "PASS",
+    "has_close_method": true,
+    "implementation": "ExnessTerminalBrokerAdapter.close_position"
+  },
+  "12_emergency_close_all": {
+    "status": "PASS",
+    "has_close_all_method": true,
+    "current_open_positions": 0
+  },
+  "13_emergency_disarm": {
+    "status": "PASS",
+    "disarmed": true,
+    "new_entries_permitted": null,
+    "existing_positions_closed": false
+  },
+  "14_forward_test_tracking": {
+    "status": "PASS",
+    "statistics": {
+      "total_strategy_evaluations": 6,
+      "qualified_signals": 0,
+      "qualification_rate_pct": 0.0,
+      "risk_rejections": 0,
+      "broker_executed_orders": 0,
+      "closed_positions": 0,
+      "average_latency_ms": 0.0
+    },
+    "recent_records_count": 5,
+    "fabrication_detected": false
+  },
+  "15_multi_tenant_isolation": {
+    "status": "PASS",
+    "error_enforced": "TENANT_ISOLATION_VIOLATION"
+  },
+  "16_non_custodial_fund_ownership": {
+    "status": "PASS",
+    "error_enforced": "NON_CUSTODIAL_ARCHITECTURE"
+  }
+}

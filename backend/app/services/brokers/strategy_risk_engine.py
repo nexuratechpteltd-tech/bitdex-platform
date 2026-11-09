@@ -138,6 +138,57 @@ class CommonStrategyAndRiskEngine:
         bar_body = float(last_bar["close"]) - float(last_bar["open"])
         candle_structure_score = round((bar_body / bar_range) * 100.0, 1)
 
+        # ─── MACD (12, 26, 9) ───
+        def _calc_ema_series(series: List[float], period: int) -> List[float]:
+            if not series:
+                return []
+            k = 2.0 / (period + 1.0)
+            res = [series[0]]
+            for val in series[1:]:
+                res.append((val * k) + (res[-1] * (1.0 - k)))
+            return res
+
+        ema12_series = _calc_ema_series(closes, 12)
+        ema26_series = _calc_ema_series(closes, 26)
+        macd_series = [e12 - e26 for e12, e26 in zip(ema12_series, ema26_series)]
+        signal_series = _calc_ema_series(macd_series, 9)
+        macd_val = round(macd_series[-1], digits) if macd_series else 0.0
+        macd_signal = round(signal_series[-1], digits) if signal_series else 0.0
+        macd_hist = round(macd_val - macd_signal, digits)
+        macd_status = "Bullish Crossover" if macd_hist > 0 else ("Bearish Divergence" if macd_hist < 0 else "Neutral")
+
+        # ─── Support & Resistance (Swing Highs / Lows) ───
+        recent_bars = klines[-30:] if len(klines) >= 30 else klines
+        support_price = round(min(float(k["low"]) for k in recent_bars), digits)
+        resistance_price = round(max(float(k["high"]) for k in recent_bars), digits)
+        dist_to_support = round(abs(current_bid - support_price), digits)
+        dist_to_resistance = round(abs(resistance_price - current_ask), digits)
+
+        # ─── Trend Direction ───
+        if ema9 > ema21 and ema21 > ema50:
+            trend_direction = "BULLISH"
+        elif ema9 < ema21 and ema21 < ema50:
+            trend_direction = "BEARISH"
+        else:
+            trend_direction = "NEUTRAL / CONSOLIDATION"
+
+        # ─── Volatility Regime ───
+        is_gold = "XAU" in broker_sym.upper() or "GOLD" in broker_sym.upper()
+        if is_gold:
+            if atr < 0.25:
+                volatility_regime = "LOW_VOLATILITY"
+            elif atr <= 2.50:
+                volatility_regime = "OPTIMAL_VOLATILITY"
+            else:
+                volatility_regime = "ELEVATED_VOLATILITY"
+        else:
+            if atr_pct < 0.04:
+                volatility_regime = "LOW_VOLATILITY"
+            elif atr_pct <= 0.25:
+                volatility_regime = "OPTIMAL_VOLATILITY"
+            else:
+                volatility_regime = "ELEVATED_VOLATILITY"
+
         spread_usd = round(abs(current_ask - current_bid), digits)
         spread_bps = round((spread_usd / max(1e-8, current_bid)) * 10000.0, 2)
         max_spread_bps = 8.0
@@ -235,6 +286,10 @@ class CommonStrategyAndRiskEngine:
             "momentum_status": f"{mom_pct:+.2f}% (5-bar impulse)",
             "momentum_value": mom_pct,
             "candle_structure_score": candle_structure_score,
+            "macd": {"line": macd_val, "signal": macd_signal, "histogram": macd_hist, "status": macd_status},
+            "support_resistance": {"support": support_price, "resistance": resistance_price, "distance_to_support": dist_to_support, "distance_to_resistance": dist_to_resistance},
+            "trend_direction": trend_direction,
+            "volatility_regime": volatility_regime,
             "ema_status": f"EMA9 (${ema9:.2f}) {'<' if ema9 < ema21 else '>'} EMA21 (${ema21:.2f})",
             "ema9": round(ema9, digits),
             "ema21": round(ema21, digits),

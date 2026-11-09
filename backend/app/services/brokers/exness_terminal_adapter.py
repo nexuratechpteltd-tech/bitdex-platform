@@ -181,12 +181,17 @@ class ExnessTerminalBrokerAdapter(UniversalBrokerAdapter):
         }
 
     async def get_supported_instruments(self) -> List[Dict[str, Any]]:
+        # Gold / XAUUSD strictly first as primary institutional instrument
         featured = [
-            ("BTCUSDr", "BTCUSD", "Bitcoin vs US Dollar", "CRYPTO"),
             ("XAUUSDr", "XAUUSD", "Gold vs US Dollar", "METALS"),
             ("EURUSDr", "EURUSD", "Euro vs US Dollar", "FOREX"),
-            ("ETHUSDr", "ETHUSD", "Ethereum vs US Dollar", "CRYPTO"),
             ("GBPUSDr", "GBPUSD", "Great Britain Pound vs US Dollar", "FOREX"),
+            ("USDJPYr", "USDJPY", "US Dollar vs Japanese Yen", "FOREX"),
+            ("AUDUSDr", "AUDUSD", "Australian Dollar vs US Dollar", "FOREX"),
+            ("USDCADr", "USDCAD", "US Dollar vs Canadian Dollar", "FOREX"),
+            ("USDCHFr", "USDCHF", "US Dollar vs Swiss Franc", "FOREX"),
+            ("BTCUSDr", "BTCUSD", "Bitcoin vs US Dollar", "CRYPTO"),
+            ("ETHUSDr", "ETHUSD", "Ethereum vs US Dollar", "CRYPTO"),
             ("SOLUSDr", "SOLUSD", "Solana vs US Dollar", "CRYPTO"),
         ]
         all_syms = set(await self.client.get_symbols())
@@ -194,20 +199,22 @@ class ExnessTerminalBrokerAdapter(UniversalBrokerAdapter):
         for ui_sym, broker_sym, desc, cat in featured:
             if not all_syms or broker_sym in all_syms:
                 spec = await self.client.get_symbol_info(broker_sym) or {}
+                contract_size = 100.0 if "XAU" in broker_sym else float(spec.get("contract_size", 1.0))
                 result.append({
                     "symbol": ui_sym,
                     "broker_symbol": broker_sym,
                     "canonical_symbol": broker_sym,
-                    "display_name": f"{broker_sym[:3]}/{broker_sym[3:]}",
+                    "display_name": f"{broker_sym[:3]}/{broker_sym[3:]}" if len(broker_sym) == 6 else broker_sym,
                     "description": spec.get("name", desc),
                     "category": spec.get("category", cat),
-                    "digits": spec.get("digits", 2),
-                    "contract_size": spec.get("contract_size", 1.0),
+                    "digits": spec.get("digits", 3 if "XAU" in broker_sym else 2),
+                    "contract_size": contract_size,
                     "min_volume": spec.get("min_volume", 0.01),
                     "max_volume": spec.get("max_volume", 200.0),
                     "volume_step": spec.get("volume_step", 0.01),
                     "is_tradable": spec.get("is_tradable", True),
                     "adapter": self.adapter_name,
+                    "is_primary": (broker_sym == "XAUUSD"),
                 })
         return result
 

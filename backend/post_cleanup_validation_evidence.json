@@ -1,0 +1,88 @@
+{
+  "1_backend_online": {
+    "status": "PASS"
+  },
+  "2_frontend_online": {
+    "status": "PASS"
+  },
+  "3_pm2_healthy": {
+    "status": "PASS",
+    "processes": [
+      "tauric-backend-staging",
+      "tauric-dashboard-staging"
+    ]
+  },
+  "4_customer_login": {
+    "status": "PASS",
+    "user_id": "USR-904424B4FB"
+  },
+  "5_exness_auth": {
+    "status": "PASS",
+    "account_id": "17000109575",
+    "server": "dx.2.trial.std"
+  },
+  "6_balance_equity": {
+    "status": "PASS",
+    "balance": 126.43,
+    "equity": 126.43,
+    "free_margin": 126.43,
+    "currency": "USD"
+  },
+  "7_live_quotes": {
+    "status": "PASS",
+    "symbol": "BTCUSDr",
+    "bid": 74043.04,
+    "ask": 74049.44,
+    "spread_usd": 6.4
+  },
+  "8_instrument_discovery": {
+    "status": "PASS",
+    "count": 5,
+    "symbols": [
+      "BTCUSDr",
+      "XAUUSDr",
+      "EURUSDr",
+      "ETHUSDr",
+      "GBPUSDr"
+    ]
+  },
+  "9_strategy_qualification": {
+    "status": "PASS",
+    "direction": "SELL",
+    "score": 100.0,
+    "cycle_status": "ENTRY_QUALIFIED"
+  },
+  "10_risk_engine": {
+    "status": "PASS",
+    "passes_net_edge_gate": true,
+    "atr14_points": 43.01
+  },
+  "11_websocket_events": {
+    "status": "PASS",
+    "adapter_event_stream": "ExnessTransactionEventStream",
+    "supported": true
+  },
+  "12_position_history": {
+    "status": "PASS",
+    "count": 5
+  },
+  "13_forward_test_ledger": {
+    "status": "PASS",
+    "evaluations": null
+  },
+  "14_emergency_disarm": {
+    "status": "PASS",
+    "disarmed": true,
+    "existing_positions_closed": false
+  },
+  "15_emergency_close_all": {
+    "status": "PASS",
+    "open_positions": 0
+  },
+  "16_tenant_isolation": {
+    "status": "PASS"
+  },
+  "17_real_trading_locked": {
+    "status": "PASS"
+  }
+}

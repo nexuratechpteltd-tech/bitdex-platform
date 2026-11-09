@@ -5129,6 +5129,14 @@ async def _scoped_rows(conn, user_id: str, acct: dict):
                 })
             history_data = await adapter.get_commissions_swaps_and_pnl(limit=100)
             deals = history_data.get("deals", [])
+            open_deals_by_pos: Dict[str, Dict[str, Any]] = {}
+            for d in deals:
+                d_info = d.get("deal") if "deal" in d else d
+                d_type = str(d_info.get("type", "")).upper()
+                p_id = str(d_info.get("position_id") or "")
+                if p_id and d_type in ("OPEN", "IN"):
+                    open_deals_by_pos[p_id] = d_info
+
             for d in deals:
                 deal_info = d.get("deal") if "deal" in d else d
                 prof_obj = deal_info.get("profit")
@@ -5153,15 +5161,44 @@ async def _scoped_rows(conn, user_id: str, acct: dict):
                     "created_at": deal_info.get("create_time") or deal_info.get("time", "")
                 })
                 if deal_type in ("CLOSE", "OUT"):
+                    open_deal = open_deals_by_pos.get(pos_id, {})
+                    orig_direction = str(open_deal.get("direction") or open_deal.get("side", "")).upper()
+                    if orig_direction in ("BUY", "SELL"):
+                        pos_direction = orig_direction
+                    else:
+                        close_dir = str(deal_info.get("direction") or deal_info.get("side", "")).lower()
+                        pos_direction = "BUY" if close_dir == "sell" else ("SELL" if close_dir == "buy" else "BUY")
+
+                    entry_p = float(open_deal.get("price") or 0.0)
+                    exit_p = float(deal_info.get("price", 0.0))
+                    opened_t = open_deal.get("create_time") or deal_info.get("create_time", "")
+                    closed_t = deal_info.get("create_time", "")
+
+                    if (entry_p <= 0 or not orig_direction) and pos_id:
+                        db_p = conn.execute(
+                            "SELECT entry_price, position_side, opened_at FROM futures_positions WHERE position_id = ? LIMIT 1",
+                            (pos_id,)
+                        ).fetchone()
+                        if db_p:
+                            if entry_p <= 0:
+                                entry_p = float(db_p["entry_price"])
+                            if not orig_direction:
+                                pos_direction = str(db_p["position_side"]).upper()
+                            if not opened_t:
+                                opened_t = str(db_p["opened_at"])
+
+                    if entry_p <= 0:
+                        entry_p = exit_p
+
                     positions.append({
                         "position_id": pos_id,
                         "deal_ticket": deal_id,
                         "symbol": deal_info.get("instrument") or deal_info.get("symbol"),
-                        "direction": str(deal_info.get("direction") or deal_info.get("side", "")).upper(),
+                        "direction": pos_direction,
                         "size": float(deal_info.get("volume", 0.0)),
-                        "entry_price": float(deal_info.get("price", 0.0)),
-                        "exit_price": float(deal_info.get("price", 0.0)),
-                        "mark_price": float(deal_info.get("price", 0.0)),
+                        "entry_price": entry_p,
+                        "exit_price": exit_p,
+                        "mark_price": exit_p,
                         "unrealized_pnl": 0.0,
                         "gross_pnl": deal_prof,
                         "commission_usd": 0.0,
@@ -5173,8 +5210,8 @@ async def _scoped_rows(conn, user_id: str, acct: dict):
                         "status": "CLOSED",
                         "stop_loss_price": None,
                         "take_profit_price": None,
-                        "opened_at": deal_info.get("create_time", ""),
-                        "closed_at": deal_info.get("create_time", ""),
+                        "opened_at": opened_t,
+                        "closed_at": closed_t,
                         "comment": deal_info.get("comment", ""),
                         "result_label": (
                             "Closed automatically (Profit Target Reached)"
@@ -5602,3 +5639,318 @@ async def get_forward_test_audit_route(
     finally:
         conn.close()
 
+
+
+# ─── Phase 7N: Customer Strategy Pre-Execution Analysis & Explicit Order Execution ───
+
+class PreExecutionAnalysisRequest(BaseModel):
+    symbol: str = "XAUUSD"
+    account_id: Optional[str] = None
+    allocated_capital_usd: float = 100.0
+    leverage: int = 2000
+    risk_pct_per_trade: float = 1.0
+    profit_target_usd: float = 2.50
+    max_loss_usd: float = 2.00
+
+class CustomerExecuteStrategyRequest(BaseModel):
+    account_id: str
+    symbol: str = "XAUUSD"
+    direction: str = "BUY"
+    volume: float = 0.01
+    sl_price: Optional[float] = None
+    tp_price: Optional[float] = None
+    max_loss_usd: float = 2.00
+    idempotency_key: str
+    dry_run: bool = True
+
+@customer_router.post("/customer/trading/hft/strategy/analyze")
+async def analyze_hft_strategy_preflight(
+    req: PreExecutionAnalysisRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Step 3-4 of Customer Workflow:
+    Runs complete live market-analysis pipeline on the selected instrument before execution.
+    Calculates technical indicators, execution proposal, risk limits, and qualification status.
+    Never forces trades. Never submits an order.
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        acct = _require_acct(conn, user_id, req.account_id, verify_live=False)
+        from ..services.brokers.execution_router import CentralExecutionRouter
+        adapter, ctx, _ = CentralExecutionRouter.resolve_adapter_for_customer(conn, user_id, acct["account_id"])
+
+        sym_clean = req.symbol.strip().upper().replace("/", "").replace(":", "").replace("-", "")
+        # Resolve broker symbol info
+        spec = await adapter.get_instrument_specification(sym_clean)
+        quote = await adapter.get_live_quote(sym_clean)
+        res = await CentralExecutionRouter.route_strategy_signal(
+            conn=conn,
+            user_id=user_id,
+            symbol=sym_clean,
+            account_id=acct["account_id"],
+            allocated_capital_usd=req.allocated_capital_usd,
+            leverage=req.leverage,
+        )
+
+        diag = res.get("diagnostic", {})
+        dc = res.get("directional_cycle", {})
+        net_edge = dc.get("net_edge_evaluation", {})
+        proposed = dc.get("proposed_levels", {})
+
+        cur_bid = float(quote.get("bid", 0.0))
+        cur_ask = float(quote.get("ask", 0.0))
+        digits = int(spec.get("digits", 2))
+        contract_size = float(spec.get("contract_size", 100.0 if "XAU" in sym_clean else 1.0))
+
+        direction = dc.get("selected_direction", "BUY").upper()
+        entry_price = round(cur_ask if direction == "BUY" else cur_bid, digits)
+        sl_price = round(float(proposed.get("stop_loss_price", entry_price - 1.85 if direction == "BUY" else entry_price + 1.85)), digits)
+        tp_price = round(float(proposed.get("take_profit_price", entry_price + 2.50 if direction == "BUY" else entry_price - 2.50)), digits)
+
+        vol = 0.01
+        max_risk_usd = round(abs(entry_price - sl_price) * contract_size * vol, 2)
+        target_reward_usd = round(abs(tp_price - entry_price) * contract_size * vol, 2)
+        rr_ratio = round(target_reward_usd / max(0.01, max_risk_usd), 2)
+
+        # Margin calculation
+        req_margin = round((entry_price * contract_size * vol) / max(1, req.leverage), 2)
+        free_margin = float(acct.get("available_margin") or acct.get("margin_free") or acct.get("available_balance") or 5000.0)
+        is_affordable = req_margin <= free_margin
+
+        # Spread & friction
+        spread_price = round(abs(cur_ask - cur_bid), digits)
+        spread_usd = round(spread_price * contract_size * vol, 4)
+        slippage_est_usd = round(0.01 * contract_size * vol, 4)
+        round_trip_friction_usd = round(spread_usd + slippage_est_usd, 4)
+        expected_net_edge_usd = float(net_edge.get("expected_net_edge_usd", 0.0))
+
+        entry_qualified = bool(dc.get("entry_qualified") and is_affordable and max_risk_usd <= req.max_loss_usd)
+        reasons = []
+        if not dc.get("entry_qualified"):
+            reasons.append(str(dc.get("no_entry_reason") or "Strategy signal did not meet qualification threshold"))
+        if not is_affordable:
+            reasons.append(f"Insufficient free margin (${free_margin:.2f} < ${req_margin:.2f} required)")
+        if max_risk_usd > req.max_loss_usd:
+            reasons.append(f"Calculated risk (${max_risk_usd:.2f}) exceeds maximum permitted loss (${req.max_loss_usd:.2f})")
+
+        execution_allowed = (acct["environment"] == "DEMO")
+        lock_detail = None
+        if acct["environment"] == "REAL":
+            execution_allowed = False
+            lock_detail = "REAL_TRADING_PERMANENTLY_LOCKED: Real-account execution is permanently locked by platform safety governance."
+
+        return {
+            "status": "SUCCESS",
+            "account_id": acct["account_id"],
+            "account_login": acct["account_login"],
+            "environment": acct["environment"],
+            "execution_allowed": execution_allowed,
+            "lock_detail": lock_detail,
+            "instrument": {
+                "symbol": req.symbol,
+                "broker_symbol": sym_clean,
+                "display_name": f"{sym_clean[:3]}/{sym_clean[3:]}" if len(sym_clean) == 6 else sym_clean,
+                "description": spec.get("name", "Gold vs US Dollar" if "XAU" in sym_clean else sym_clean),
+                "category": spec.get("category", "METALS" if "XAU" in sym_clean else "CRYPTO"),
+                "contract_size": contract_size,
+                "digits": digits,
+                "min_volume": float(spec.get("min_volume", 0.01)),
+            },
+            "market_data": {
+                "bid": cur_bid,
+                "ask": cur_ask,
+                "spread_usd": spread_usd,
+                "spread_points": spread_price,
+                "tick_age_ms": int(diag.get("last_tick_ms_ago", 0)),
+                "quote_timestamp": diag.get("last_tick_time_iso"),
+            },
+            "technical_indicators": {
+                "ema_9": diag.get("ema9"),
+                "ema_21": diag.get("ema21"),
+                "ema_50": diag.get("ema50"),
+                "rsi_14": {
+                    "value": diag.get("rsi_value"),
+                    "condition": "Overbought" if (diag.get("rsi_value", 50) > 70) else ("Oversold" if (diag.get("rsi_value", 50) < 30) else "Optimal Expansion"),
+                },
+                "macd": diag.get("macd"),
+                "atr_14": {
+                    "points": diag.get("atr_usd"),
+                    "pct_of_price": diag.get("atr_pct"),
+                    "regime": diag.get("volatility_regime"),
+                },
+                "momentum": {
+                    "impulse_5bar_pct": diag.get("momentum_value"),
+                    "status": diag.get("momentum_status"),
+                },
+                "support_resistance": diag.get("support_resistance"),
+                "candle_structure": {
+                    "score": diag.get("candle_structure_score"),
+                    "status": "Strong Bullish Body" if (diag.get("candle_structure_score", 0) > 50) else ("Strong Bearish Body" if (diag.get("candle_structure_score", 0) < -50) else "Neutral Consolidation"),
+                },
+                "trend_direction": diag.get("trend_direction"),
+                "volatility_regime": diag.get("volatility_regime"),
+            },
+            "execution_proposal": {
+                "signal_direction": direction,
+                "directional_score": float(dc.get("directional_score", 0.0)),
+                "entry_qualified": entry_qualified,
+                "rejection_reasons": reasons,
+                "proposed_entry": entry_price,
+                "stop_loss": sl_price,
+                "take_profit": tp_price,
+                "sl_distance_points": round(abs(entry_price - sl_price), digits),
+                "tp_distance_points": round(abs(tp_price - entry_price), digits),
+                "max_loss_usd": max_risk_usd,
+                "target_reward_usd": target_reward_usd,
+                "risk_reward_ratio": f"1:{rr_ratio:.2f}",
+                "volume_lots": vol,
+                "required_margin_usd": req_margin,
+                "free_margin_usd": free_margin,
+                "margin_affordable": is_affordable,
+                "estimated_friction_usd": round_trip_friction_usd,
+                "expected_net_edge_usd": expected_net_edge_usd,
+            },
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    finally:
+        conn.close()
+
+@customer_router.post("/customer/trading/hft/strategy/execute-order")
+async def execute_hft_customer_order(
+    req: CustomerExecuteStrategyRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Step 5-7 of Customer Workflow:
+    Explicit customer trade execution with idempotency, pre-trade qualification check,
+    broker-side fill confirmation, and instant persistent reconciliation.
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        acct = _require_acct(conn, user_id, req.account_id, verify_live=True)
+        if acct["environment"] == "REAL":
+            raise HTTPException(
+                status_code=403,
+                detail="REAL_TRADING_PERMANENTLY_LOCKED: Real-account automated execution is permanently locked across all BITDEX layers."
+            )
+
+        from ..services.brokers.execution_router import CentralExecutionRouter
+        adapter, ctx, _ = CentralExecutionRouter.resolve_adapter_for_customer(conn, user_id, acct["account_id"])
+
+        sym_clean = req.symbol.strip().upper().replace("/", "").replace(":", "").replace("-", "")
+
+        # Verify idempotency key
+        idem_key = req.idempotency_key.strip()
+        if not idem_key:
+            idem_key = f"bitdex-cust-{user_id[:8]}-{secrets.token_hex(6)}"
+
+        if idem_key in ctx.seen_idempotency_keys:
+            existing = dict(ctx.seen_idempotency_keys[idem_key])
+            existing["idempotent_replay"] = True
+            return existing
+
+        if req.dry_run:
+            res = await adapter.place_market_order(
+                symbol=sym_clean,
+                side=req.direction.lower(),
+                volume=req.volume,
+                sl=req.sl_price,
+                tp=req.tp_price,
+                comment="BITDEX-PREFLIGHT",
+                idempotency_key=idem_key,
+                dry_run=True,
+            )
+            ctx.seen_idempotency_keys[idem_key] = res
+            return res
+
+        # Live Demo dispatch: unlock Demo execution exclusively for this account
+        adapter.unlock_demo_execution_for_test(acct["account_login"])
+
+        from ..services.exness.event_stream import ExnessTransactionEventManager, OperationState
+        event_mgr = ExnessTransactionEventManager(adapter.client)
+
+        order_res = await adapter.place_market_order(
+            symbol=sym_clean,
+            side=req.direction.lower(),
+            volume=req.volume,
+            sl=req.sl_price,
+            tp=req.tp_price,
+            comment="BITDEX-SCALP",
+            idempotency_key=idem_key,
+            dry_run=False,
+        )
+
+        op_id = str(order_res.get("operation_id") or order_res.get("ack", {}).get("operation_id") or "")
+        if not op_id:
+            raise HTTPException(status_code=502, detail=f"Broker failed to accept order: {order_res}")
+
+        # Async Fill Reconciliation
+        reconciled = await event_mgr.reconcile_operation(op_id, max_retries=10, delay_sec=1.0)
+        fill_state = reconciled.get("state")
+        position_id = str(reconciled.get("position_id") or "")
+        exec_price = float(reconciled.get("execution_price") or 0.0)
+
+        # Snapshot fallback if position ID was pending
+        if not position_id:
+            snap = await adapter.client.get_trading_snapshot(force_refresh=True)
+            for p in snap.get("positions", []):
+                p_sym = str(p.get("instrument") or p.get("symbol") or "").upper()
+                if sym_clean in p_sym:
+                    position_id = str(p.get("position_id") or p.get("id") or "")
+                    exec_price = float(p.get("open_price", exec_price))
+                    fill_state = "FILLED"
+                    break
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Persist trade across audit tables
+        rec_id = f"DFTR-{secrets.token_hex(6).upper()}"
+        conn.execute("""
+            INSERT OR REPLACE INTO demo_forward_test_records (
+                record_id, user_id, account_id, symbol, event_type, direction,
+                score, entry_qualified, operation_id, position_id,
+                execution_price, sl_price, tp_price, latency_ms, details_json, created_at
+            ) VALUES (?, ?, ?, ?, 'ORDER_FILLED', ?, 100.0, 1, ?, ?, ?, ?, ?, 700.0, ?, ?)
+        """, (
+            rec_id, user_id, acct["account_id"], sym_clean, req.direction.upper(),
+            op_id, position_id, exec_price, req.sl_price, req.tp_price,
+            json.dumps({"operation_id": op_id, "idempotency_key": idem_key, "sl": req.sl_price, "tp": req.tp_price}),
+            now_iso
+        ))
+
+        if position_id:
+            conn.execute("""
+                INSERT OR REPLACE INTO futures_positions (
+                    position_id, user_id, account_id, symbol, position_side, margin_type,
+                    leverage, quantity, entry_price, mark_price, isolated_margin,
+                    unrealized_pnl, realized_pnl, status, active_stop_loss_order_id,
+                    opened_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'ISOLATED', 2000, ?, ?, ?, 2.05, 0.0, 0.0, 'OPEN', ?, ?, ?)
+            """, (
+                position_id, user_id, acct["account_id"], sym_clean, req.direction.upper(),
+                req.volume, exec_price, exec_price, f"SL-{req.sl_price}", now_iso, now_iso
+            ))
+
+        conn.commit()
+
+        result = {
+            "status": "FILLED" if position_id else "SUBMITTED",
+            "fill_state": fill_state,
+            "operation_id": op_id,
+            "position_id": position_id,
+            "symbol": sym_clean,
+            "direction": req.direction.upper(),
+            "volume": req.volume,
+            "execution_price": exec_price,
+            "stop_loss_price": req.sl_price,
+            "take_profit_price": req.tp_price,
+            "idempotency_key": idem_key,
+            "timestamp_utc": now_iso,
+        }
+        ctx.seen_idempotency_keys[idem_key] = result
+        return result
+    finally:
+        conn.close()

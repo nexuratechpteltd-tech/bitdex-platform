@@ -1,0 +1,127 @@
+{
+  "timestamp_utc": "2026-11-09T10:58:30Z",
+  "audit_version": "BITDEX_FORENSIC_AUDIT_v1.0",
+  "staging_server": "169.58.218.168",
+  "git_branch": "migration/exness-native-direct-only",
+  "git_commit": "8b4ee39",
+  "user_identities_reconciled": {
+    "admin_user": {
+      "user_id": "USR-ADM-B022F490",
+      "email": "hello@nexura.ltd",
+      "role": "SUPERADMIN",
+      "accounts": [
+        {
+          "account_number": "16000629657",
+          "environment": "REAL",
+          "platform": "EXNESS_TERMINAL",
+          "server": "https://api.exness.com (ap-2c49ed65.exness.com / dx.2.real.std)",
+          "connection_id": "EXN-CONN-1F331CF65942",
+          "is_active": 1,
+          "verification_status": "ACCOUNT_DATA_VERIFIED",
+          "balance_usd": 0.00,
+          "equity_usd": 0.00,
+          "margin_free_usd": 0.00,
+          "api_key_fingerprint": "exnsk-271d...3f4c",
+          "execution_lock": "REAL_EXECUTION_LOCKED",
+          "test_trades_executed": 0
+        },
+        {
+          "account_number": "17000660016",
+          "environment": "DEMO",
+          "platform": "EXNESS_TERMINAL",
+          "server": "https://api.exness.com (dx.2.trial.std)",
+          "connection_id": "EXN-CONN-02926D69E193",
+          "is_active": 0,
+          "verification_status": "AUTH_FAILED",
+          "error_type": "INVALID_API_KEY",
+          "broker_response": "HTTP 401 AUTH_INVALID_API_KEY (invalid api key)",
+          "root_cause": "API Key exnsk-271d... was generated in Exness PA for Real account 16000629657 and has no scope/permission for Demo account 17000660016."
+        }
+      ]
+    },
+    "customer_user": {
+      "user_id": "USR-904424B4FB",
+      "email": "aliajmaltca22@gmail.com",
+      "username": "ali_trader",
+      "role": "CUSTOMER",
+      "accounts": [
+        {
+          "account_number": "17000109575",
+          "environment": "DEMO",
+          "platform": "EXNESS_TERMINAL",
+          "server": "https://api.exness.com (ap-58ee8e27.exness.com / dx.2.trial.std)",
+          "connection_id": "EXN-CONN-F98AE3CCB29B",
+          "is_active": 1,
+          "verification_status": "ACCOUNT_DATA_VERIFIED",
+          "balance_usd": 124.78,
+          "equity_usd": 124.78,
+          "margin_free_usd": 124.78,
+          "api_key_fingerprint": "exnsk-2dd0...ef4e",
+          "execution_lock": "DEMO_ENABLED"
+        }
+      ]
+    }
+  },
+  "previous_gold_trade_forensics": {
+    "account_id": "17000109575",
+    "owner_user_id": "USR-904424B4FB",
+    "owner_name": "Ali Ajmal (Customer)",
+    "connection_id": "EXN-CONN-F98AE3CCB29B",
+    "api_key_used": "exnsk-2dd0dc6b411962d233aa3defe792d9856122c829f9ad6343da2abcaead95ef4e",
+    "server": "dx.2.trial.std",
+    "environment": "DEMO",
+    "order_id": "147951100",
+    "broker_position_id": "72086963",
+    "entry_deal_id": "148122750",
+    "close_deal_id": "148124106",
+    "stop_loss_order_id": "147951101",
+    "entry_price": 4096.715,
+    "exit_price": 4098.362,
+    "realized_pnl_usd": -1.65,
+    "close_trigger": "BROKER_ATTACHED_STOP_LOSS",
+    "open_positions_remaining": 0,
+    "account_classification": "BROKER_DEMO_TRIAL_ACCOUNT",
+    "was_real_account": false,
+    "was_mock_sandbox": false
+  },
+  "exness_api_architecture_findings": {
+    "zero_input_enumeration_supported": false,
+    "endpoint_v1_accounts_status": 404,
+    "account_scoping_behavior": "Strictly account-scoped or environment-scoped per API key in Exness Personal Area",
+    "cross_environment_access": "Single API key cannot access both Real and Demo unless explicitly authorized in Key Management",
+    "real_key_on_demo_account_result": "HTTP 401 AUTH_INVALID_API_KEY"
+  },
+  "tenant_isolation_audit": {
+    "admin_query_results": ["16000629657"],
+    "customer_query_results": ["17000109575"],
+    "cross_tenant_leakage_detected": false,
+    "status": "STRICT_ISOLATION_CONFIRMED"
+  },
+  "live_gold_feed_verification": {
+    "symbol": "XAUUSD",
+    "bid": 4098.909,
+    "ask": 4099.149,
+    "spread_usd": 0.24,
+    "spread_bps": 0.59,
+    "digits": 3,
+    "source": "EXNESS_TERMINAL_LIVE_STREAM",
+    "stream_id": "dx.2.trial.std",
+    "quote_age_ms": 197,
+    "is_tradable": true,
+    "status": "LIVE_FEED_ACTIVE"
+  },
+  "strategy_readiness_assessment": {
+    "symbol": "XAUUSDr",
+    "engine": "AutomatedHighFrequencyScalpingEngine",
+    "selected_direction": "BUY",
+    "directional_score": 100.0,
+    "cycle_status": "ENTRY_QUALIFIED",
+    "proposed_volume": 0.01,
+    "proposed_entry": 4099.15,
+    "proposed_sl": 4098.19,
+    "proposed_tp": 4100.19,
+    "orders_submitted": 0,
+    "new_positions_opened": 0,
+    "real_trading_permanently_locked": true
+  }
+}
