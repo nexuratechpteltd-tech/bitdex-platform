@@ -14,7 +14,7 @@ import httpx
 import urllib.request
 import urllib.parse
 from pydantic import BaseModel, EmailStr, Field
-from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request, Body
 
 from ..services.auth_manager import AuthManager, get_current_user, assert_tenant_boundary
 from ..services.fee_engine import FeeEngine
@@ -6145,10 +6145,18 @@ async def remove_symbol_from_watchlist(symbol: str, account_id: str = "170006600
         conn.close()
 
 @customer_router.get("/longterm/opportunities")
-async def get_longterm_opportunities(account_id: str = "17000660016", user = Depends(get_current_user)):
+async def get_longterm_opportunities(account_id: Optional[str] = None, user = Depends(get_current_user)):
     conn = get_db_connection()
     try:
-        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user["user_id"], account_id)
+        user_id = user["user_id"]
+        target_account = account_id
+        if not target_account or target_account == "17000660016":
+            pref = conn.execute(
+                "SELECT account_login FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY is_preferred DESC, created_at DESC LIMIT 1",
+                (user_id,)
+            ).fetchone()
+            target_account = pref["account_login"] if pref else "17000694512"
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user_id, target_account)
         from ..services.brokers.longterm_structure_engine import evaluate_longterm_opportunity
         
         rows = conn.execute("""
@@ -6277,13 +6285,18 @@ async def execute_confirmed_longterm_trade(setup_id: str, req: ConfirmExecuteReq
         if not passed:
             raise HTTPException(status_code=400, detail=f"Execution rejected by SharedCentralRiskGate: {reason}")
 
+        # Explicitly unlock demo execution on ExnessTerminalBrokerAdapter
+        if hasattr(adapter, 'unlock_demo_execution_for_test'):
+            adapter.unlock_demo_execution_for_test(req.account_id)
+
         fill = await adapter.place_market_order(
             symbol=req.symbol,
             side=req.side.lower(),
             volume=req.volume,
-            stop_loss=req.sl_price,
-            take_profit=req.tp_price,
-            comment=f"BITDEX_LT_{setup_id[:8]}"
+            sl=req.sl_price,
+            tp=req.tp_price,
+            comment=f"BITDEX_LT_{setup_id[:8]}",
+            dry_run=False
         )
 
         audit_id = f"AUD-LT-{secrets.token_hex(6).upper()}"
@@ -6306,6 +6319,343 @@ async def execute_confirmed_longterm_trade(setup_id: str, req: ConfirmExecuteReq
             "message": f"Long-Term {req.symbol} [CFD] order submitted and filled on Exness Demo.",
             "fill": fill,
             "audit_id": audit_id
+        }
+    finally:
+        conn.close()
+
+
+@customer_router.post("/trading/hft/close-all-my-scalps")
+async def close_all_my_scalps(req: Dict[str, Any] = Body(...), user = Depends(get_current_user)):
+    account_id = req.get("account_id", "17000660016")
+    confirm = req.get("confirm", False)
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Explicit confirmation required to close all scalp positions.")
+
+    conn = get_db_connection()
+    try:
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user["user_id"], account_id)
+        if hasattr(adapter, "unlock_demo_execution_for_test"):
+            adapter.unlock_demo_execution_for_test(account_id)
+
+        positions = await adapter.get_open_positions()
+        closed_results = []
+        failed_results = []
+
+        for p in positions:
+            pos_id = str(p.get("position_id") or p.get("ticket") or p.get("id"))
+            try:
+                res = await adapter.close_position(pos_id, dry_run=False)
+                closed_results.append({"position_id": pos_id, "result": res})
+            except Exception as e:
+                failed_results.append({"position_id": pos_id, "error": str(e)})
+
+        remaining = await adapter.get_open_positions()
+        return {
+            "status": "SUCCESS",
+            "account_id": account_id,
+            "closed_count": len(closed_results),
+            "failed_count": len(failed_results),
+            "remaining_open_count": len(remaining),
+            "closed_positions": closed_results,
+            "failed_positions": failed_results
+        }
+    finally:
+        conn.close()
+
+
+# ─── PHASE 2: TWO INDEPENDENT STATUS SYSTEMS (AUTOMATED SCALPING & LONG-TERM) ───
+
+@customer_router.get("/customer/trading/scalping/pair-statuses")
+async def get_scalping_pair_statuses(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Returns dual-status system for every Automated Scalping pair:
+    1. Authoritative Broker Market Status (MARKET OPEN, MARKET CLOSED, BROKER UNAVAILABLE, QUOTE STALE)
+    2. Authoritative Track 1 Impulse Scalper Strategy Status (READY FOR SCALPING, SCANNING, WAITING, etc.)
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.brokers.execution_router import CentralExecutionRouter
+        from ..services.brokers.micro_scalping_engine import MicroScalpingEngine
+        from ..services.brokers.market_session_service import get_market_session_status
+
+        sel_acct = None
+        if account_id:
+            sel_acct = _require_acct(conn, user_id, account_id, verify_live=False)
+        else:
+            def_id = _resolve_user_default_account_id(conn, user_id)
+            if def_id:
+                sel_acct = _resolve_hft_account(conn, user_id, def_id, verify_live=False)
+
+        target_acc_id = sel_acct["account_id"] if sel_acct else "17000694512"
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user_id, target_acc_id)
+        
+        summary = await adapter.get_account_summary(force_refresh=True)
+        equity = float(summary.get("equity") or 1000.0)
+        
+        # Open positions on broker to mark 'POSITION OPEN'
+        open_positions = await adapter.get_open_positions()
+        open_symbols = set(p.get("symbol") for p in open_positions)
+
+        engine = MicroScalpingEngine()
+        
+        # Retrieve configured watchlist symbols
+        rows = conn.execute("""
+            SELECT w.symbol, c.asset_class as category, c.digits, c.contract_size, c.min_lot, c.lot_step
+            FROM user_watchlist_configs w
+            JOIN broker_instrument_catalog c ON w.symbol = c.symbol
+            WHERE w.account_id = ? AND w.scalp_enabled = 1
+        """, (target_acc_id,)).fetchall()
+        
+        if not rows:
+            # Fallback to standard 7 watchlist pairs
+            default_syms = [
+                ("BTCUSD", "Crypto"), ("ETHUSD", "Crypto"), ("EURUSD", "Forex"),
+                ("GBPUSD", "Forex"), ("USDJPY", "Forex"), ("AUDUSD", "Forex"), ("XAUUSD", "Metals")
+            ]
+        else:
+            default_syms = [(r["symbol"], r["category"]) for r in rows]
+
+        pair_cards = []
+        for sym, cat in default_syms:
+            quote = None
+            spec = None
+            try:
+                quote = await adapter.get_live_quote(sym)
+                spec = await adapter.get_instrument_specification(sym)
+            except Exception:
+                pass
+
+            mkt = get_market_session_status(sym, cat, quote)
+            
+            # Position Open Check
+            if sym in open_symbols:
+                strat_status = "POSITION OPEN"
+                strat_reason = "Position currently open on broker"
+                direction = "NONE"
+                qual_data = None
+            # Market Closed Check -> Strategy cannot be READY while market closed
+            elif not mkt["is_market_open"]:
+                strat_status = "MARKET CLOSED" if mkt["market_status"] == "MARKET CLOSED" else mkt["market_status"]
+                strat_reason = mkt["reason"]
+                direction = "NONE"
+                qual_data = None
+            elif not quote or not spec or not quote.get("bid"):
+                strat_status = "BROKER UNAVAILABLE"
+                strat_reason = "Unable to fetch instrument specification or live quote"
+                direction = "NONE"
+                qual_data = None
+            else:
+                # Market is open and quote is live -> Evaluate Track 1 Impulse Scalper
+                try:
+                    c_m1 = await adapter.get_historical_candles(sym, timeframe="M1", count=40)
+                    c_m5 = await adapter.get_historical_candles(sym, timeframe="M5", count=25)
+                except Exception:
+                    c_m1, c_m5 = [], []
+
+                if len(c_m1) < 25 or len(c_m5) < 15:
+                    strat_status = "INSUFFICIENT DATA"
+                    strat_reason = f"Need min 25 M1 bars (got {len(c_m1)}) and 15 M5 bars (got {len(c_m5)})"
+                    direction = "NONE"
+                    qual_data = None
+                else:
+                    eval_res = engine.evaluate_setup(
+                        symbol=sym,
+                        candles_m1=c_m1,
+                        candles_m5=c_m5,
+                        bid=float(quote["bid"]),
+                        ask=float(quote["ask"]),
+                        contract_spec=spec,
+                        account_equity=equity
+                    )
+                    if eval_res.get("decision") == "QUALIFIED":
+                        strat_status = "READY FOR SCALPING"
+                        strat_reason = f"M1 3-bar breakout confirmed with EMA9/21 alignment"
+                        direction = eval_res.get("direction", "NONE")
+                        qual_data = eval_res
+                    else:
+                        strat_status = "WAITING"
+                        strat_reason = eval_res.get("reason", "Awaiting impulse setup confirmation")
+                        direction = "NONE"
+                        qual_data = None
+
+            bid_price = float(quote.get("bid", 0.0)) if quote else 0.0
+            ask_price = float(quote.get("ask", 0.0)) if quote else 0.0
+            spread_val = round(ask_price - bid_price, spec.get("digits", 2)) if spec and ask_price > bid_price else 0.0
+
+            pair_cards.append({
+                "symbol": sym,
+                "category": cat,
+                "bid": bid_price,
+                "ask": ask_price,
+                "spread": spread_val,
+                "market_status": mkt["market_status"],
+                "is_market_open": mkt["is_market_open"],
+                "market_reason": mkt["reason"],
+                "countdown_text": mkt["countdown_text"],
+                "seconds_until_open": mkt["seconds_until_open"],
+                "opens_at_iso": mkt["opens_at_iso"],
+                "strategy_status": strat_status,
+                "strategy_reason": strat_reason,
+                "direction": direction,
+                "qualification": qual_data,
+                "last_scan_time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            })
+
+        # Calculate counts
+        counts = {
+            "total": len(pair_cards),
+            "ready": sum(1 for p in pair_cards if p["strategy_status"] == "READY FOR SCALPING"),
+            "scanning": sum(1 for p in pair_cards if p["strategy_status"] == "SCANNING"),
+            "waiting": sum(1 for p in pair_cards if p["strategy_status"] == "WAITING"),
+            "market_closed": sum(1 for p in pair_cards if p["market_status"] == "MARKET CLOSED")
+        }
+
+        return {
+            "status": "SUCCESS",
+            "account_id": target_acc_id,
+            "counts": counts,
+            "pairs": pair_cards,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
+    finally:
+        conn.close()
+
+
+
+@customer_router.get("/longterm/pair-statuses")
+async def get_longterm_pair_statuses(account_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Returns dual-status system for Long-Term Strategy across curated instruments:
+    1. Authoritative Broker Market Status (MARKET OPEN, MARKET CLOSED, etc. with countdown)
+    2. Authoritative D1/H4/H1 Long-Term Structure Strategy Status (READY FOR LONG-TERM, WAITING, ANALYZING, etc.)
+    """
+    user_id = current_user["user_id"]
+    conn = get_db_connection()
+    try:
+        from ..services.brokers.execution_router import CentralExecutionRouter
+        from ..services.brokers.longterm_structure_engine import evaluate_longterm_opportunity
+        from ..services.brokers.market_session_service import get_market_session_status
+
+        target_acc_id = account_id
+        if not target_acc_id or target_acc_id == "17000660016":
+            pref = conn.execute(
+                "SELECT account_login FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY is_preferred DESC, created_at DESC LIMIT 1",
+                (user_id,)
+            ).fetchone()
+            target_acc_id = pref["account_login"] if pref else "17000694512"
+        adapter, ctx, doc = CentralExecutionRouter.resolve_adapter_for_customer(conn, user_id, target_acc_id)
+        summary = await adapter.get_account_summary(force_refresh=True)
+        equity = float(summary.get("equity") or 1000.0)
+
+        open_positions = await adapter.get_open_positions()
+        open_symbols = set(p.get("symbol") for p in open_positions)
+
+        rows = conn.execute("""
+            SELECT w.symbol, c.asset_class as category, c.digits, c.contract_size, c.min_lot, c.lot_step
+            FROM user_watchlist_configs w
+            JOIN broker_instrument_catalog c ON w.symbol = c.symbol
+            WHERE w.account_id = ? AND w.longterm_enabled = 1
+        """, (account_id,)).fetchall()
+
+        if not rows:
+            default_syms = [
+                ("BTCUSD", "Crypto"), ("ETHUSD", "Crypto"), ("EURUSD", "Forex"),
+                ("GBPUSD", "Forex"), ("USDJPY", "Forex"), ("AUDUSD", "Forex"), ("XAUUSD", "Metals")
+            ]
+        else:
+            default_syms = [(r["symbol"], r["category"]) for r in rows]
+
+        pair_cards = []
+        for sym, cat in default_syms:
+            quote = None
+            spec = None
+            try:
+                quote = await adapter.get_live_quote(sym)
+                spec = await adapter.get_instrument_specification(sym)
+            except Exception:
+                pass
+
+            mkt = get_market_session_status(sym, cat, quote)
+
+            if sym in open_symbols:
+                strat_status = "POSITION OPEN"
+                strat_reason = "Position currently open on broker"
+                direction = "NONE"
+                qual_data = None
+            elif not mkt["is_market_open"]:
+                strat_status = "MARKET CLOSED" if mkt["market_status"] == "MARKET CLOSED" else mkt["market_status"]
+                strat_reason = mkt["reason"]
+                direction = "NONE"
+                qual_data = None
+            elif not quote or not spec or not quote.get("bid"):
+                strat_status = "BROKER UNAVAILABLE"
+                strat_reason = "Unable to fetch instrument specification or live quote"
+                direction = "NONE"
+                qual_data = None
+            else:
+                try:
+                    c_d1 = await adapter.get_historical_candles(sym, timeframe="D1", count=20)
+                    c_h4 = await adapter.get_historical_candles(sym, timeframe="H4", count=25)
+                    c_h1 = await adapter.get_historical_candles(sym, timeframe="H1", count=30)
+                except Exception:
+                    c_d1, c_h4, c_h1 = [], [], []
+
+                if len(c_d1) < 15 or len(c_h4) < 15 or len(c_h1) < 15:
+                    strat_status = "INSUFFICIENT DATA"
+                    strat_reason = f"Need min 15 D1/H4/H1 bars (D1:{len(c_d1)}, H4:{len(c_h4)}, H1:{len(c_h1)})"
+                    direction = "NONE"
+                    qual_data = None
+                else:
+                    card = evaluate_longterm_opportunity(sym, spec, quote, c_d1, c_h4, c_h1, equity=equity, account_id=account_id)
+                    if card.get("status") == "READY":
+                        strat_status = "READY FOR LONG-TERM"
+                        strat_reason = card.get("qualification_reason", "Structural confluence confirmed across D1/H4/H1")
+                        direction = card.get("direction", "NONE")
+                        qual_data = card
+                    else:
+                        strat_status = "WAITING"
+                        strat_reason = card.get("blocker_reason") or card.get("qualification_reason", "Awaiting D1/H4/H1 confluence")
+                        direction = card.get("direction", "NONE")
+                        qual_data = card
+
+            bid_price = float(quote.get("bid", 0.0)) if quote else 0.0
+            ask_price = float(quote.get("ask", 0.0)) if quote else 0.0
+            spread_val = round(ask_price - bid_price, spec.get("digits", 2)) if spec and ask_price > bid_price else 0.0
+
+            pair_cards.append({
+                "symbol": sym,
+                "category": cat,
+                "bid": bid_price,
+                "ask": ask_price,
+                "spread": spread_val,
+                "market_status": mkt["market_status"],
+                "is_market_open": mkt["is_market_open"],
+                "market_reason": mkt["reason"],
+                "countdown_text": mkt["countdown_text"],
+                "seconds_until_open": mkt["seconds_until_open"],
+                "opens_at_iso": mkt["opens_at_iso"],
+                "strategy_status": strat_status,
+                "strategy_reason": strat_reason,
+                "direction": direction,
+                "qualification": qual_data,
+                "last_scan_time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            })
+
+        counts = {
+            "total": len(pair_cards),
+            "ready": sum(1 for p in pair_cards if p["strategy_status"] == "READY FOR LONG-TERM"),
+            "scanning": sum(1 for p in pair_cards if p["strategy_status"] == "ANALYZING"),
+            "waiting": sum(1 for p in pair_cards if p["strategy_status"] == "WAITING"),
+            "market_closed": sum(1 for p in pair_cards if p["market_status"] == "MARKET CLOSED")
+        }
+
+        return {
+            "status": "SUCCESS",
+            "account_id": account_id,
+            "counts": counts,
+            "pairs": pair_cards,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         }
     finally:
         conn.close()

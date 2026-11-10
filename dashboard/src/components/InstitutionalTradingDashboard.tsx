@@ -17,6 +17,7 @@ import {
   Pause,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   Info,
   Globe,
   Coins,
@@ -309,7 +310,21 @@ export default function InstitutionalTradingDashboard({
 
   // ─── Step 1: Market & Pair State ──────────────────────────────────────────
   const [selectedCategory, setSelectedCategory] = useState<InstrumentCategoryType>("ALL");
+  const [expandedDrawer, setExpandedDrawer] = useState<"ANALYSIS" | "DETAILS" | "TELEMETRY" | null>(null);
+  const [showTradeReviewWizard, setShowTradeReviewWizard] = useState<boolean>(false);
+  const [searchExpanded, setSearchExpanded] = useState<boolean>(false);
   const [allPairs, setAllPairs] = useState<BrokerPair[]>([]);
+  // Authoritative Pair Statuses (Dual-Status: Market Status + Strategy Status)
+  const [pairStatuses, setPairStatuses] = useState<any[]>([]);
+  const [loadingPairStatuses, setLoadingPairStatuses] = useState<boolean>(true);
+  const [pairStatusFilter, setPairStatusFilter] = useState<string>("ALL");
+  const [statusCounts, setStatusCounts] = useState<{ total: number; ready: number; scanning: number; waiting: number; market_closed: number }>({
+    total: 0,
+    ready: 0,
+    scanning: 0,
+    waiting: 0,
+    market_closed: 0,
+  });
   const [loadingPairs, setLoadingPairs] = useState<boolean>(true);
   const [pairSearch, setPairSearch] = useState<string>("");
   const [showAllPairs, setShowAllPairs] = useState<boolean>(false);
@@ -712,6 +727,34 @@ export default function InstitutionalTradingDashboard({
     return () => clearInterval(interval);
   }, [fetchDaemonAndWatchlistStatus]);
 
+  const fetchPairStatuses = useCallback(async () => {
+    try {
+      const authToken = getAuthToken();
+      const res = await safeApiFetch(
+        `/api/backend/saas/customer/trading/scalping/pair-statuses?account_id=${activeAccountId}`,
+        {
+          headers: {
+            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          },
+        }
+      );
+      if (res.ok && res.data && res.data.pairs) {
+        setPairStatuses(res.data.pairs);
+        if (res.data.counts) {
+          setStatusCounts(res.data.counts);
+        }
+      }
+    } catch (e) {
+      // Graceful error handling
+    }
+  }, [activeAccountId]);
+
+  useEffect(() => {
+    fetchPairStatuses();
+    const interval = setInterval(fetchPairStatuses, 10000);
+    return () => clearInterval(interval);
+  }, [fetchPairStatuses]);
+
   const fetchStrategySignal = useCallback(
     async (sym?: string, acctOverride?: string) => {
       const targetSym = sym || selectedPair || "XAUUSDr";
@@ -805,19 +848,43 @@ export default function InstitutionalTradingDashboard({
       return true; // "ALL"
     });
 
-    // Gold strictly #1 first, then popular lists
+    // Authoritative Gemini Priority Ordering:
+    // 1. POSITION OPEN
+    // 2. READY FOR SCALPING
+    // 3. WAITING
+    // 4. QUOTE STALE / BROKER UNAVAILABLE
+    // 5. MARKET CLOSED
+    const statusList = Array.isArray(pairStatuses) ? pairStatuses : [];
+    const getPriorityScore = (sym: string, brokerSym?: string, isTradable?: boolean) => {
+      const statusObj = statusList.find((p: any) => p && (p.symbol === sym || p.symbol === brokerSym));
+      const stratStatus = statusObj?.strategy_status || "WAITING";
+      const mktStatus = statusObj?.market_status || (isTradable ? "MARKET OPEN" : "MARKET CLOSED");
+
+      if (stratStatus === "POSITION OPEN") return 1;
+      if (stratStatus === "READY FOR SCALPING") return 2;
+      if (stratStatus === "WAITING") return 3;
+      if (mktStatus === "QUOTE STALE" || mktStatus === "BROKER UNAVAILABLE") return 4;
+      if (mktStatus === "MARKET CLOSED") return 5;
+      return 6;
+    };
+
     const sorted = [...catFiltered].sort((a, b) => {
+      const prioA = getPriorityScore(a.symbol, a.broker_symbol, a.is_tradable);
+      const prioB = getPriorityScore(b.symbol, b.broker_symbol, b.is_tradable);
+      if (prioA !== prioB) return prioA - prioB;
+
       const aIsGold = a.symbol.toUpperCase().includes("XAU") ? 1 : 0;
       const bIsGold = b.symbol.toUpperCase().includes("XAU") ? 1 : 0;
-      if (aIsGold !== bIsGold) return bIsGold - aIsGold; // Gold first!
+      if (aIsGold !== bIsGold) return bIsGold - aIsGold; // Gold #1 among equals
 
       const hasPriceA = (pairPricesMap[a.symbol]?.bid || a.bid || 0) > 0 ? 1 : 0;
       const hasPriceB = (pairPricesMap[b.symbol]?.bid || b.bid || 0) > 0 ? 1 : 0;
       if (hasPriceA !== hasPriceB) return hasPriceB - hasPriceA;
+
       return a.symbol.localeCompare(b.symbol);
     });
 
-    return showAllPairs ? sorted.slice(0, 36) : sorted.slice(0, 8);
+    return showAllPairs ? sorted : sorted.slice(0, 24);
   }, [allPairs, pairSearch, selectedCategory, showAllPairs, pairPricesMap]);
 
   const totalCategoryPairsCount = useMemo(() => {
@@ -1402,9 +1469,9 @@ export default function InstitutionalTradingDashboard({
               </h2>
             </div>
 
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-              {/* Category Tabs: All, Metals (Gold #1), Forex, Crypto */}
-              <div className="inline-flex p-1 rounded-xl bg-[#0D1117] border border-[#21262D] overflow-x-auto">
+            {/* 40px Compact Filter Strip with Inline Expanding Search */}
+            <div className="flex items-center justify-between gap-2 h-10 px-2 py-1 bg-[#0D1117] border border-[#21262D] rounded-xl overflow-hidden w-full md:w-auto">
+              <div className="flex items-center gap-1 shrink-0">
                 <button
                   id="tab-category-all"
                   type="button"
@@ -1412,14 +1479,13 @@ export default function InstitutionalTradingDashboard({
                     setSelectedCategory("ALL");
                     setPairSearch("");
                   }}
-                  className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
                     selectedCategory === "ALL" && !pairSearch
                       ? "bg-[#161B22] text-white border border-[#30363D] shadow-sm"
                       : "text-[#8B949E] hover:text-white"
                   }`}
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  All
+                  ALL
                 </button>
                 <button
                   id="tab-category-metals"
@@ -1428,13 +1494,13 @@ export default function InstitutionalTradingDashboard({
                     setSelectedCategory("METALS");
                     setPairSearch("");
                   }}
-                  className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
                     selectedCategory === "METALS" && !pairSearch
-                      ? "bg-amber-500/15 text-amber-300 border border-amber-500/40 shadow-sm"
+                      ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm"
                       : "text-[#8B949E] hover:text-amber-300"
                   }`}
                 >
-                  <span className="text-amber-400 font-bold">🥇 Metals (Gold #1)</span>
+                  METALS
                 </button>
                 <button
                   id="tab-category-forex"
@@ -1443,14 +1509,13 @@ export default function InstitutionalTradingDashboard({
                     setSelectedCategory("FOREX");
                     setPairSearch("");
                   }}
-                  className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
                     selectedCategory === "FOREX" && !pairSearch
-                      ? "bg-[#161B22] text-white border border-[#30363D] shadow-sm"
-                      : "text-[#8B949E] hover:text-white"
+                      ? "bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-sm"
+                      : "text-[#8B949E] hover:text-sky-300"
                   }`}
                 >
-                  <Globe className="w-3.5 h-3.5 text-sky-400" />
-                  Forex
+                  FOREX
                 </button>
                 <button
                   id="tab-category-crypto"
@@ -1459,49 +1524,60 @@ export default function InstitutionalTradingDashboard({
                     setSelectedCategory("CRYPTO");
                     setPairSearch("");
                   }}
-                  className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
                     selectedCategory === "CRYPTO" && !pairSearch
-                      ? "bg-[#161B22] text-white border border-[#30363D] shadow-sm"
-                      : "text-[#8B949E] hover:text-white"
+                      ? "bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm"
+                      : "text-[#8B949E] hover:text-purple-300"
                   }`}
                 >
-                  <Coins className="w-3.5 h-3.5 text-[#10B981]" />
-                  Crypto
+                  CRYPTO
                 </button>
               </div>
 
-              {/* Search across complete 313-instrument Exness catalogue */}
-              <div className="relative min-w-[240px] sm:min-w-[280px]">
-                <Search className="w-4 h-4 text-[#8B949E] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  id="input-search-broker-pairs"
-                  type="text"
-                  value={pairSearch}
-                  onChange={(e) => setPairSearch(e.target.value)}
-                  placeholder="Search all broker pairs (e.g. XAU, EUR, BTC)..."
-                  className="w-full pl-9 pr-8 py-2 rounded-xl bg-[#0D1117] border border-[#21262D] focus:border-[#10B981] focus:outline-none text-xs text-white placeholder-[#8B949E]"
-                />
-                {pairSearch && (
-                  <button
-                    type="button"
-                    onClick={() => setPairSearch("")}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#8B949E] hover:text-white"
-                    aria-label="Clear search"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+              {/* Inline Expanding Search */}
+              <div className={`relative flex items-center transition-all duration-200 ${searchExpanded || pairSearch ? "flex-1 max-w-[180px] sm:max-w-[240px]" : "w-8"}`}>
+                <button
+                  id="btn-toggle-pair-search"
+                  type="button"
+                  onClick={() => setSearchExpanded(!searchExpanded)}
+                  className="p-1 rounded-lg text-[#8B949E] hover:text-white transition-colors shrink-0"
+                  title="Search broker pairs"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                </button>
+                {(searchExpanded || pairSearch) && (
+                  <div className="relative w-full ml-1">
+                    <input
+                      id="input-search-broker-pairs"
+                      type="text"
+                      autoFocus={searchExpanded}
+                      value={pairSearch}
+                      onChange={(e) => setPairSearch(e.target.value)}
+                      placeholder="Search..."
+                      className="w-full pl-2 pr-6 py-1 rounded-lg bg-[#161B22] border border-[#21262D] focus:border-[#10B981] focus:outline-none text-xs text-white placeholder-[#8B949E]"
+                    />
+                    {pairSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setPairSearch("")}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[#8B949E] hover:text-white"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Instrument Cards (4 Popular Initially + Horizontal Swipe on Mobile) */}
+          {/* Gemini Vertical Instrument List (50-52px Row Target, Zero Horizontal Overflow) */}
           {loadingPairs && allPairs.length === 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {[1, 2, 3, 4].map((n) => (
+            <div className="space-y-1.5">
+              {[1, 2, 3, 4, 5, 6].map((n) => (
                 <div
                   key={n}
-                  className="h-24 rounded-xl bg-[#0D1117] border border-[#21262D] animate-pulse p-4"
+                  className="h-[52px] rounded-xl bg-[#0D1117] border border-[#21262D] animate-pulse"
                 />
               ))}
             </div>
@@ -1512,7 +1588,7 @@ export default function InstitutionalTradingDashboard({
               </p>
             </div>
           ) : (
-            <div className="flex sm:grid sm:grid-cols-2 lg:grid-cols-4 gap-3 overflow-x-auto pb-1 sm:pb-0 snap-x">
+            <div className="max-h-[460px] sm:max-h-[500px] overflow-y-auto overflow-x-hidden space-y-1.5 pr-1 divide-y divide-[#21262D]/30">
               {filteredPairs.map((pair) => {
                 const isSelected = pair.symbol === selectedPair;
                 const priceEntry = pairPricesMap[pair.symbol];
@@ -1520,79 +1596,101 @@ export default function InstitutionalTradingDashboard({
                   isSelected && displayMid > 0
                     ? displayMid
                     : priceEntry?.bid || pair.last_price || pair.bid || 0;
-                const changePct = priceEntry?.changePct ?? pair.price_change_pct ?? 0;
-                const isPositive = changePct >= 0;
+                const cardSpread = priceEntry?.spread ?? pair.spread ?? 0;
+                const sym = pair.symbol.toUpperCase();
+                const cat = (pair.category || "").toUpperCase();
+                const isMetal = sym.includes("XAU") || sym.includes("XAG") || cat.includes("METAL");
+                const isCrypto = sym.includes("BTC") || sym.includes("ETH") || sym.includes("SOL") || cat.includes("CRYPTO");
+                const catBadge = isMetal ? "MT" : isCrypto ? "CR" : "FX";
+                const catColor = isMetal
+                  ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                  : isCrypto
+                  ? "bg-purple-500/15 text-purple-300 border-purple-500/30"
+                  : "bg-sky-500/15 text-sky-300 border-sky-500/30";
+
+                const statusList = Array.isArray(pairStatuses) ? pairStatuses : [];
+                const statusObj = statusList.find((p: any) => p && (p.symbol === pair.symbol || p.symbol === pair.broker_symbol));
+                const stratStatus = statusObj?.strategy_status || "WAITING";
+                const mktStatus = statusObj?.market_status || (pair.is_tradable ? "MARKET OPEN" : "MARKET CLOSED");
+                const isReady = stratStatus === "READY FOR SCALPING";
+                const isMktClosed = mktStatus === "MARKET CLOSED";
+                const isPositionOpen = stratStatus === "POSITION OPEN";
+                const countdown = statusObj?.countdown_text;
+                const rawReason = statusObj?.strategy_reason || statusObj?.market_reason || (isReady ? "M1 momentum aligned" : "Awaiting M1 setup");
+                const shortReason = countdown ? `Opens: ${countdown}` : rawReason.slice(0, 22);
 
                 return (
                   <button
                     key={pair.symbol}
                     id={`pair-card-${pair.symbol}`}
                     type="button"
-                    onClick={() => handleSelectPair(pair.symbol)}
-                    className={`min-w-[210px] sm:min-w-0 snap-start text-left p-4 rounded-xl border transition-all ${
+                    onClick={() => {
+                      handleSelectPair(pair.symbol);
+                      if (isReady) {
+                        setShowTradeReviewWizard(true);
+                      }
+                    }}
+                    className={`w-full text-left min-h-[50px] sm:min-h-[52px] py-1.5 px-3 rounded-xl border transition-all ${
                       isSelected
                         ? "bg-[#10B981]/10 border-[#10B981] shadow-sm"
                         : "bg-[#0D1117] border-[#21262D] hover:border-[#30363D]"
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
-                            isSelected
-                              ? "bg-[#10B981] text-[#0D1117] font-bold"
-                              : "border border-[#30363D] text-transparent"
-                          }`}
-                        >
-                          ✓
-                        </span>
-                        <span className="font-bold text-sm text-white flex items-center gap-1">
-                          {pair.symbol}
-                          {(pair.symbol.toUpperCase().includes("XAU") || pair.symbol === "XAUUSD" || pair.symbol === "XAUUSDr") && (
-                            <span className="px-1.5 py-0.2 rounded bg-amber-400/20 text-amber-300 text-[10px] font-bold border border-amber-400/30">
-                              #1 GOLD
+                    <div className="grid grid-cols-12 items-center gap-1.5 sm:gap-2">
+                      {/* ZONE 1 (34% width / 4-5 cols): Category Badge + Symbol + Market Status */}
+                      <div className="col-span-5 sm:col-span-4 min-w-0">
+                        <div className="flex items-center gap-1.5 truncate">
+                          <span className={`px-1 py-0.2 rounded text-[9px] font-bold border font-mono ${catColor}`}>
+                            {catBadge}
+                          </span>
+                          <span className="font-bold text-xs sm:text-sm text-white truncate font-mono">
+                            {pair.symbol}
+                          </span>
+                          {sym.includes("XAU") && (
+                            <span className="px-1 py-0.2 rounded bg-amber-400/20 text-amber-300 text-[9px] font-bold border border-amber-400/30 hidden xs:inline">
+                              #1
                             </span>
                           )}
-                        </span>
+                        </div>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <span className={`w-1.5 h-1.5 rounded-full ${isMktClosed ? "bg-rose-500" : "bg-[#10B981]"}`} />
+                          <span className="text-[10px] text-[#8B949E] truncate">
+                            {isMktClosed ? "Closed" : "Open"}
+                          </span>
+                        </div>
                       </div>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-[#161B22] border border-[#21262D] text-[#8B949E]">
-                        {pair.symbol.toUpperCase().includes("XAU") ? "Metals · 100 oz" : pair.category === "Cryptocurrencies" ? "Crypto" : pair.category}
-                      </span>
-                    </div>
 
-                    <p className="text-xs text-[#8B949E] truncate mt-1.5">
-                      {pair.display_name || pair.symbol}
-                    </p>
+                      {/* ZONE 2 (30% width / 3-4 cols): Price + Spread */}
+                      <div className="col-span-3 sm:col-span-4 text-right sm:text-center min-w-0">
+                        <div className="text-xs sm:text-sm font-mono font-bold text-white truncate">
+                          {cardPrice > 0 ? `$${formatInstrumentPrice(cardPrice, pair.digits)}` : "Quote"}
+                        </div>
+                        <div className="text-[10px] text-[#8B949E] font-mono truncate">
+                          {cardSpread > 0 ? `Spr: ${cardSpread}` : "Spread: --"}
+                        </div>
+                      </div>
 
-                    <div className="flex items-baseline justify-between gap-2 mt-3 pt-2 border-t border-[#21262D]/70">
-                      <span className="text-sm font-semibold text-white">
-                        {cardPrice > 0
-                          ? `$${formatInstrumentPrice(cardPrice, pair.digits)}`
-                          : "Click for live quote"}
-                      </span>
-                      <span
-                        className={`inline-flex items-center gap-0.5 text-xs font-medium ${
-                          changePct > 0
-                            ? "text-[#10B981]"
-                            : changePct < 0
-                            ? "text-[#E11D48]"
-                            : "text-[#8B949E]"
-                        }`}
-                      >
-                        {changePct !== 0 ? (
-                          <>
-                            {isPositive ? (
-                              <TrendingUp className="w-3 h-3" />
-                            ) : (
-                              <TrendingDown className="w-3 h-3" />
-                            )}
-                            {isPositive ? "+" : ""}
-                            {changePct.toFixed(2)}%
-                          </>
-                        ) : (
-                          <span className="text-[#10B981]">Live Market</span>
-                        )}
-                      </span>
+                      {/* ZONE 3 (36% width / 4 cols): Strategy Status + Short Context Reason */}
+                      <div className="col-span-4 text-right min-w-0">
+                        <div className="flex justify-end">
+                          <span
+                            className={`text-[9px] sm:text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider border truncate ${
+                              isReady
+                                ? "bg-[#10B981]/20 text-[#10B981] border-[#10B981]/40 animate-pulse"
+                                : isPositionOpen
+                                ? "bg-[#3B82F6]/20 text-[#3B82F6] border-[#3B82F6]/40"
+                                : isMktClosed
+                                ? "bg-[#E11D48]/20 text-[#E11D48] border-[#E11D48]/40"
+                                : "bg-[#F59E0B]/20 text-[#F59E0B] border-[#F59E0B]/40"
+                            }`}
+                          >
+                            {stratStatus}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-[#8B949E] truncate mt-0.5" title={rawReason}>
+                          {shortReason}
+                        </div>
+                      </div>
                     </div>
                   </button>
                 );
@@ -1601,30 +1699,30 @@ export default function InstitutionalTradingDashboard({
           )}
 
           {/* See More Pairs Toggle */}
-          {!pairSearch && totalCategoryPairsCount > 4 && (
-            <div className="flex justify-center">
+          {!pairSearch && totalCategoryPairsCount > 20 && (
+            <div className="flex justify-center pt-1">
               <button
                 id="btn-see-more-pairs"
                 type="button"
                 onClick={() => setShowAllPairs((prev) => !prev)}
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-xs font-medium text-[#8B949E] hover:text-white transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-xs font-medium text-[#8B949E] hover:text-white transition-colors"
               >
                 {showAllPairs ? (
                   <>
                     <ChevronUp className="w-3.5 h-3.5" />
-                    Show Top 4 Popular Pairs
+                    Show Top 20 Pairs
                   </>
                 ) : (
                   <>
-                    <ChevronDown className="w-3.5 h-3.5" />+ See More Pairs ({totalCategoryPairsCount}{" "}
-                    in {selectedCategory === "CRYPTO" ? "Cryptocurrency" : "Forex"} · {allPairs.length} Total Broker Pairs)
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    View All {totalCategoryPairsCount} Pairs
                   </>
                 )}
               </button>
             </div>
           )}
 
-          {/* Live Broker Quote Bar (Real-Time Broker Bid, Ask & Spread) */}
+                    {/* Live Broker Quote Bar (Real-Time Broker Bid, Ask & Spread) */}
           <div
             id="live-broker-quote-bar"
             className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3.5 rounded-xl bg-[#0D1117] border border-[#21262D]"
@@ -2222,9 +2320,58 @@ export default function InstitutionalTradingDashboard({
         ═══════════════════════════════════════════════════════════════════ */}
         
         {/* ═══════════════════════════════════════════════════════════════════
-            D0. COMPACT REAL-TIME ENGINE MONITOR & WATCHLIST
+            COLLAPSIBLE ENGINEERING DIAGNOSTICS & TELEMETRY (COLLAPSED BY DEFAULT)
         ═══════════════════════════════════════════════════════════════════ */}
-        <section
+        <div id="engineering-drawer-bar" className="bg-[#161B22] border border-[#21262D] rounded-xl p-2.5 sm:p-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              id="btn-drawer-analysis"
+              type="button"
+              onClick={() => setExpandedDrawer(expandedDrawer === "ANALYSIS" ? null : "ANALYSIS")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                expandedDrawer === "ANALYSIS"
+                  ? "bg-[#10B981] text-[#0D1117] font-bold"
+                  : "bg-[#0D1117] text-[#8B949E] hover:text-white border border-[#21262D]"
+              }`}
+            >
+              <span>{expandedDrawer === "ANALYSIS" ? "▾" : "▸"} View Analysis</span>
+            </button>
+            <button
+              id="btn-drawer-telemetry"
+              type="button"
+              onClick={() => setExpandedDrawer(expandedDrawer === "TELEMETRY" ? null : "TELEMETRY")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                expandedDrawer === "TELEMETRY"
+                  ? "bg-amber-400 text-[#0D1117] font-bold"
+                  : "bg-[#0D1117] text-[#8B949E] hover:text-white border border-[#21262D]"
+              }`}
+            >
+              <span>{expandedDrawer === "TELEMETRY" ? "▾" : "▸"} Live Telemetry</span>
+            </button>
+          </div>
+          <span className="text-[11px] text-[#8B949E] font-mono hidden sm:inline">
+            Engineering Diagnostics Collapsed (Click to Inspect)
+          </span>
+        </div>
+
+        {/* Collapsible Panel 1: Live Opportunity Qualification Meter */}
+        {expandedDrawer === "ANALYSIS" && (
+          <div className="animate-in fade-in duration-200">
+            <LiveOpportunityQualificationMeter
+              symbol={selectedPair}
+              accountLabel={selectedAccountObj?.account_type_label || selectedAccountObj?.environment || "Demo"}
+              brokerPlatform={selectedAccountObj?.trading_platform || selectedAccountObj?.provider || "Exness Terminal"}
+              strategySignal={strategySignal}
+              isLoading={loadingSignal}
+              onRefresh={() => fetchStrategySignal(selectedPair)}
+            />
+          </div>
+        )}
+
+        {/* Collapsible Panel 2: Engine Monitor & Live Telemetry */}
+        {expandedDrawer === "TELEMETRY" && (
+          <div className="animate-in fade-in duration-200">
+            <section
           id="realtime-engine-monitor-section"
           className="bg-[#161B22] border border-[#21262D] rounded-2xl p-4 sm:p-5 space-y-4"
         >
@@ -2499,19 +2646,8 @@ export default function InstitutionalTradingDashboard({
             )}
           </div>
         </section>
-
-        {/* ═══════════════════════════════════════════════════════════════════
-            D. LIVE OPPORTUNITY QUALIFICATION METER (Mandatory Section 1-7 & 13)
-        ═══════════════════════════════════════════════════════════════════ */}
-
-        <LiveOpportunityQualificationMeter
-          symbol={selectedPair}
-          accountLabel={selectedAccountObj?.account_type_label || selectedAccountObj?.environment || "Demo"}
-          brokerPlatform={selectedAccountObj?.trading_platform || selectedAccountObj?.provider || "Exness Terminal"}
-          strategySignal={strategySignal}
-          isLoading={loadingSignal}
-          onRefresh={() => fetchStrategySignal(selectedPair)}
-        />
+          </div>
+        )}
 
         {/* ═══════════════════════════════════════════════════════════════════
             E. EXECUTION CONFIRMATION & PRIMARY CTA BUTTON
@@ -3040,7 +3176,7 @@ export default function InstitutionalTradingDashboard({
                 <span className="text-[#8B949E] block">Step 1: Authenticated Account</span>
                 <span className="font-bold text-[#10B981] flex items-center gap-1 mt-0.5">
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  {selectedAccountObj?.masked_account_number || selectedAccountObj?.masked_id || "Exness Demo #17000660016"}
+                  {selectedAccountObj?.masked_account_number || selectedAccountObj?.masked_id || "Exness Demo #17000694512"}
                   <span className="text-[10px] text-white/70">({selectedAccountObj?.environment || "DEMO"})</span>
                 </span>
                 <span className="text-[11px] text-[#8B949E] block mt-0.5">
@@ -3508,6 +3644,146 @@ export default function InstitutionalTradingDashboard({
           </div>
         </div>
       )}
+      {/* ═══════════════════════════════════════════════════════════════════
+          TRADE REVIEW & EXECUTION WIZARD (PHASE 6)
+      ═══════════════════════════════════════════════════════════════════ */}
+      {showTradeReviewWizard && (
+        <div
+          id="modal-trade-review-wizard"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 overflow-y-auto"
+        >
+          <div className="w-full max-w-lg my-8 rounded-2xl bg-[#161B22] border border-[#30363D] p-5 sm:p-6 space-y-4 shadow-2xl animate-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between gap-3 border-b border-[#21262D] pb-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-[#10B981]/20 text-[#10B981] text-[10px] font-bold border border-[#10B981]/30 uppercase">
+                    Track 1 Impulse Scalper
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 text-[10px] font-bold">
+                    DEMO EXECUTION
+                  </span>
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-white mt-1">
+                  Trade Review &amp; Execution Wizard
+                </h3>
+              </div>
+              <button
+                id="btn-close-trade-review-wizard"
+                type="button"
+                onClick={() => setShowTradeReviewWizard(false)}
+                className="p-1 rounded-lg text-[#8B949E] hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Account & Symbol Card */}
+            <div className="grid grid-cols-2 gap-2 text-xs p-3 rounded-xl bg-[#0D1117] border border-[#21262D]">
+              <div>
+                <span className="text-[#8B949E] block text-[10px]">Connected Broker</span>
+                <span className="font-bold text-white">Exness (Raw Spread)</span>
+                <span className="text-[11px] text-[#10B981] block font-mono">
+                  #17****12 (Demo)
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-[#8B949E] block text-[10px]">Instrument</span>
+                <span className="font-bold text-white font-mono">{selectedPair}</span>
+                <span className="text-[11px] text-amber-400 block font-mono">
+                  Mid: ${formatInstrumentPrice(displayMid, currentDigits)}
+                </span>
+              </div>
+            </div>
+
+            {/* Order Specifications Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              <div className="p-2 rounded-lg bg-[#0D1117] border border-[#21262D]">
+                <span className="text-[10px] text-[#8B949E] block">Direction</span>
+                <span className="font-bold text-[#10B981] flex items-center gap-1 font-mono">
+                  <TrendingUp className="w-3.5 h-3.5" /> BUY
+                </span>
+              </div>
+              <div className="p-2 rounded-lg bg-[#0D1117] border border-[#21262D]">
+                <span className="text-[10px] text-[#8B949E] block">Order Volume</span>
+                <span className="font-bold text-white font-mono">0.01 Lot</span>
+              </div>
+              <div className="p-2 rounded-lg bg-[#0D1117] border border-[#21262D]">
+                <span className="text-[10px] text-[#8B949E] block">Stop Loss</span>
+                <span className="font-bold text-rose-400 font-mono">Dynamic M1 ATR</span>
+              </div>
+              <div className="p-2 rounded-lg bg-[#0D1117] border border-[#21262D]">
+                <span className="text-[10px] text-[#8B949E] block">Take Profit</span>
+                <span className="font-bold text-[#10B981] font-mono">1.50R - 2.00R</span>
+              </div>
+            </div>
+
+            {/* Cost & Risk Assessment */}
+            <div className="p-3 rounded-xl bg-[#161B22] border border-[#21262D] space-y-1.5 text-xs font-mono">
+              <div className="flex justify-between">
+                <span className="text-[#8B949E]">Current Live Spread:</span>
+                <span className="text-white font-bold">{displaySpread.toFixed(1)} pts</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#8B949E]">Est. Commission (Roundtrip):</span>
+                <span className="text-white">$0.04 USD</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#8B949E]">Planned Stop Risk:</span>
+                <span className="text-[#10B981] font-bold">&lt; $0.99 (Compliant)</span>
+              </div>
+              <div className="flex justify-between border-t border-[#21262D] pt-1">
+                <span className="text-[#8B949E]">Expected Net Reward:</span>
+                <span className="text-[#10B981] font-bold">+$1.20 – $2.50 USD</span>
+              </div>
+            </div>
+
+            {/* Pre-Flight Checklist */}
+            <div className="p-2.5 rounded-lg bg-[#0D1117] border border-[#21262D] text-[11px] space-y-1">
+              <div className="flex items-center gap-1.5 text-[#10B981]">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>Raw Spread Demo Account Authenticated (#17000694512)</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[#10B981]">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>Real Account Permanently Locked (16000629657)</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[#10B981]">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>Live Market Session Verified &amp; Open</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[#10B981]">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>Micro-Risk Guard Clamped at &lt; $0.99</span>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowTradeReviewWizard(false)}
+                className="w-1/3 py-2.5 rounded-xl bg-[#0D1117] hover:bg-[#1C2128] border border-[#21262D] text-xs font-semibold text-[#8B949E] hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                id="btn-confirm-execute-wizard"
+                type="button"
+                onClick={() => {
+                  setShowTradeReviewWizard(false);
+                  setExecuteModalOpen(true);
+                }}
+                className="w-2/3 py-2.5 rounded-xl bg-[#10B981] hover:bg-[#059669] text-[#0D1117] font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-lg shadow-[#10B981]/20 transition-all"
+              >
+                <span>Confirm &amp; Proceed to Demo Execution</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

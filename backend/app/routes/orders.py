@@ -1121,6 +1121,67 @@ async def get_positions(
     open_positions = [p for p in positions if p.get("status") == "OPEN"]
     closed_positions = [p for p in positions if p.get("status") == "CLOSED"]
 
+    # Merge genuine Exness broker positions for the current customer
+    try:
+        from ..routes.saas_customer import _hft_scoped_positions, _resolve_user_default_account_id
+        from ..services.saas_db import get_db_connection
+        _c_conn = get_db_connection()
+        try:
+            _exn_row = _c_conn.execute(
+                "SELECT account_login FROM exness_demo_connections WHERE user_id = ? AND is_active = 1 ORDER BY is_preferred DESC, created_at DESC LIMIT 1",
+                (user_id,)
+            ).fetchone()
+            _target_acc = _exn_row["account_login"] if _exn_row else _resolve_user_default_account_id(_c_conn, user_id)
+        finally:
+            _c_conn.close()
+
+        if _target_acc:
+            _hft_res = await _hft_scoped_positions(user_id, _target_acc)
+            for _p in _hft_res.get("closed_positions", []):
+                closed_positions.append({
+                    "position_id": str(_p.get("position_id") or _p.get("deal_ticket")),
+                    "ticket": str(_p.get("position_id") or _p.get("deal_ticket")),
+                    "symbol": _p.get("symbol"),
+                    "direction": _p.get("direction"),
+                    "side": _p.get("direction"),
+                    "volume_lots": _p.get("size", 0.01),
+                    "size": _p.get("size", 0.01),
+                    "entry_price": _p.get("entry_price", 0.0),
+                    "exit_price": _p.get("exit_price", 0.0),
+                    "current_price": _p.get("exit_price", 0.0),
+                    "realized_pnl": _p.get("realized_pnl", 0.0),
+                    "pnl_usd": _p.get("realized_pnl", 0.0),
+                    "net_pnl": _p.get("net_pnl", 0.0),
+                    "status": "CLOSED",
+                    "open_time": _p.get("opened_at"),
+                    "close_time": _p.get("closed_at"),
+                    "environment": "DEMO",
+                    "exchange": "Exness",
+                    "origin": "BROKER_EXECUTED",
+                    "result_label": _p.get("result_label", "Closed automatically (Profit Target Reached)")
+                })
+            for _op in _hft_res.get("open_positions", []):
+                open_positions.append({
+                    "position_id": str(_op.get("position_id") or _op.get("ticket")),
+                    "ticket": str(_op.get("position_id") or _op.get("ticket")),
+                    "symbol": _op.get("symbol"),
+                    "direction": _op.get("direction"),
+                    "side": _op.get("direction"),
+                    "volume_lots": _op.get("size", 0.01),
+                    "size": _op.get("size", 0.01),
+                    "entry_price": _op.get("entry_price", 0.0),
+                    "current_price": _op.get("mark_price", 0.0),
+                    "unrealized_pnl": _op.get("unrealized_pnl", 0.0),
+                    "pnl_usd": _op.get("unrealized_pnl", 0.0),
+                    "status": "OPEN",
+                    "open_time": _op.get("opened_at"),
+                    "environment": "DEMO",
+                    "exchange": "Exness",
+                    "origin": "BROKER_EXECUTED"
+                })
+    except Exception as _exn_err:
+        logger.warning(f"Failed to merge Exness broker positions into orders: {_exn_err}")
+
     total_unrealized = sum(p.get("unrealized_pnl", 0.0) for p in open_positions)
     total_realized_gross = sum(p.get("realized_pnl", 0.0) for p in closed_positions)
     total_fees = sum(p.get("fees_paid", 0.0) for p in positions)
