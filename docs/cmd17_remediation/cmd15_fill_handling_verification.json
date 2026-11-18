@@ -1,0 +1,59 @@
+{
+  "deduplication": {
+    "D1_quote_failure_does_not_consume_leg": true,
+    "D2_spread_rejection_does_not_consume_leg": true,
+    "D3_sizing_failure_does_not_consume_leg": true,
+    "D4_preflight_rejection_does_not_consume_leg": true,
+    "D5_concurrent_reservations_single_winner": true,
+    "D6_confirmed_fill_consumes_leg_durably": true,
+    "D7_restart_preserves_confirmed_state": true,
+    "D8_missing_state_reconciles_from_tradememory_without_reset": true,
+    "D9_incomplete_reconciliation_disables_new_entries": true,
+    "D10_corrupt_state_fails_closed": true,
+    "D11_ambiguous_fill_prevents_retry": true
+  },
+  "exness_parsing": {
+    "P1_nested_submit_order_confirmed_fill": true,
+    "P2_nested_mt5_place_market_order_confirmed_fill": true,
+    "P3_accepted_not_yet_filled": true,
+    "P4_pending_operation": true,
+    "P5_rejected_response": true,
+    "P6_partial_fill_recognized": true,
+    "P7_multiple_deals_vwap_and_dedup": true,
+    "P8_missing_ticket_rejected_as_ambiguous": true,
+    "P9_missing_genuine_order_id_rejected_as_ambiguous": true,
+    "P10_missing_fill_price_rejected_as_ambiguous": true,
+    "P11_wrong_instrument_rejected": true,
+    "P12_wrong_account_rejected": true,
+    "P13_malformed_nested_response_rejected": true,
+    "P14_contradictory_response_fields_rejected": true
+  },
+  "trade_memory": {
+    "TM1_real_service_accepts_genuine_order_id": true,
+    "TM2_duplicate_broker_ticket_idempotent": true,
+    "TM3_duplicate_deal_id_idempotent": true,
+    "TM4_missing_order_id_fails_safely_no_fake_ids": true
+  },
+  "post_fill_failures": {
+    "PF1_tradememory_exception_disables_entries_and_retains_ids": true,
+    "PF2_state_and_tm_exceptions_fail_closed_with_incident": true,
+    "PF3_guard_exception_fails_closed": true,
+    "PF4_partial_fill_incomplete_reconciliation_disables_entries": true,
+    "PF5_partial_fill_uses_filled_volume_and_trips_guard_on_breach": true
+  },
+  "regression": {
+    "R1_frozen_a2_sha256_unchanged": true,
+    "R2_closed_candle_filtering_enforced": true,
+    "R3_tenant_account_isolation": true
+  },
+  "safety": {
+    "experiment_lock_authorized_false": true,
+    "real_trading_permanently_locked": true,
+    "real_account_16000629657_blocked": true,
+    "a2_execution_eligible_false": true,
+    "orig_runner_sha256": "68bbb9386e81599449847fe4ec1efba9fe4bad1418a36f5e99536fd0d9bce3f9",
+    "final_runner_sha256": "a71547c932ed231a189453737457091e597e6924d84bf3730e8a3020fd72bbdd",
+    "frozen_a2_sha256": "231e0259c0a0a514537c5efef03139d2b4d5895c07ad8350164c3a04f2b19032"
+  },
+  "verdict": "COMMAND 15 PASSED \u2014 FILL HANDLING VERIFIED \u2014 EXECUTION DISABLED"
+}

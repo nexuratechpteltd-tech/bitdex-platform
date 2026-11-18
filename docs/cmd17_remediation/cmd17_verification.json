@@ -1,0 +1,37 @@
+{
+  "fix1_order_submitted_crash_safety": {
+    "F1_1_pre_submission_rejections_do_not_consume_leg": true,
+    "F1_2_order_submitted_true_on_disk_before_broker_call": true,
+    "F1_3_crash_during_submission_blocks_duplicate_on_restart": true
+  },
+  "fix2_broker_history_reconciliation": {
+    "F2_1_closed_position_in_deal_history_detected_on_restart": true,
+    "F2_2_missing_state_with_untracked_broker_history_fails_closed": true
+  },
+  "fix3_actual_exness_terminal_reconciliation": {
+    "F3_1_unreconciled_operation_response_never_fabricated": true,
+    "F3_2_actual_terminal_operation_reconciled_with_genuine_ids": true,
+    "F3_3_restart_with_reconciled_open_position_preserves_dedup": true
+  },
+  "fix4_independent_deal_ledger_idempotency": {
+    "F4_1_individual_deals_persisted_in_ledger": true,
+    "F4_2_cross_restart_subdeal_replay_blocked": true
+  },
+  "fix5_durable_post_fill_lock_across_restart": {
+    "F5_1_post_fill_risk_breach_persists_across_restart": true,
+    "F5_2_tradememory_exception_lock_persists_across_restart": true,
+    "F5_3_durable_incident_jsonl_blocks_entries_even_if_state_deleted": true
+  },
+  "regression_and_safety": {
+    "R1_multiprocess_concurrent_reservation_single_winner": true,
+    "R2_frozen_a2_sha256_unchanged": true,
+    "S1_experiment_lock_authorized_false": true,
+    "S2_real_trading_permanently_locked": true,
+    "S3_real_account_16000629657_blocked": true,
+    "S4_a2_execution_eligible_false": true,
+    "orig_cmd17_backup_sha256": "c9a95123ab27797acbeb501dd6cbbe9242465dbe4547a9d7f99ace6b31049738",
+    "final_cmd17_runner_sha256": "a71547c932ed231a189453737457091e597e6924d84bf3730e8a3020fd72bbdd",
+    "frozen_a2_sha256": "231e0259c0a0a514537c5efef03139d2b4d5895c07ad8350164c3a04f2b19032"
+  },
+  "verdict": "COMMAND 17 PASSED \u2014 ALL FIVE EXECUTION-RELIABILITY FIXES VERIFIED \u2014 EXECUTION DISABLED"
+}
