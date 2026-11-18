@@ -177,7 +177,7 @@ class TradeMemoryService:
         }
 
     @classmethod
-    def record_trade(cls, trade_data: Dict[str, Any]) -> Dict[str, Any]:
+    def record_trade(cls, trade_data: Dict[str, Any], conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
         if trade_data.get("slippage_price") is None and trade_data.get("slippage_points") is None:
             _sp, _spts = compute_execution_slippage(
                 trade_data.get("side", ""),
@@ -193,7 +193,7 @@ class TradeMemoryService:
             oid = str(trade_data.get("order_id") or "").strip()
             if not bt or not oid:
                 raise ValueError("ACTUAL_DEMO Trade Memory record requires non-empty broker_ticket and order_id.")
-        cls.init_db()
+        cls.init_db(conn=conn)
         trade_id = trade_data.get("trade_id") or f"TMEM-{secrets.token_hex(6).upper()}"
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -222,9 +222,13 @@ class TradeMemoryService:
         fail_analysis = json.dumps(explanation)
         learning_recs = json.dumps({"recommended_action": explanation.get("point_7_optimization_note")})
 
-        conn = cls.get_connection()
+        own_conn = conn is None
+        if own_conn:
+            conn = cls.get_connection()
         try:
-            with conn:
+            if own_conn:
+                conn.execute("BEGIN IMMEDIATE")
+            if True:
                 conn.execute("""
                     INSERT OR REPLACE INTO trade_memory (
                         trade_id, broker_ticket, order_id, deal_id, account_id,
@@ -300,6 +304,8 @@ class TradeMemoryService:
                     fail_analysis,
                     learning_recs
                 ))
+            if own_conn:
+                conn.commit()
             return {
                 "status": "RECORDED",
                 "trade_id": trade_id,
@@ -309,8 +315,16 @@ class TradeMemoryService:
                 "r_multiple": r_mult,
                 "explanation": explanation
             }
+        except Exception:
+            if own_conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise
         finally:
-            conn.close()
+            if own_conn:
+                conn.close()
 
     @classmethod
     def get_trade_history(

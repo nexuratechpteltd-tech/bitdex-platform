@@ -1,0 +1,40 @@
+{
+  "F1_broker_idempotency_correlation": {
+    "F1_1_never_replaces_existing_persisted_idem_key": true,
+    "F1_2_exact_persisted_idem_key_reaches_exness_ap_request": true
+  },
+  "F2_account_wide_history_reconciliation": {
+    "F2_1_legacy_other_strategy_eurusd_trades_reconciled_without_false_halt": true,
+    "F2_2_legacy_trades_never_attributed_to_a2_leg_id": true,
+    "F2_3_genuinely_untracked_eurusd_execution_fails_closed": true
+  },
+  "F3_eliminate_blind_position_matching": {
+    "F3_1_fresh_supervisor_attributes_initialized_on_init": true,
+    "F3_2_unrelated_open_position_rejected_and_fails_closed": true,
+    "F3_3_multiple_simultaneous_ambiguous_positions_fail_closed": true,
+    "F3_4_closed_position_with_multiple_deals_reconciled_accurately": true
+  },
+  "F4_atomic_fill_recording": {
+    "F4_1_deal_ledger_failure_rolls_back_trade_memory_atomically": true,
+    "F4_2_shared_transaction_commits_both_tables_consistently": true
+  },
+  "F5_durable_safety_lock_independent_of_flat_files": {
+    "F5_1_filesystem_failure_after_fill_persists_halt_in_sqlite_across_restart": true,
+    "F5_2_sqlite_safety_lock_unavailable_fails_closed": true
+  },
+  "adversarial_and_regression": {
+    "A1_concurrent_processes_single_reservation_winner": true,
+    "A2_corrupt_incident_jsonl_fails_closed": true,
+    "R1_frozen_a2_sha256_unchanged": true,
+    "S1_experiment_lock_authorized_false": true,
+    "S2_real_trading_permanently_locked": true,
+    "S3_real_account_16000629657_blocked": true,
+    "S4_a2_execution_eligible_false": true,
+    "orig_runner_bak_cmd19_sha256": "a71547c932ed231a189453737457091e597e6924d84bf3730e8a3020fd72bbdd",
+    "final_runner_cmd19_sha256": "4c725e3e542cfac01d809aacfba303a92d11af6f63d0660a79cd48c58ed009ea",
+    "orig_tm_bak_cmd19_sha256": "61290279942ea8c878dcbf24d1b5a0c306da4e51b289f39404e67bc3a9ac7366",
+    "final_tm_cmd19_sha256": "926e802abed07d5fb53eedc6d75faae1fc61e7621b71f7ffa2cc0dd4950cda3b",
+    "frozen_a2_sha256": "231e0259c0a0a514537c5efef03139d2b4d5895c07ad8350164c3a04f2b19032"
+  },
+  "verdict": "COMMAND 19 PASSED \u2014 ALL FIVE COMMAND 18 FINDINGS REMEDIATED"
+}

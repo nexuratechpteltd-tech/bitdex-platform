@@ -103,6 +103,11 @@ class OperatorExperimentSupervisor:
         self.trades_opened_count = 0
         self.gold_scalp_engine = AutomatedHighFrequencyScalpingEngine()
         self.forex_scalp_engine = MicroScalpingEngine()
+        from app.services.brokers.shared_risk_manager import PostFillRiskBreachGuard
+        self.post_fill_guard = PostFillRiskBreachGuard(max_risk_usd=10.0)
+        self._reconciled_fill_tickets = set()
+        self._reconciled_deal_ids = set()
+        self.critical_incidents = []
 
 
     async def validate_instrument_and_budget(self, adapter, symbol: str, sl_distance: float, risk_budget_usd: float) -> tuple[bool, str, dict]:
@@ -280,6 +285,8 @@ class OperatorExperimentSupervisor:
 
     # ─── Command 17 Remediations: Five Critical Execution-Reliability Fixes ───
 
+    # ─── Command 19 Remediations: All Five Command 18 Adversarial Audit Findings Fixed ───
+
     @staticmethod
     def _leg_state_path(account_id: str) -> str:
         safe_id = "".join(ch for ch in str(account_id) if ch.isalnum() or ch in ("_", "-"))
@@ -298,7 +305,7 @@ class OperatorExperimentSupervisor:
     @classmethod
     def _default_leg_state_doc(cls, account_id: str) -> dict:
         return {
-            "schema_version": "3.0",
+            "schema_version": "4.0",
             "account_id": str(account_id),
             "strategy_id": "LT_STRUCTURE_EURUSD_A2",
             "state": "AVAILABLE",
@@ -410,8 +417,79 @@ class OperatorExperimentSupervisor:
             )
         """)
 
+    @staticmethod
+    def _ensure_safety_lock_table(conn) -> None:
+        """Remediation F5 (Command 19): Transactionally persisted SQLite safety-lock table independent of flat files."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS a2_safety_locks (
+                account_id TEXT PRIMARY KEY,
+                new_entries_disabled INTEGER NOT NULL DEFAULT 1,
+                incident_code TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                context_json TEXT,
+                halted_at_utc TEXT NOT NULL
+            )
+        """)
+
+    @classmethod
+    def _persist_sqlite_safety_lock(cls, account_id: str, code: str, detail: str, context: dict | None = None) -> bool:
+        """Remediation F5: Durable SQLite safety lock independent of flat-file success."""
+        try:
+            conn = TradeMemoryService.get_connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cls._ensure_safety_lock_table(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO a2_safety_locks
+                    (account_id, new_entries_disabled, incident_code, detail, context_json, halted_at_utc)
+                    VALUES (?, 1, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(account_id),
+                        str(code),
+                        str(detail),
+                        json.dumps(context or {}),
+                        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    ),
+                )
+                conn.commit()
+                return True
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return False
+            finally:
+                conn.close()
+        except Exception:
+            return False
+
+    @classmethod
+    def _check_sqlite_safety_lock(cls, account_id: str) -> tuple[bool, str | None]:
+        """
+        Remediation F5: Check SQLite safety lock before any evaluation.
+        Returns (is_locked, reason_or_code). If SQLite is unreadable/unavailable, fails closed (returns True, 'SQLITE_SAFETY_LOCK_UNAVAILABLE').
+        """
+        try:
+            conn = TradeMemoryService.get_connection()
+            try:
+                cls._ensure_safety_lock_table(conn)
+                row = conn.execute(
+                    "SELECT new_entries_disabled, incident_code, detail FROM a2_safety_locks WHERE account_id = ? LIMIT 1",
+                    (str(account_id),),
+                ).fetchone()
+                if row and int(row["new_entries_disabled"] or 0) == 1:
+                    return True, f"SQLITE_SAFETY_LOCK:{row['incident_code']}"
+                return False, None
+            finally:
+                conn.close()
+        except Exception as e:
+            return True, f"SQLITE_SAFETY_LOCK_UNAVAILABLE:{e}"
+
     def _persist_disable_in_state_file(self, account_id: str, code: str, detail: str) -> bool:
-        """Remediation 5: Durably persist new_entries_disabled = True in the leg state file."""
+        """Durably persist new_entries_disabled = True in the leg state file."""
         import fcntl
         lock_path = self._leg_lock_path(account_id)
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
@@ -441,7 +519,12 @@ class OperatorExperimentSupervisor:
             return False
 
     def record_critical_incident(self, account_id: str, code: str, detail: str, context: dict | None = None, persist_state_halt: bool = True) -> dict:
-        """Remediation 5: Immediately disable new entries in-memory AND durably on disk (both JSONL incident log and state file)."""
+        """
+        Remediation F5 (Command 19): Immediately disable new entries in-memory AND durably across THREE independent stores:
+          1. SQLite table a2_safety_locks (transactionally persisted, survives flat-file/filesystem failure)
+          2. Append-only JSONL incident file a2_post_fill_incidents_{id}.jsonl (survives SQLite outage)
+          3. State JSON file a2_leg_state_{id}.json
+        """
         self.ensure_post_fill_guard()
         self.post_fill_guard.new_entries_disabled = True
         inc = {
@@ -453,6 +536,9 @@ class OperatorExperimentSupervisor:
             "context": context or {},
         }
         self.critical_incidents.append(inc)
+        # 1. Persist in SQLite safety lock table
+        self._persist_sqlite_safety_lock(account_id, code, detail, context)
+        # 2. Persist in append-only JSONL file
         inc_path = self._incident_path(account_id)
         try:
             os.makedirs(os.path.dirname(inc_path), exist_ok=True)
@@ -462,6 +548,7 @@ class OperatorExperimentSupervisor:
                 os.fsync(f.fileno())
         except Exception as e:
             logger.critical(f"[LT_STRUCTURE_EURUSD_A2] Failed to append incident file {inc_path}: {e}")
+        # 3. Persist in leg state JSON file
         if persist_state_halt:
             self._persist_disable_in_state_file(account_id, code, detail)
         logger.critical(f"[LT_STRUCTURE_EURUSD_A2] CRITICAL INCIDENT [{code}]: {detail}")
@@ -484,13 +571,15 @@ class OperatorExperimentSupervisor:
                         incidents.append(rec)
             return len(incidents) > 0, incidents
         except Exception:
-            # Corrupt incident file -> fail closed!
             return True, [{"incident_code": "CORRUPT_INCIDENT_LOG", "detail": "Incident JSONL log is unreadable or corrupt."}]
 
     @classmethod
     def load_a2_leg_state(cls, account_id: str) -> tuple[bool, str | None]:
-        """Read-only inspection of persistent leg deduplication state; fails closed on corruption, unresolved PENDING/AMBIGUOUS/HALTED state, or durable incident log."""
+        """Read-only inspection of persistent leg deduplication state; fails closed on SQLite safety lock, incident log, corruption, or unresolved state."""
         import fcntl
+        db_locked, _ = cls._check_sqlite_safety_lock(account_id)
+        if db_locked:
+            return False, None
         has_inc, _ = cls._has_durable_incidents_on_disk(account_id)
         if has_inc:
             return False, None
@@ -548,6 +637,9 @@ class OperatorExperimentSupervisor:
         import fcntl
         if not leg_id or not str(leg_id).strip():
             return False, "INVALID_LEG_ID"
+        db_locked, db_reason = self._check_sqlite_safety_lock(account_id)
+        if db_locked:
+            return False, f"HALTED_BY_{db_reason}"
         has_inc, _ = self._has_durable_incidents_on_disk(account_id)
         if has_inc:
             return False, "HALTED_BY_DURABLE_INCIDENT"
@@ -570,15 +662,19 @@ class OperatorExperimentSupervisor:
                     if doc.get("last_confirmed_leg_id") == leg_str or leg_str in (doc.get("confirmed_legs") or {}):
                         return False, "LEG_ALREADY_CONFIRMED"
                     res_id = f"RES-{os.getpid()}-{int(time.time() * 1000)}"
+                    meta_in = dict(signal_meta or {})
+                    if not meta_in.get("idempotency_key"):
+                        meta_in["idempotency_key"] = f"bitdex-a2-{account_id}-{os.getpid()}-{int(time.time() * 1000)}"
+                    meta_in["order_submitted"] = False
                     doc["state"] = "PENDING"
                     doc["pending_reservation"] = {
                         "reservation_id": res_id,
                         "leg_id": leg_str,
                         "reserved_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "pid": os.getpid(),
-                        "signal_meta": {**(signal_meta or {}), "order_submitted": False},
+                        "signal_meta": meta_in,
                     }
-                    doc["history"].append({"event": "RESERVED_PENDING", "leg_id": leg_str, "reservation_id": res_id})
+                    doc["history"].append({"event": "RESERVED_PENDING", "leg_id": leg_str, "reservation_id": res_id, "idempotency_key": meta_in["idempotency_key"]})
                     if len(doc["history"]) > 50:
                         doc["history"] = doc["history"][-50:]
                     if not self._write_leg_state_doc_unlocked(account_id, doc):
@@ -589,15 +685,15 @@ class OperatorExperimentSupervisor:
         except Exception as e:
             return False, f"LOCK_ERROR:{e}"
 
-    def mark_a2_leg_order_submitting(self, account_id: str, leg_id: str, reservation_id: str | None = None, idempotency_key: str | None = None) -> bool:
+    def mark_a2_leg_order_submitting(self, account_id: str, leg_id: str, reservation_id: str | None = None, idempotency_key: str | None = None) -> tuple[bool, str | None]:
         """
-        Remediation 1 (Command 17): Atomically persist order_submitted = True BEFORE invoking adapter.place_market_order().
-        Guarantees that if the process crashes during or immediately after broker submission, restart reconciliation
-        recognises that an order was dispatched to the broker and never mistakes the crash for a pre-submission interruption.
+        Remediation F1 (Command 19): Atomically persist order_submitted = True and preserve the existing persisted idempotency_key
+        (never generating a replacement UUID if one already exists in the reservation) BEFORE invoking adapter.place_market_order().
+        Returns (ok, persisted_idempotency_key).
         """
         import fcntl
         if not leg_id or not str(leg_id).strip():
-            return False
+            return False, None
         leg_str = str(leg_id).strip()
         lock_path = self._leg_lock_path(account_id)
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
@@ -607,17 +703,18 @@ class OperatorExperimentSupervisor:
                 try:
                     status, doc = self._read_leg_state_doc_unlocked(account_id)
                     if status != "OK" or doc is None:
-                        return False
+                        return False, None
                     pend = doc.get("pending_reservation")
                     if not isinstance(pend, dict) or pend.get("leg_id") != leg_str:
-                        return False
+                        return False, None
                     if reservation_id and pend.get("reservation_id") != reservation_id:
-                        return False
+                        return False, None
                     s_meta = dict(pend.get("signal_meta") or {})
+                    # Preserve existing persisted key; only use provided idempotency_key if none was persisted yet
+                    persisted_idem = str(s_meta.get("idempotency_key") or idempotency_key or f"bitdex-a2-{account_id}-{int(time.time() * 1000)}").strip()
+                    s_meta["idempotency_key"] = persisted_idem
                     s_meta["order_submitted"] = True
                     s_meta["submitted_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    if idempotency_key:
-                        s_meta["idempotency_key"] = str(idempotency_key)
                     pend["signal_meta"] = s_meta
                     doc["pending_reservation"] = pend
                     doc["state"] = "PENDING"
@@ -625,16 +722,18 @@ class OperatorExperimentSupervisor:
                         "event": "ORDER_SUBMITTING_PERSISTED",
                         "leg_id": leg_str,
                         "reservation_id": pend.get("reservation_id"),
-                        "idempotency_key": idempotency_key,
+                        "idempotency_key": persisted_idem,
                         "at_utc": s_meta["submitted_at_utc"],
                     })
                     if len(doc["history"]) > 50:
                         doc["history"] = doc["history"][-50:]
-                    return self._write_leg_state_doc_unlocked(account_id, doc)
+                    if not self._write_leg_state_doc_unlocked(account_id, doc):
+                        return False, None
+                    return True, persisted_idem
                 finally:
                     fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
         except Exception:
-            return False
+            return False, None
 
     def release_a2_leg_reservation(self, account_id: str, leg_id: str, reason: str, reservation_id: str | None = None) -> bool:
         """Transition a PENDING leg to REJECTED_OR_EXPIRED when quote/spread/sizing/preflight/order-rejection occurs before any fill."""
@@ -728,6 +827,7 @@ class OperatorExperimentSupervisor:
     def mark_a2_leg_ambiguous(self, account_id: str, leg_id: str | None, detail: str, raw_meta: dict | None = None) -> bool:
         """Transition state to AMBIGUOUS_LOCKED and set new_entries_disabled = True so an ambiguous order is never retried."""
         import fcntl
+        self._persist_sqlite_safety_lock(account_id, "AMBIGUOUS_LOCKED", detail, {"leg_id": leg_id, "raw_meta": raw_meta or {}})
         lock_path = self._leg_lock_path(account_id)
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
         try:
@@ -759,7 +859,10 @@ class OperatorExperimentSupervisor:
         for it in raw_orders or []:
             if not isinstance(it, dict):
                 continue
-            o = it.get("order") if isinstance(it.get("order"), dict) else it
+            o = it.get("order") if isinstance(it.get("order"), dict) else dict(it)
+            if isinstance(it.get("order"), dict) and it.get("event_time") and not o.get("event_time"):
+                o = dict(o)
+                o["event_time"] = it["event_time"]
             sym = str(o.get("instrument") or o.get("symbol") or "").upper().rstrip("RM")
             if sym == "EURUSD":
                 eur_orders.append(o)
@@ -767,11 +870,34 @@ class OperatorExperimentSupervisor:
         for it in raw_deals or []:
             if not isinstance(it, dict):
                 continue
-            d = it.get("deal") if isinstance(it.get("deal"), dict) else it
+            d = it.get("deal") if isinstance(it.get("deal"), dict) else dict(it)
+            if isinstance(it.get("deal"), dict) and it.get("event_time") and not d.get("event_time"):
+                d = dict(d)
+                d["event_time"] = it["event_time"]
             sym = str(d.get("instrument") or d.get("symbol") or "").upper().rstrip("RM")
             if sym == "EURUSD":
                 eur_deals.append(d)
         return eur_orders, eur_deals
+
+    @staticmethod
+    def _parse_iso_ts(val) -> float | None:
+        if val is None or val == "":
+            return None
+        if isinstance(val, (int, float)):
+            v = float(val)
+            return v / 1000.0 if v > 1e11 else v
+        s = str(val).strip()
+        if not s:
+            return None
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
 
     async def reconcile_exness_terminal_operation(
         self,
@@ -781,15 +907,16 @@ class OperatorExperimentSupervisor:
         account_id: str = ACCOUNT_ID,
     ) -> dict:
         """
-        Remediation 3 (Command 17): Reconcile actual ExnessTraderAPIClient.submit_order() operation response
-        against genuine read-only broker execution records (snapshot open positions, order history, deal history).
-        - Never fabricates position_id, order_id, deal_id, or fill_price.
-        - If raw_res is an EXNESS_TERMINAL_V1 confirmed operation lacking execution identifiers, queries
-          read-only broker interfaces (get_open_positions, get_order_history, get_trade_history) to match the
-          genuine broker execution records.
-        - If complete reconciliation is impossible (missing order_id, missing deal/position, or ambiguous multiple matches),
-          returns the unmodified response so normalize_exness_order_response() fails closed as AMBIGUOUS.
+        Remediation F3 (Command 19): Eliminate blind position matching when reconciling ExnessTraderAPIClient.submit_order() responses.
+        - Calls self.ensure_post_fill_guard() on entry so attributes are always initialized on every construction path (fixes CMD18-F3-UNINITIALIZED-ATTR).
+        - Queries ALL account-wide TradeMemoryService records (limit=5000, track=None) and a2_deal_ledger to exclude all pre-existing tickets/orders/deals.
+        - Derives volume step (vol_step=0.01) and tick size (tick_size=0.00001) from broker instrument specification (or EURUSD defaults).
+        - Requires multi-factor correlation (client_request_id/idempotency_key, operation_id, position_id, side, volume <= req_vol, price within tolerance,
+          and timestamp within the operation window) — NEVER matches by side + single-open-position alone (fixes CMD18-F3-BLIND-SNAPSHOT-MATCH).
+        - Supports positions that opened AND closed before reconciliation via correlated entry deals and market order history (fixes CMD18-F3-CLOSED-POS-NO-MATCH).
+        - If broker records do not establish a unique, unambiguous match, returns raw_res unmodified so normalize_exness_order_response() fails closed as AMBIGUOUS.
         """
+        self.ensure_post_fill_guard()
         if not isinstance(raw_res, dict) or adapter is None:
             return raw_res
 
@@ -801,14 +928,27 @@ class OperatorExperimentSupervisor:
         if op_st not in ("confirmed", "filled", "executed"):
             return raw_res
 
-        # Check if operation already has complete execution identifiers
         has_pos = bool(str(op_obj.get("position_id") or op_obj.get("ticket") or "").strip())
         has_ord = bool(str(op_obj.get("order_id") or op_obj.get("order") or "").strip())
         has_px = any(op_obj.get(k) is not None for k in ("fill_price", "execution_price", "open_price", "price")) or isinstance(op_obj.get("deals"), list)
         if has_pos and has_ord and has_px:
             return raw_res
 
-        # Read-only broker reconciliation via adapter
+        # Fetch broker instrument specification for EURUSD tolerances
+        vol_step = 0.01
+        tick_size = 0.00001
+        try:
+            if hasattr(adapter, "get_instrument_specification"):
+                spec = await adapter.get_instrument_specification("EURUSD")
+                if isinstance(spec, dict):
+                    vol_step = float(spec.get("volume_step") or spec.get("min_volume") or 0.01)
+                    tick_size = float(spec.get("tick_size") or spec.get("point") or 0.00001)
+        except Exception:
+            pass
+        vol_tol = max(1e-6, vol_step * 0.25)
+        # Maximum reasonable execution price deviation from executable_quote: 500 points (50 pips = 500 * tick_size)
+        max_px_dev = 500.0 * tick_size
+
         try:
             client = getattr(adapter, "client", None)
             if client is not None and hasattr(client, "get_trading_snapshot"):
@@ -838,12 +978,12 @@ class OperatorExperimentSupervisor:
 
         eur_orders, eur_deals = self._extract_eurusd_broker_history(raw_orders, raw_deals)
 
-        # Exclude tickets and order_ids already recorded in TradeMemoryService
+        # Exclude ALL account-wide tickets, order_ids, and deal_ids already recorded in TradeMemoryService or a2_deal_ledger
         known_tickets = set(self._reconciled_fill_tickets)
         known_orders = set()
         known_deals = set(self._reconciled_deal_ids)
         try:
-            tm_rows = TradeMemoryService.get_trade_history(account_id=str(account_id), execution_type="ACTUAL_DEMO", limit=200)
+            tm_rows = TradeMemoryService.get_trade_history(account_id=str(account_id), track=None, execution_type=None, limit=5000)
             for r in tm_rows:
                 bt = str(r.get("broker_ticket") or "").strip()
                 oid = str(r.get("order_id") or "").strip()
@@ -856,49 +996,98 @@ class OperatorExperimentSupervisor:
                     for part in did.split(","):
                         if part.strip():
                             known_deals.add(part.strip())
+            conn_dl = TradeMemoryService.get_connection()
+            try:
+                self._ensure_deal_ledger_table(conn_dl)
+                for dr in conn_dl.execute("SELECT deal_id, broker_ticket, order_id FROM a2_deal_ledger WHERE account_id = ?", (str(account_id),)).fetchall():
+                    if dr["deal_id"]:
+                        known_deals.add(str(dr["deal_id"]))
+                    if dr["broker_ticket"]:
+                        known_tickets.add(str(dr["broker_ticket"]))
+                    if dr["order_id"]:
+                        known_orders.add(str(dr["order_id"]))
+            finally:
+                conn_dl.close()
         except Exception:
             pass
 
+        payload_obj = raw_res.get("payload") if isinstance(raw_res.get("payload"), dict) else {}
         op_id = str(raw_res.get("operation_id") or op_obj.get("operation_id") or "").strip()
         client_req_id = str(
             op_obj.get("client_request_id")
             or ((raw_res.get("ack") or {}).get("client_request_id") if isinstance(raw_res.get("ack"), dict) else "")
             or raw_res.get("idempotency_key")
+            or (sig or {}).get("idempotency_key")
             or ""
         ).strip()
-        exp_side = str((sig or {}).get("side") or ((raw_res.get("payload") or {}).get("side") if isinstance(raw_res.get("payload"), dict) else "") or "").upper()
+        exp_side = str((sig or {}).get("side") or payload_obj.get("side") or "").strip().upper()
+        try:
+            req_vol = float((sig or {}).get("volume") or payload_obj.get("volume") or 0.0)
+        except Exception:
+            req_vol = 0.0
+        try:
+            ref_px = float((sig or {}).get("entry_price") or 0.0)
+        except Exception:
+            ref_px = 0.0
 
-        # 1. Match open EURUSD position in snapshot (not already in known_tickets)
-        eur_open = [
-            p for p in (open_positions or [])
-            if isinstance(p, dict)
-            and str(p.get("symbol") or p.get("instrument") or "").upper().rstrip("RM") == "EURUSD"
-            and str(p.get("position_id") or p.get("ticket") or "").strip() not in known_tickets
-        ]
-        if exp_side in ("BUY", "SELL"):
-            eur_open = [p for p in eur_open if str(p.get("side") or p.get("direction") or "").upper() == exp_side]
+        op_created_ts = self._parse_iso_ts(op_obj.get("created_at") or op_obj.get("updated_at"))
 
-        matched_pos_id = None
-        matched_ord_id = None
-        matched_deals = []
-        matched_px = None
-        matched_vol = None
+        def _side_matches(s_val) -> bool:
+            s = str(s_val or "").strip().upper()
+            if "BUY" in s:
+                s = "BUY"
+            elif "SELL" in s:
+                s = "SELL"
+            return (not exp_side) or (s == exp_side)
 
-        if len(eur_open) == 1:
-            pos = eur_open[0]
-            matched_pos_id = str(pos.get("position_id") or pos.get("ticket") or "").strip()
+        def _time_matches(t_val) -> bool:
+            if op_created_ts is None:
+                return True
+            ts = self._parse_iso_ts(t_val)
+            if ts is None:
+                return True
+            # Execution must not predate operation creation by more than 5s or lag by more than 120s
+            return (op_created_ts - 5.0) <= ts <= (op_created_ts + 120.0)
+
+        def _px_matches(px_val) -> bool:
+            if ref_px <= 0:
+                return True
             try:
-                matched_px = float(pos.get("open_price") or pos.get("entry_price") or pos.get("price"))
-                matched_vol = float(pos.get("volume"))
+                p = float(px_val)
+                return p > 0 and abs(p - ref_px) <= max_px_dev
             except Exception:
-                matched_px = None
-                matched_vol = None
-        elif len(eur_open) > 1:
-            # Ambiguous multiple untracked EURUSD positions -> refuse to guess!
-            return raw_res
+                return False
 
-        # 2. Match deals from deal history
-        cand_deals = []
+        # Group candidate untracked entry orders from order history
+        cand_orders_by_pos: dict[str, list[dict]] = {}
+        unlinked_cand_orders: list[dict] = []
+        for o in eur_orders:
+            oid = str(o.get("order_id") or o.get("order") or o.get("id") or "").strip()
+            if not oid or oid in known_orders or oid == op_id:
+                continue
+            o_type = str(o.get("order_type") or o.get("type") or "").lower()
+            if o_type in ("sltp", "stop_loss", "take_profit"):
+                continue
+            o_state = str(o.get("state") or o.get("status") or "filled").lower()
+            if o_state in ("rejected", "cancelled", "expired", "failed"):
+                continue
+            if not _side_matches(o.get("side") or o.get("direction") or o.get("type")):
+                continue
+            if not _time_matches(o.get("create_time") or o.get("created_at") or o.get("event_time") or o.get("time_utc")):
+                continue
+            o_creq = str(o.get("client_request_id") or "").strip()
+            if client_req_id and o_creq and o_creq != client_req_id:
+                continue
+            o_pos = str(o.get("position_id") or o.get("ticket") or "").strip()
+            if o_pos and o_pos in known_tickets:
+                continue
+            if o_pos:
+                cand_orders_by_pos.setdefault(o_pos, []).append(o)
+            else:
+                unlinked_cand_orders.append(o)
+
+        # Group candidate untracked IN/entry deals from deal history by position_id
+        cand_deals_by_pos: dict[str, list[dict]] = {}
         for d in eur_deals:
             did = str(d.get("deal_id") or d.get("deal_ticket") or d.get("id") or "").strip()
             if not did or did in known_deals:
@@ -907,76 +1096,108 @@ class OperatorExperimentSupervisor:
             if d_entry in ("OUT", "CLOSE"):
                 continue
             d_pos = str(d.get("position_id") or d.get("ticket") or "").strip()
-            d_op = str(d.get("operation_id") or "").strip()
+            if not d_pos or d_pos in known_tickets:
+                continue
+            if not _side_matches(d.get("side") or d.get("direction") or d.get("type")):
+                continue
+            if not _time_matches(d.get("create_time") or d.get("created_at") or d.get("event_time") or d.get("time_utc")):
+                continue
+            if not _px_matches(d.get("price") or d.get("fill_price") or d.get("execution_price")):
+                continue
             d_creq = str(d.get("client_request_id") or "").strip()
-            if matched_pos_id and d_pos == matched_pos_id:
-                cand_deals.append(d)
-            elif not matched_pos_id and ((op_id and d_op == op_id) or (client_req_id and d_creq == client_req_id)):
-                cand_deals.append(d)
+            if client_req_id and d_creq and d_creq != client_req_id:
+                continue
+            cand_deals_by_pos.setdefault(d_pos, []).append(d)
 
-        if not matched_pos_id and cand_deals:
-            pos_set = {str(d.get("position_id") or d.get("ticket") or "").strip() for d in cand_deals if str(d.get("position_id") or d.get("ticket") or "").strip()}
-            if len(pos_set) == 1:
-                matched_pos_id = next(iter(pos_set))
+        # Map open EURUSD positions on snapshot (strictly validated against side, volume, price, and time)
+        valid_open_by_pos: dict[str, dict] = {}
+        for p in open_positions or []:
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("symbol") or p.get("instrument") or "").upper().rstrip("RM") != "EURUSD":
+                continue
+            pid = str(p.get("position_id") or p.get("ticket") or "").strip()
+            if not pid or pid in known_tickets:
+                continue
+            if not _side_matches(p.get("side") or p.get("direction") or p.get("type")):
+                continue
+            try:
+                p_vol = float(p.get("volume") or 0.0)
+                p_px = float(p.get("open_price") or p.get("entry_price") or p.get("price") or 0.0)
+            except Exception:
+                continue
+            if p_vol <= 0 or (req_vol > 0 and p_vol > req_vol + vol_tol):
+                continue
+            if not _px_matches(p_px):
+                continue
+            if not _time_matches(p.get("open_time") or p.get("create_time") or p.get("created_at")):
+                continue
+            valid_open_by_pos[pid] = p
 
-        if matched_pos_id and not cand_deals:
-            # Also check if any deals match matched_pos_id regardless of entry field
-            for d in eur_deals:
-                did = str(d.get("deal_id") or d.get("deal_ticket") or d.get("id") or "").strip()
-                d_pos = str(d.get("position_id") or d.get("ticket") or "").strip()
-                d_entry = str(d.get("entry") or d.get("type") or "IN").upper()
-                if did and d_pos == matched_pos_id and d_entry not in ("OUT", "CLOSE"):
-                    cand_deals.append(d)
+        # Collect all candidate position_ids that have corroborating evidence (either open position + order/deal, or closed position with both order & deal)
+        all_cand_pids = set(valid_open_by_pos.keys()) | set(cand_deals_by_pos.keys()) | set(cand_orders_by_pos.keys())
+        qualified_matches = []
 
-        # 3. Match genuine order_id from deal records or order history (NEVER use protective_order_id or operation_id)
-        for d in cand_deals:
-            oid = str(d.get("order_id") or d.get("order") or "").strip()
-            if oid and oid != op_id and oid != matched_pos_id:
-                matched_ord_id = oid
-                break
+        for pid in sorted(all_cand_pids):
+            p_open = valid_open_by_pos.get(pid)
+            p_deals = cand_deals_by_pos.get(pid) or []
+            p_orders = cand_orders_by_pos.get(pid) or []
 
-        if not matched_ord_id and eur_orders:
-            cand_orders = []
-            for o in eur_orders:
+            # Validate aggregate deal volume if deals are present
+            if p_deals:
+                try:
+                    tot_d_vol = sum(float(d.get("volume") or d.get("filled_volume") or 0.0) for d in p_deals)
+                except Exception:
+                    continue
+                if tot_d_vol <= 0 or (req_vol > 0 and tot_d_vol > req_vol + vol_tol):
+                    continue
+                # If open position is also present, its volume must not exceed total deal volume
+                if p_open is not None:
+                    p_vol = float(p_open.get("volume") or 0.0)
+                    if abs(p_vol - tot_d_vol) > vol_tol and p_vol > tot_d_vol + vol_tol:
+                        continue
+
+            # Resolve genuine order_id for this candidate position
+            ord_ids_found = set()
+            for d in p_deals:
+                oid = str(d.get("order_id") or d.get("order") or "").strip()
+                if oid and oid != op_id and oid != pid and oid not in known_orders:
+                    ord_ids_found.add(oid)
+            for o in p_orders:
                 oid = str(o.get("order_id") or o.get("order") or o.get("id") or "").strip()
-                if not oid or oid in known_orders or oid == op_id:
-                    continue
-                o_type = str(o.get("order_type") or o.get("type") or "").lower()
-                if o_type == "sltp":
-                    continue
-                o_pos = str(o.get("position_id") or o.get("ticket") or "").strip()
-                o_op = str(o.get("operation_id") or "").strip()
-                o_creq = str(o.get("client_request_id") or "").strip()
-                if (matched_pos_id and o_pos == matched_pos_id) or (op_id and o_op == op_id) or (client_req_id and o_creq == client_req_id):
-                    cand_orders.append((oid, o_pos, o))
-            if len(cand_orders) == 1:
-                matched_ord_id, o_pos, o_rec = cand_orders[0]
-                if not matched_pos_id and o_pos:
-                    matched_pos_id = o_pos
-                if matched_px is None and o_rec.get("fill_price") is not None:
-                    try:
-                        matched_px = float(o_rec.get("fill_price"))
-                    except Exception:
-                        pass
-                if matched_vol is None and o_rec.get("filled_volume") is not None:
-                    try:
-                        matched_vol = float(o_rec.get("filled_volume"))
-                    except Exception:
-                        pass
+                if oid and oid != op_id and oid != pid and oid not in known_orders:
+                    ord_ids_found.add(oid)
+            if not ord_ids_found and len(unlinked_cand_orders) == 1 and len(all_cand_pids) == 1:
+                oid = str(unlinked_cand_orders[0].get("order_id") or unlinked_cand_orders[0].get("order") or unlinked_cand_orders[0].get("id") or "").strip()
+                if oid and oid != op_id and oid != pid:
+                    ord_ids_found.add(oid)
 
-        # Construct reconciled operation dict ONLY from genuine matched broker fields
+            if len(ord_ids_found) != 1:
+                continue
+            matched_oid = next(iter(ord_ids_found))
+
+            # Must have either validated deals OR validated open position
+            if not p_deals and p_open is None:
+                continue
+
+            qualified_matches.append((pid, matched_oid, p_open, p_deals))
+
+        # Require a unique, unambiguous match (len == 1)
+        if len(qualified_matches) != 1:
+            return raw_res
+
+        matched_pos_id, matched_ord_id, matched_open, matched_deals = qualified_matches[0]
         enriched = dict(raw_res)
         enriched_op = dict(op_obj)
-        if matched_pos_id:
-            enriched_op["position_id"] = matched_pos_id
-        if matched_ord_id:
-            enriched_op["order_id"] = matched_ord_id
-        if cand_deals:
+        enriched_op["position_id"] = matched_pos_id
+        enriched_op["order_id"] = matched_ord_id
+
+        if matched_deals:
             clean_deals = []
-            for d in cand_deals:
+            for d in matched_deals:
                 did = str(d.get("deal_id") or d.get("deal_ticket") or d.get("id") or "").strip()
-                d_oid = str(d.get("order_id") or d.get("order") or matched_ord_id or "").strip()
-                d_pos = str(d.get("position_id") or d.get("ticket") or matched_pos_id or "").strip()
+                d_oid = str(d.get("order_id") or d.get("order") or matched_ord_id).strip()
+                d_pos = str(d.get("position_id") or d.get("ticket") or matched_pos_id).strip()
                 clean_deals.append({
                     "deal_id": did,
                     "position_id": d_pos,
@@ -987,11 +1208,9 @@ class OperatorExperimentSupervisor:
             enriched_op["deals"] = clean_deals
             if len(clean_deals) == 1 and clean_deals[0].get("deal_id"):
                 enriched_op["deal_id"] = clean_deals[0]["deal_id"]
-        else:
-            if matched_px is not None:
-                enriched_op["fill_price"] = matched_px
-            if matched_vol is not None:
-                enriched_op["filled_volume"] = matched_vol
+        elif matched_open is not None:
+            enriched_op["fill_price"] = float(matched_open.get("open_price") or matched_open.get("entry_price") or matched_open.get("price"))
+            enriched_op["filled_volume"] = float(matched_open.get("volume"))
 
         enriched["operation"] = enriched_op
         enriched["reconciled_from_broker_records"] = True
@@ -999,22 +1218,32 @@ class OperatorExperimentSupervisor:
 
     async def reconcile_or_initialize_a2_leg_state(self, adapter, account_id: str = ACCOUNT_ID) -> tuple[bool, str | None, str]:
         """
-        Remediations 1, 2, 4, 5 (Command 17):
-        - Restores durable post-fill safety locks (incident JSONL file, state file new_entries_disabled, and TradeMemory post_fill_within_budget=False)
-          BEFORE any new-entry evaluation after restart.
-        - Inspects read-only broker snapshot (get_open_positions), order history (get_order_history), and deal history (get_trade_history)
-          as well as TradeMemoryService and a2_deal_ledger.
-        - Never expires a PENDING reservation if order_submitted=True or if broker order/deal history shows an untracked EURUSD execution.
+        Command 19 Remediated Reconciler (Fixes F2 & F5):
+        1. Checks independent SQLite safety lock table (a2_safety_locks) FIRST — fails closed if locked OR if SQLite is unavailable.
+        2. Checks durable JSONL incident log on disk — fails closed if unresolved incidents exist or file is corrupt.
+        3. Queries account-wide TradeMemoryService records (track=None, limit=5000) to build known_account_tickets, known_account_order_ids,
+           and known_account_deal_ids across ALL strategies (so legacy/other-strategy EURUSD trades are recognized as known historical trades,
+           while never attributing their leg_ids to A2).
+        4. Separately validates A2-specific records (strategy_track == 'LT_STRUCTURE_EURUSD_A2') for leg_id reconstruction and post-fill budget breaches.
+        5. Ignores closing ('OUT'/'CLOSE') deals on already-known position tickets while flagging any genuinely untracked EURUSD execution.
         """
         import fcntl
         self.ensure_post_fill_guard()
         lock_path = self._leg_lock_path(account_id)
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
 
-        # 1. Check durable incident log on disk first (Remediation 5)
+        # 1. Check independent SQLite safety lock first (Remediation F5)
+        db_locked, db_lock_reason = self._check_sqlite_safety_lock(account_id)
+        if db_locked:
+            self.post_fill_guard.new_entries_disabled = True
+            self._persist_disable_in_state_file(account_id, "RESTORED_SQLITE_SAFETY_LOCK", str(db_lock_reason))
+            return False, None, str(db_lock_reason)
+
+        # 2. Check durable incident log on disk (Remediation F5)
         has_inc, inc_list = self._has_durable_incidents_on_disk(account_id)
         if has_inc:
             self.post_fill_guard.new_entries_disabled = True
+            self._persist_sqlite_safety_lock(account_id, "RESTORED_DURABLE_INCIDENT_LOCK", "Unresolved post-fill incident present on disk.")
             self._persist_disable_in_state_file(account_id, "RESTORED_DURABLE_INCIDENT_LOCK", "Unresolved post-fill incident present on disk.")
             return False, None, "HALTED_BY_DURABLE_INCIDENT_LOG"
 
@@ -1033,7 +1262,7 @@ class OperatorExperimentSupervisor:
             )
             return False, None, "CORRUPT_STATE_FAIL_CLOSED"
 
-        # 2. Query read-only broker snapshot, order history, and deal history (Remediation 2)
+        # 3. Query read-only broker snapshot, order history, and deal history
         try:
             open_positions = await adapter.get_open_positions() if adapter is not None else []
             if not isinstance(open_positions, list):
@@ -1057,13 +1286,13 @@ class OperatorExperimentSupervisor:
 
         eur_orders, eur_deals = self._extract_eurusd_broker_history(raw_orders, raw_deals)
 
-        # 3. Query TradeMemoryService & a2_deal_ledger
+        # 4. Query account-wide TradeMemoryService (track=None) AND a2_deal_ledger (Remediation F2)
         try:
-            tm_records = TradeMemoryService.get_trade_history(
+            all_acct_tm_records = TradeMemoryService.get_trade_history(
                 account_id=str(account_id),
-                track="LT_STRUCTURE_EURUSD_A2",
-                execution_type="ACTUAL_DEMO",
-                limit=100,
+                track=None,
+                execution_type=None,
+                limit=5000,
             )
             tm_conn = TradeMemoryService.get_connection()
             try:
@@ -1082,7 +1311,6 @@ class OperatorExperimentSupervisor:
             )
             return False, None, "TRADEMEMORY_READ_FAILED"
 
-        # Hydrate in-memory idempotency sets from durable storage (Remediation 4)
         for lr in ledger_rows:
             if lr["deal_id"]:
                 self._reconciled_deal_ids.add(str(lr["deal_id"]))
@@ -1093,25 +1321,33 @@ class OperatorExperimentSupervisor:
                 if d:
                     self._reconciled_deal_ids.add(str(d))
 
-        tm_by_ticket = {}
-        tm_order_ids = set()
-        tm_deal_ids = set(self._reconciled_deal_ids)
+        known_account_tickets = set(self._reconciled_fill_tickets)
+        known_account_order_ids = set()
+        known_account_deal_ids = set(self._reconciled_deal_ids)
+
+        a2_tm_by_ticket = {}
         latest_tm_leg_id = None
         reconstructed_confirmed = {}
         breach_detected_in_tm = False
 
-        for r in tm_records:
+        for r in all_acct_tm_records:
+            exec_t = str(r.get("execution_type") or "").upper()
+            if exec_t != "ACTUAL_DEMO":
+                continue
             tkt = str(r.get("broker_ticket") or "").strip()
             oid = str(r.get("order_id") or "").strip()
             did_str = str(r.get("deal_id") or "").strip()
+            r_track = str(r.get("strategy_track") or "").strip()
+
             if tkt:
+                known_account_tickets.add(tkt)
                 self._reconciled_fill_tickets.add(tkt)
             if oid:
-                tm_order_ids.add(oid)
+                known_account_order_ids.add(oid)
             if did_str:
                 for part in did_str.split(","):
                     if part.strip():
-                        tm_deal_ids.add(part.strip())
+                        known_account_deal_ids.add(part.strip())
                         self._reconciled_deal_ids.add(part.strip())
 
             sr = r.get("signal_reason_json")
@@ -1123,33 +1359,34 @@ class OperatorExperimentSupervisor:
             if isinstance(sr, dict):
                 for d in sr.get("deal_ids") or []:
                     if d:
-                        tm_deal_ids.add(str(d).strip())
+                        known_account_deal_ids.add(str(d).strip())
                         self._reconciled_deal_ids.add(str(d).strip())
-                if sr.get("post_fill_within_budget") is False:
+
+            # Only attribute leg_ids from LT_STRUCTURE_EURUSD_A2 to A2 deduplication state (never attribute legacy tracks to A2!)
+            if r_track == "LT_STRUCTURE_EURUSD_A2":
+                if isinstance(sr, dict) and sr.get("post_fill_within_budget") is False:
                     breach_detected_in_tm = True
+                leg_val = (sr or {}).get("leg_id") if isinstance(sr, dict) else None
+                if tkt:
+                    a2_tm_by_ticket[tkt] = {"leg_id": leg_val, "order_id": oid, "record": r}
+                if leg_val and tkt and oid:
+                    if latest_tm_leg_id is None:
+                        latest_tm_leg_id = str(leg_val)
+                    reconstructed_confirmed[str(leg_val)] = {
+                        "broker_ticket": tkt,
+                        "order_id": oid,
+                        "deal_id": did_str,
+                        "reconciled_from": "TradeMemoryService",
+                    }
+                elif tkt and not leg_val:
+                    self.record_critical_incident(
+                        account_id,
+                        "INCOMPLETE_TRADEMEMORY_LEG_IDENTIFIER",
+                        f"A2 TradeMemory record for ticket {tkt} is missing structural leg_id; complete reconciliation impossible.",
+                        {"broker_ticket": tkt},
+                    )
+                    return False, None, "INCOMPLETE_TRADEMEMORY_LEG_ID"
 
-            leg_val = (sr or {}).get("leg_id") if isinstance(sr, dict) else None
-            if tkt:
-                tm_by_ticket[tkt] = {"leg_id": leg_val, "order_id": oid, "record": r}
-            if leg_val and tkt and oid:
-                if latest_tm_leg_id is None:
-                    latest_tm_leg_id = str(leg_val)
-                reconstructed_confirmed[str(leg_val)] = {
-                    "broker_ticket": tkt,
-                    "order_id": oid,
-                    "deal_id": did_str,
-                    "reconciled_from": "TradeMemoryService",
-                }
-            elif tkt and not leg_val:
-                self.record_critical_incident(
-                    account_id,
-                    "INCOMPLETE_TRADEMEMORY_LEG_IDENTIFIER",
-                    f"TradeMemory record for ticket {tkt} is missing structural leg_id; complete reconciliation impossible.",
-                    {"broker_ticket": tkt},
-                )
-                return False, None, "INCOMPLETE_TRADEMEMORY_LEG_ID"
-
-        # Remediation 5: If TradeMemory has any post-fill budget breach OR state doc has new_entries_disabled=True, restore lock!
         if breach_detected_in_tm:
             self.record_critical_incident(
                 account_id,
@@ -1161,6 +1398,7 @@ class OperatorExperimentSupervisor:
         if status == "OK" and doc:
             if doc.get("new_entries_disabled") is True or doc.get("state") == "HALTED_POST_FILL_BREACH_OR_INCIDENT":
                 self.post_fill_guard.new_entries_disabled = True
+                self._persist_sqlite_safety_lock(account_id, "HALTED_STATE_RESTORED", str(doc.get("halt_reason") or "State file halted"))
                 return False, doc.get("last_confirmed_leg_id"), "HALTED_STATE_RESTORED"
             if doc.get("state") == "AMBIGUOUS_LOCKED":
                 self.record_critical_incident(
@@ -1171,35 +1409,38 @@ class OperatorExperimentSupervisor:
                 )
                 return False, doc.get("last_confirmed_leg_id"), "AMBIGUOUS_LOCKED"
 
-        # Check all open EURUSD positions AND broker EURUSD deal/order history for any untracked broker execution (Remediation 2)
+        # Identify any genuinely untracked EURUSD open positions, orders, or entry deals across the account
         eurusd_open = [
             p for p in open_positions
             if isinstance(p, dict) and str(p.get("symbol") or p.get("instrument") or "").upper().rstrip("RM") == "EURUSD"
         ]
+        untracked_open_positions = [
+            p for p in eurusd_open
+            if str(p.get("position_id") or p.get("ticket") or "").strip() not in known_account_tickets
+        ]
         untracked_broker_deals = [
             d for d in eur_deals
-            if str(d.get("deal_id") or d.get("deal_ticket") or d.get("id") or "").strip() not in tm_deal_ids
-            and str(d.get("position_id") or d.get("ticket") or "").strip() not in tm_by_ticket
+            if str(d.get("deal_id") or d.get("deal_ticket") or d.get("id") or "").strip() not in known_account_deal_ids
+            and str(d.get("position_id") or d.get("ticket") or "").strip() not in known_account_tickets
         ]
         untracked_broker_orders = [
             o for o in eur_orders
-            if str(o.get("order_id") or o.get("order") or o.get("id") or "").strip() not in tm_order_ids
-            and str(o.get("position_id") or o.get("ticket") or "").strip() not in tm_by_ticket
-            and str(o.get("order_type") or o.get("type") or "").lower() != "sltp"
+            if str(o.get("order_id") or o.get("order") or o.get("id") or "").strip() not in known_account_order_ids
+            and str(o.get("position_id") or o.get("ticket") or "").strip() not in known_account_tickets
+            and str(o.get("order_type") or o.get("type") or "").lower() not in ("sltp", "stop_loss", "take_profit")
             and str(o.get("state") or o.get("status") or "filled").lower() in ("filled", "confirmed", "executed", "placed", "partially_filled")
         ]
 
         if status == "MISSING":
-            for pos in eurusd_open:
-                ptkt = str(pos.get("position_id") or pos.get("ticket") or "").strip()
-                if not ptkt or ptkt not in tm_by_ticket or not tm_by_ticket[ptkt].get("leg_id"):
-                    self.record_critical_incident(
-                        account_id,
-                        "MISSING_STATE_UNRECONCILABLE_OPEN_POSITION",
-                        f"State file missing and open EURUSD position #{ptkt} has no confirmed leg_id in TradeMemory.",
-                        {"position": pos},
-                    )
-                    return False, None, "MISSING_STATE_UNRECONCILABLE_OPEN_POSITION"
+            if untracked_open_positions:
+                ptkt = str(untracked_open_positions[0].get("position_id") or untracked_open_positions[0].get("ticket") or "").strip()
+                self.record_critical_incident(
+                    account_id,
+                    "MISSING_STATE_UNRECONCILABLE_OPEN_POSITION",
+                    f"State file missing and open EURUSD position #{ptkt} is not tracked in TradeMemory.",
+                    {"position": untracked_open_positions[0]},
+                )
+                return False, None, "MISSING_STATE_UNRECONCILABLE_OPEN_POSITION"
 
             if untracked_broker_deals or untracked_broker_orders:
                 self.record_critical_incident(
@@ -1214,7 +1455,7 @@ class OperatorExperimentSupervisor:
             new_doc["state"] = "CONFIRMED_FILLED" if latest_tm_leg_id else "AVAILABLE"
             new_doc["last_confirmed_leg_id"] = latest_tm_leg_id
             new_doc["confirmed_legs"] = reconstructed_confirmed
-            new_doc["reconciled_deal_ids"] = sorted(tm_deal_ids)
+            new_doc["reconciled_deal_ids"] = sorted(known_account_deal_ids)
             new_doc["history"].append({
                 "event": "RECONCILED_MISSING_STATE",
                 "last_confirmed_leg_id": latest_tm_leg_id,
@@ -1244,16 +1485,15 @@ class OperatorExperimentSupervisor:
                 self.confirm_a2_leg_fill(account_id, pend_leg, reconstructed_confirmed[pend_leg])
                 return True, pend_leg, "RECONCILED_PENDING_TO_CONFIRMED"
 
-            for pos in eurusd_open:
-                ptkt = str(pos.get("position_id") or pos.get("ticket") or "").strip()
-                if ptkt not in tm_by_ticket:
-                    self.record_critical_incident(
-                        account_id,
-                        "PENDING_RESERVATION_WITH_UNTRACKED_BROKER_POSITION",
-                        f"Pending leg {pend_leg} found alongside untracked open EURUSD broker position #{ptkt}; manual recovery required.",
-                        {"pending_leg": pend_leg, "untracked_position_ticket": ptkt},
-                    )
-                    return False, doc.get("last_confirmed_leg_id"), "PENDING_UNTRACKED_BROKER_POSITION"
+            if untracked_open_positions:
+                ptkt = str(untracked_open_positions[0].get("position_id") or untracked_open_positions[0].get("ticket") or "").strip()
+                self.record_critical_incident(
+                    account_id,
+                    "PENDING_RESERVATION_WITH_UNTRACKED_BROKER_POSITION",
+                    f"Pending leg {pend_leg} found alongside untracked open EURUSD broker position #{ptkt}; manual recovery required.",
+                    {"pending_leg": pend_leg, "untracked_position_ticket": ptkt},
+                )
+                return False, doc.get("last_confirmed_leg_id"), "PENDING_UNTRACKED_BROKER_POSITION"
 
             if untracked_broker_deals or untracked_broker_orders:
                 self.record_critical_incident(
@@ -1276,24 +1516,23 @@ class OperatorExperimentSupervisor:
             self.release_a2_leg_reservation(account_id, pend_leg, "EXPIRED_PRE_SUBMISSION_ON_RESTART", pend.get("reservation_id"))
             return True, doc.get("last_confirmed_leg_id"), "RECONCILED_PENDING_EXPIRED"
 
-        # Even if state == AVAILABLE/CONFIRMED_FILLED, any untracked EURUSD broker open position or deal history must fail closed
-        for pos in eurusd_open:
-            ptkt = str(pos.get("position_id") or pos.get("ticket") or "").strip()
-            if ptkt not in tm_by_ticket:
-                self.record_critical_incident(
-                    account_id,
-                    "UNTRACKED_OPEN_EURUSD_POSITION_DETECTED",
-                    f"Open EURUSD broker position #{ptkt} is not tracked in TradeMemoryService; failing closed.",
-                    {"position": pos},
-                )
-                return False, doc.get("last_confirmed_leg_id"), "UNTRACKED_OPEN_POSITION"
+        # Even if state == AVAILABLE/CONFIRMED_FILLED, any genuinely untracked EURUSD open position or broker deal/order must fail closed
+        if untracked_open_positions:
+            ptkt = str(untracked_open_positions[0].get("position_id") or untracked_open_positions[0].get("ticket") or "").strip()
+            self.record_critical_incident(
+                account_id,
+                "UNTRACKED_OPEN_EURUSD_POSITION_DETECTED",
+                f"Open EURUSD broker position #{ptkt} is not tracked in TradeMemoryService; failing closed.",
+                {"position": untracked_open_positions[0]},
+            )
+            return False, doc.get("last_confirmed_leg_id"), "UNTRACKED_OPEN_POSITION"
 
-        if untracked_broker_deals:
+        if untracked_broker_deals or untracked_broker_orders:
             self.record_critical_incident(
                 account_id,
                 "UNTRACKED_EURUSD_BROKER_DEAL_HISTORY_DETECTED",
-                "Broker deal history contains untracked EURUSD deals; failing closed.",
-                {"untracked_deals_count": len(untracked_broker_deals)},
+                "Broker order/deal history contains untracked EURUSD executions; failing closed.",
+                {"untracked_deals_count": len(untracked_broker_deals), "untracked_orders_count": len(untracked_broker_orders)},
             )
             return False, doc.get("last_confirmed_leg_id"), "UNTRACKED_BROKER_DEAL_HISTORY"
 
@@ -1313,7 +1552,7 @@ class OperatorExperimentSupervisor:
         executable_quote: float | None = None,
     ) -> dict:
         """
-        Remediation C-3 & Command 17 Fix 3: Explicit Response-Normalisation Layer for Exness Adapters.
+        Explicit Response-Normalisation Layer for Exness Adapters.
         Supports ONLY the two documented adapter structures:
           1. ExnessTraderAPIClient.submit_order() -> {status, operation_id, ack, operation, payload, ...}
           2. ExnessMT5BrokerAdapter.place_market_order() -> {status, http_status, response}
@@ -1748,11 +1987,12 @@ class OperatorExperimentSupervisor:
         reservation_id: str | None = None,
     ) -> dict:
         """
-        Command 17 Remediated Post-Fill Processor:
+        Command 19 Remediated Post-Fill Processor (Fixes F4 & F5):
         - Normalises Exness responses via normalize_exness_order_response().
-        - Enforces cross-process and cross-restart idempotency across broker_ticket, order_id, and individual deal_ids
-          using both a2_deal_ledger (PRIMARY KEY (account_id, deal_id)), signal_reason_json.deal_ids, and state file reconciled_deal_ids.
-        - Persists post-fill risk breaches and post-fill exceptions durably on disk so a restart never re-enables new entries.
+        - Executes TradeMemoryService.record_trade(..., conn=shared_conn) AND all a2_deal_ledger inserts inside a SINGLE shared
+          SQLite transaction (`BEGIN IMMEDIATE ... COMMIT / ROLLBACK`) so TradeMemory and a2_deal_ledger can never diverge!
+        - Persists post-fill risk breaches and any persistence failures into the SQLite a2_safety_locks table, the JSONL incident log,
+          and the JSON state file so restarts are permanently locked even if flat-file writes fail.
         """
         self.ensure_post_fill_guard()
         leg_id = sig.get("leg_id") if isinstance(sig, dict) else None
@@ -1828,7 +2068,7 @@ class OperatorExperimentSupervisor:
         req_vol = norm["requested_volume"]
         is_partial = norm["is_partial_fill"]
 
-        # Remediation 4: Cross-process & cross-restart idempotency check (in-memory, state file, SQLite trade_memory, and SQLite a2_deal_ledger)
+        # Cross-process & cross-restart idempotency check
         if tkt in self._reconciled_fill_tickets or any(d in self._reconciled_deal_ids for d in deal_ids):
             return {
                 "status": "DUPLICATE_FILL_IGNORED",
@@ -1876,7 +2116,6 @@ class OperatorExperimentSupervisor:
                     if dl_row:
                         dup_deal_found = True
                     else:
-                        # Also scan trade_memory rows for comma-separated deal_id or signal_reason_json.deal_ids
                         all_acct_rows = tm_conn.execute(
                             "SELECT deal_id, signal_reason_json FROM trade_memory WHERE account_id = ?",
                             (str(account_id),),
@@ -1937,7 +2176,7 @@ class OperatorExperimentSupervisor:
             "filled_at_utc": norm["filled_at_utc"],
         }
 
-        # Step 3a: PostFillRiskBreachGuard evaluation (Remediation 5: durable incident + durable state halt on breach or exception)
+        # Step 3a: PostFillRiskBreachGuard evaluation
         guard_error = None
         within_budget = False
         try:
@@ -1958,7 +2197,7 @@ class OperatorExperimentSupervisor:
                 fill_recovery_context,
             )
 
-        # Step 3b: Durable leg state confirmation (preserves new_entries_disabled=True if breach or guard error occurred)
+        # Step 3b: Durable leg state confirmation
         state_saved = False
         state_error = None
         halt_flag = (not within_budget) or (guard_error is not None)
@@ -1988,107 +2227,136 @@ class OperatorExperimentSupervisor:
         else:
             state_saved = True
 
-        # Step 3c: TradeMemoryService.record_trade() + independent deal rows in a2_deal_ledger (Remediation 4)
+        # Step 3c (Remediation F4): Shared SINGLE atomic SQLite transaction for BOTH TradeMemoryService.record_trade() and a2_deal_ledger!
         tm_recorded = False
         tm_error = None
+        shared_conn = None
         try:
-            TradeMemoryService.record_trade({
-                "trade_id": f"OPDEMO-{tkt}",
-                "broker_ticket": tkt,
-                "order_id": ord_id,
-                "deal_id": deal_id,
-                "account_id": str(account_id),
-                "strategy_track": sig["strategy"],
-                "strategy_version": sig["strategy_version"],
-                "symbol": "EURUSD",
-                "side": norm["side"],
-                "volume_lots": fill_vol,
-                "executable_quote": exec_quote,
-                "entry_price": fill_px,
-                "tick_size": 0.00001,
-                "sl_price": float(sl),
-                "tp_price": float(tp),
-                "planned_risk_usd": actual_risk_usd,
-                "entry_time": norm["filled_at_utc"] or now_iso,
-                "execution_type": "ACTUAL_DEMO",
-                "status": "PARTIAL_OPEN" if is_partial else "OPEN",
-                "market_session": "LONDON_NY_SESSION",
-                "signal_reason_json": json.dumps({
-                    "reason": sig.get("reason", ""),
-                    "leg_id": leg_id,
-                    "position_id": tkt,
+            shared_conn = TradeMemoryService.get_connection()
+            TradeMemoryService.init_db(conn=shared_conn)
+            self._ensure_deal_ledger_table(shared_conn)
+            self._ensure_safety_lock_table(shared_conn)
+
+            shared_conn.execute("BEGIN IMMEDIATE")
+            TradeMemoryService.record_trade(
+                {
+                    "trade_id": f"OPDEMO-{tkt}",
+                    "broker_ticket": tkt,
                     "order_id": ord_id,
-                    "deal_ids": deal_ids,
-                    "operation_id": norm.get("operation_id"),
-                    "requested_volume": req_vol,
-                    "filled_volume": fill_vol,
-                    "is_partial_fill": is_partial,
-                    "post_fill_within_budget": within_budget,
-                }),
-            })
-            # Persist individual deal IDs in a2_deal_ledger
-            if deal_ids or norm.get("deals"):
-                dl_conn = TradeMemoryService.get_connection()
-                try:
-                    with dl_conn:
-                        self._ensure_deal_ledger_table(dl_conn)
-                        if norm.get("deals"):
-                            for d_item in norm["deals"]:
-                                dl_conn.execute(
-                                    """
-                                    INSERT OR REPLACE INTO a2_deal_ledger
-                                    (account_id, deal_id, broker_ticket, order_id, leg_id, symbol, side, volume_lots, fill_price, recorded_at_utc)
-                                    VALUES (?, ?, ?, ?, ?, 'EURUSD', ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        str(account_id),
-                                        str(d_item["deal_ticket"]),
-                                        str(tkt),
-                                        str(ord_id),
-                                        str(leg_id or ""),
-                                        str(norm["side"]),
-                                        float(d_item["volume"]),
-                                        float(d_item["price"]),
-                                        str(norm["filled_at_utc"] or now_iso),
-                                    ),
-                                )
-                        else:
-                            for did_single in deal_ids:
-                                dl_conn.execute(
-                                    """
-                                    INSERT OR REPLACE INTO a2_deal_ledger
-                                    (account_id, deal_id, broker_ticket, order_id, leg_id, symbol, side, volume_lots, fill_price, recorded_at_utc)
-                                    VALUES (?, ?, ?, ?, ?, 'EURUSD', ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        str(account_id),
-                                        str(did_single),
-                                        str(tkt),
-                                        str(ord_id),
-                                        str(leg_id or ""),
-                                        str(norm["side"]),
-                                        float(fill_vol),
-                                        float(fill_px),
-                                        str(norm["filled_at_utc"] or now_iso),
-                                    ),
-                                )
-                finally:
-                    dl_conn.close()
+                    "deal_id": deal_id,
+                    "account_id": str(account_id),
+                    "strategy_track": sig["strategy"],
+                    "strategy_version": sig["strategy_version"],
+                    "symbol": "EURUSD",
+                    "side": norm["side"],
+                    "volume_lots": fill_vol,
+                    "executable_quote": exec_quote,
+                    "entry_price": fill_px,
+                    "tick_size": 0.00001,
+                    "sl_price": float(sl),
+                    "tp_price": float(tp),
+                    "planned_risk_usd": actual_risk_usd,
+                    "entry_time": norm["filled_at_utc"] or now_iso,
+                    "execution_type": "ACTUAL_DEMO",
+                    "status": "PARTIAL_OPEN" if is_partial else "OPEN",
+                    "market_session": "LONDON_NY_SESSION",
+                    "signal_reason_json": json.dumps({
+                        "reason": sig.get("reason", ""),
+                        "leg_id": leg_id,
+                        "position_id": tkt,
+                        "order_id": ord_id,
+                        "deal_ids": deal_ids,
+                        "operation_id": norm.get("operation_id"),
+                        "requested_volume": req_vol,
+                        "filled_volume": fill_vol,
+                        "is_partial_fill": is_partial,
+                        "post_fill_within_budget": within_budget,
+                    }),
+                },
+                conn=shared_conn,
+            )
+
+            if norm.get("deals"):
+                for d_item in norm["deals"]:
+                    shared_conn.execute(
+                        """
+                        INSERT INTO a2_deal_ledger
+                        (account_id, deal_id, broker_ticket, order_id, leg_id, symbol, side, volume_lots, fill_price, recorded_at_utc)
+                        VALUES (?, ?, ?, ?, ?, 'EURUSD', ?, ?, ?, ?)
+                        """,
+                        (
+                            str(account_id),
+                            str(d_item["deal_ticket"]),
+                            str(tkt),
+                            str(ord_id),
+                            str(leg_id or ""),
+                            str(norm["side"]),
+                            float(d_item["volume"]),
+                            float(d_item["price"]),
+                            str(norm["filled_at_utc"] or now_iso),
+                        ),
+                    )
+            else:
+                for did_single in deal_ids:
+                    shared_conn.execute(
+                        """
+                        INSERT INTO a2_deal_ledger
+                        (account_id, deal_id, broker_ticket, order_id, leg_id, symbol, side, volume_lots, fill_price, recorded_at_utc)
+                        VALUES (?, ?, ?, ?, ?, 'EURUSD', ?, ?, ?, ?)
+                        """,
+                        (
+                            str(account_id),
+                            str(did_single),
+                            str(tkt),
+                            str(ord_id),
+                            str(leg_id or ""),
+                            str(norm["side"]),
+                            float(fill_vol),
+                            float(fill_px),
+                            str(norm["filled_at_utc"] or now_iso),
+                        ),
+                    )
+
+            shared_conn.commit()
             tm_recorded = True
         except Exception as tm_exc:
+            if shared_conn is not None:
+                try:
+                    shared_conn.rollback()
+                except Exception:
+                    pass
+            tm_recorded = False
             tm_error = str(tm_exc)
             self.record_critical_incident(
                 account_id,
                 "POST_FILL_TRADEMEMORY_RECORD_FAILURE",
-                f"TradeMemoryService.record_trade failed after confirmed broker fill #{tkt}: {tm_exc}",
+                f"Atomic SQLite persistence (TradeMemory + a2_deal_ledger) failed after confirmed broker fill #{tkt}: {tm_exc}",
                 fill_recovery_context,
             )
+        finally:
+            if shared_conn is not None:
+                try:
+                    shared_conn.close()
+                except Exception:
+                    pass
 
         if guard_error or state_error or tm_error:
             self.post_fill_guard.new_entries_disabled = True
+            self._persist_sqlite_safety_lock(
+                account_id,
+                "CRITICAL_POST_FILL_PROTECTION_OR_PERSISTENCE_FAILURE",
+                f"guard_error={guard_error}, state_error={state_error}, tm_error={tm_error}",
+                fill_recovery_context,
+            )
             status_code = "CRITICAL_POST_FILL_PROTECTION_OR_PERSISTENCE_FAILURE"
         elif not within_budget:
             self.post_fill_guard.new_entries_disabled = True
+            self._persist_sqlite_safety_lock(
+                account_id,
+                "POST_FILL_RISK_BREACH_NEW_ENTRIES_DISABLED",
+                f"Risk ${actual_risk_usd:.4f} exceeded budget",
+                fill_recovery_context,
+            )
             status_code = "POST_FILL_RISK_BREACH_NEW_ENTRIES_DISABLED"
         elif is_partial:
             status_code = "CONFIRMED_PARTIAL_FILL_AND_PROTECTED"
@@ -2122,13 +2390,13 @@ class OperatorExperimentSupervisor:
 
     async def scan_market_opportunities(self, conn, adapter, now_utc: datetime | None = None, account_id: str = ACCOUNT_ID):
         """
-        Command 17 Remediated Wiring:
-        1. Restores durable safety locks and reconciles persistent leg deduplication state against read-only broker snapshot,
-           order history, deal history, and TradeMemory before evaluation.
+        Command 19 Remediated Wiring:
+        1. Restores durable safety locks (SQLite a2_safety_locks, JSONL incident log, state file, and TradeMemory) and reconciles
+           account-wide broker snapshot, order history, deal history, and TradeMemory before evaluation.
         2. Filters D1/H4/H1 closed candles strictly in UTC.
         3. Evaluates frozen EurUsdStructureA2(d1_df, h4_df, er_thr=0.20).
-        4. Atomically reserves a qualifying leg as PENDING; releases reservation (without consuming the leg) if
-           quote retrieval, spread check, or risk lot sizing fails.
+        4. Atomically reserves a qualifying leg as PENDING with a durable idempotency_key; releases reservation (without consuming the leg)
+           if quote retrieval, spread check, or risk lot sizing fails.
         """
         import sys as _sys
         import pandas as _pd
@@ -2168,10 +2436,11 @@ class OperatorExperimentSupervisor:
                 return []
 
             candidate_leg = a2.last_leg_id
+            idem_key = f"bitdex-a2-{account_id}-{os.getpid()}-{int(time.time() * 1000)}"
             ok_res, res_token = self.reserve_a2_leg_pending(
                 account_id,
                 candidate_leg,
-                {"direction": sig["direction"], "sl": float(sig["sl"]), "tp": float(sig["tp"]), "order_submitted": False},
+                {"direction": sig["direction"], "sl": float(sig["sl"]), "tp": float(sig["tp"]), "order_submitted": False, "idempotency_key": idem_key},
             )
             if not ok_res:
                 logger.info(f"[LT_STRUCTURE_EURUSD_A2] NO_TRADE: Could not reserve leg {candidate_leg} ({res_token}).")
@@ -2222,6 +2491,7 @@ class OperatorExperimentSupervisor:
                 "tp_price": tp_px,
                 "leg_id": reserved_leg,
                 "reservation_id": reservation_id,
+                "idempotency_key": idem_key,
                 "reason": "Frozen LT_STRUCTURE_EURUSD_A2 v2.0 closed-candle signal",
             }]
         except Exception as e:
@@ -2232,11 +2502,11 @@ class OperatorExperimentSupervisor:
 
     async def execute_signal_Cycle(self, conn, adapter, sig: dict, now_iso: str, account_id: str = ACCOUNT_ID) -> dict:
         """
-        Command 17 Remediated Signal Execution Cycle:
+        Command 19 Remediated Signal Execution Cycle (Fixes F1 & F3):
         1. Runs SharedCentralRiskManager.preflight_check(). If rejected -> releases PENDING reservation without consuming leg.
-        2. Atomically persists order_submitted = True on disk BEFORE invoking adapter.place_market_order() (Remediation 1).
-        3. Submits order via adapter.place_market_order().
-        4. Reconciles Exness Terminal operation response against read-only broker snapshot/order/deal records (Remediation 3).
+        2. Atomically persists order_submitted = True and retrieves the exact persisted idempotency_key BEFORE invoking adapter.place_market_order().
+        3. Passes idempotency_key=persisted_idem into adapter.place_market_order() so ExnessTraderAPIClient uses the exact persisted key as client_request_id.
+        4. Reconciles Exness Terminal operation response against read-only broker snapshot/order/deal records using strict multi-factor correlation.
         5. Processes confirmed fill via process_broker_fill_response().
         """
         self.ensure_post_fill_guard()
@@ -2266,10 +2536,12 @@ class OperatorExperimentSupervisor:
                 self.release_a2_leg_reservation(account_id, leg_id, f"PREFLIGHT_REJECTED:{reason}", res_id)
             return {"status": "PREFLIGHT_REJECTED", "reason": reason, "recorded": False}
 
-        # Remediation 1: Atomically mark order_submitted = True BEFORE invoking place_market_order
-        idem_key = f"a2-ord-{account_id}-{int(time.time() * 1000)}"
+        # Remediation F1: Atomically mark order_submitted = True and preserve exact persisted idempotency_key BEFORE invoking place_market_order
+        proposed_idem = sig.get("idempotency_key") or f"bitdex-a2-{account_id}-{int(time.time() * 1000)}"
+        persisted_idem = proposed_idem
         if leg_id:
-            if not self.mark_a2_leg_order_submitting(account_id, leg_id, reservation_id=res_id, idempotency_key=idem_key):
+            ok_sub, p_idem = self.mark_a2_leg_order_submitting(account_id, leg_id, reservation_id=res_id, idempotency_key=proposed_idem)
+            if not ok_sub or not p_idem:
                 inc = self.record_critical_incident(
                     account_id,
                     "PRE_SUBMISSION_STATE_PERSIST_FAILED",
@@ -2277,29 +2549,36 @@ class OperatorExperimentSupervisor:
                     {"leg_id": leg_id, "reservation_id": res_id},
                 )
                 return {"status": "PRE_SUBMISSION_STATE_PERSIST_FAILED", "recorded": False, "new_entries_disabled": True, "incident": inc}
+            persisted_idem = p_idem
+
+        sig_with_idem = dict(sig, idempotency_key=persisted_idem)
 
         try:
             order_res = await adapter.place_market_order(
-                symbol=sig["symbol"], side=sig["side"], volume=sig["volume"],
-                sl=sig["sl_price"], tp=sig["tp_price"], dry_run=False,
-                comment=f"OPEXP_{sig['engine_type'][:4]}"
+                symbol=sig["symbol"],
+                side=sig["side"],
+                volume=sig["volume"],
+                sl=sig["sl_price"],
+                tp=sig["tp_price"],
+                comment=f"OPEXP_{sig['engine_type'][:4]}",
+                idempotency_key=persisted_idem,
+                dry_run=False,
             )
         except Exception as ord_exc:
             if leg_id:
-                self.mark_a2_leg_ambiguous(account_id, leg_id, f"ORDER_SUBMISSION_EXCEPTION:{ord_exc}")
+                self.mark_a2_leg_ambiguous(account_id, leg_id, f"ORDER_SUBMISSION_EXCEPTION:{ord_exc}", {"idempotency_key": persisted_idem})
             inc = self.record_critical_incident(
                 account_id,
                 "CRITICAL_ORDER_SUBMISSION_EXCEPTION",
                 f"Exception during place_market_order for leg {leg_id}; refusing retry and disabling new entries: {ord_exc}",
-                {"leg_id": leg_id, "signal": sig, "idempotency_key": idem_key},
+                {"leg_id": leg_id, "signal": sig_with_idem, "idempotency_key": persisted_idem},
             )
             return {"status": "CRITICAL_ORDER_SUBMISSION_EXCEPTION", "recorded": False, "new_entries_disabled": True, "incident": inc}
 
-        # Remediation 3: Reconcile Exness Terminal operation response against read-only broker snapshot/order/deal records
-        reconciled_res = await self.reconcile_exness_terminal_operation(adapter, order_res, sig, account_id=account_id)
+        reconciled_res = await self.reconcile_exness_terminal_operation(adapter, order_res, sig_with_idem, account_id=account_id)
 
         fill_outcome = self.process_broker_fill_response(
-            reconciled_res, sig, sig["sl_price"], sig["tp_price"], now_iso, account_id, reservation_id=res_id
+            reconciled_res, sig_with_idem, sig["sl_price"], sig["tp_price"], now_iso, account_id, reservation_id=res_id
         )
         if fill_outcome.get("fill_recognized"):
             self.trades_opened_count += 1

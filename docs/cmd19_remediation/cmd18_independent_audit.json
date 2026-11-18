@@ -1,0 +1,107 @@
+{
+  "audit_command": "BITDEX_COMMAND_18_INDEPENDENT_ADVERSARIAL_EXECUTION_RELIABILITY_AUDIT",
+  "audit_date_utc": "2026-11-18T02:05:00Z",
+  "repository": "nexuratechpteltd-tech/bitdex-platform",
+  "staging_backend": "/opt/tauric-platform-staging/backend",
+  "research_dir": "/opt/bitdex-research-v2",
+  "checksums_sha256": {
+    "run_operator_experiment_runner.py": "a71547c932ed231a189453737457091e597e6924d84bf3730e8a3020fd72bbdd",
+    "run_operator_experiment_runner.py.bak_cmd17_20261118": "c9a95123ab27797acbeb501dd6cbbe9242465dbe4547a9d7f99ace6b31049738",
+    "run_operator_experiment_runner.py.bak_cmd15_20261118": "68bbb9386e81599449847fe4ec1efba9fe4bad1418a36f5e99536fd0d9bce3f9",
+    "run_operator_experiment_runner.py.bak_cmd13_20261117": "f4fb399e2d170f119723c74c5d679849feab3b4947498eb46b343f23e1467d66",
+    "run_operator_experiment_runner.py.bak_cmd11_20261117": "34c1e7eda926e0e4dfce3672b8d9e548339ecb823fef40886fa48a1b5f04a37a",
+    "eurusd_structure_a2.py": "231e0259c0a0a514537c5efef03139d2b4d5895c07ad8350164c3a04f2b19032",
+    "eurusd_structure_a2.frozen_v2_0.py": "231e0259c0a0a514537c5efef03139d2b4d5895c07ad8350164c3a04f2b19032",
+    "trade_memory_service.py": "61290279942ea8c878dcbf24d1b5a0c306da4e51b289f39404e67bc3a9ac7366",
+    "trader_api_adapter.py": "1d9e0f20366779971f09060ebcb38fc7d4e615a5bb29ab58dc829f53d5646f32",
+    "mt5_broker_adapter.py": "124ebff6d21970745017c10c2a70a6bc9031da9e96bf4000f8df2352c4598d73",
+    "shared_risk_manager.py": "646d83b29ea2e47ad2fd76e751d03e620f5d864d0871a9f0f38a440283d61fb5",
+    "execution_router.py": "e199dc7c590ce79874b34ebf14fa2b6948fba866b19b4b8dbbddaa8a904f6016"
+  },
+  "five_critical_fixes_audit": {
+    "fix1_atomic_pre_submission_persistence": {
+      "status": "FAIL",
+      "sub_checks": {
+        "write_ordering_before_broker_call": "PASS",
+        "crash_before_during_after_blocks_retry": "PASS",
+        "idempotency_key_forwarded_to_broker_adapter": "FAIL"
+      },
+      "defect_id": "CMD18-F1-IDEM-KEY-DROPPED",
+      "file_and_lines": "/opt/tauric-platform-staging/backend/run_operator_experiment_runner.py:2270-2286",
+      "finding": "execute_signal_Cycle() generates idem_key on line 2270 and persists it to disk via mark_a2_leg_order_submitting(), but lines 2282-2286 call adapter.place_market_order() WITHOUT passing idempotency_key=idem_key. ExnessTraderAPIClient.submit_order() therefore generates a random UUID client_request_id, breaking correlation between the persisted pending reservation and the broker order/ack."
+    },
+    "fix2_broker_history_reconciliation": {
+      "status": "FAIL",
+      "sub_checks": {
+        "closed_position_untracked_deal_fails_closed": "PASS",
+        "missing_state_untracked_history_fails_closed": "PASS",
+        "track_filtering_vs_account_wide_broker_history": "FAIL"
+      },
+      "defect_id": "CMD18-F2-TRACK-FILTER-MISMATCH",
+      "file_and_lines": "/opt/tauric-platform-staging/backend/run_operator_experiment_runner.py:1061-1067, 1179-1190",
+      "finding": "reconcile_or_initialize_a2_leg_state() queries TradeMemoryService with track='LT_STRUCTURE_EURUSD_A2' (line 1063), whereas broker order/deal history (lines 1044-1058) is account-wide across all strategies. Any historical EURUSD trade on the same account from an earlier strategy track (e.g. 'Forex Long-Term (EURUSD)' or 'LONGTERM_STRUCTURE') is excluded from tm_by_ticket/tm_deal_ids/tm_order_ids, causing untracked_broker_deals/untracked_broker_orders to falsely trigger UNTRACKED_EURUSD_BROKER_DEAL_HISTORY_DETECTED or MISSING_STATE_UNRECONCILABLE_BROKER_HISTORY."
+    },
+    "fix3_terminal_operation_reconciliation": {
+      "status": "FAIL",
+      "sub_checks": {
+        "unreconciled_operation_never_fabricated": "PASS",
+        "blind_open_position_matching_without_volume_price_time_check": "FAIL",
+        "uninitialized_attribute_error_on_fresh_instance": "FAIL",
+        "opened_and_closed_position_missing_op_id_in_exness_history": "FAIL"
+      },
+      "defect_ids": [
+        "CMD18-F3-BLIND-SNAPSHOT-MATCH",
+        "CMD18-F3-UNINITIALIZED-ATTR",
+        "CMD18-F3-CLOSED-POS-NO-MATCH"
+      ],
+      "file_and_lines": "/opt/tauric-platform-staging/backend/run_operator_experiment_runner.py:842, 871-966",
+      "finding": "1) Line 842 accesses self._reconciled_fill_tickets without calling self.ensure_post_fill_guard(), raising AttributeError on a fresh instance. 2) Lines 871-895 match any single untracked EURUSD position on the snapshot with the same side (len(eur_open) == 1) without verifying volume, open_time, or price proximity; Probe D proved that a pre-existing unrelated 0.50-lot EURUSD position at 1.06000 is falsely bound to a 0.03-lot A2 operation at 1.08100. 3) When a position opens and immediately closes before reconciliation (Probe E), open_positions is empty and Exness /v1/history/accounts/{id}/deals & /orders do not include operation_id or client_request_id, so cand_deals and cand_orders remain empty."
+    },
+    "fix4_deal_ledger": {
+      "status": "FAIL",
+      "sub_checks": {
+        "sqlite_primary_key_uniqueness": "PASS",
+        "cross_restart_subdeal_replay_blocked": "PASS",
+        "atomic_single_transaction_with_trade_memory": "FAIL"
+      },
+      "defect_id": "CMD18-F4-SPLIT-SQLITE-TRANSACTION",
+      "file_and_lines": "/opt/tauric-platform-staging/backend/run_operator_experiment_runner.py:1995-2077",
+      "finding": "In process_broker_fill_response(), TradeMemoryService.record_trade() (line 1995) opens and commits its own SQLite connection first, and then lines 2031-2076 open a second separate SQLite connection (dl_conn) to insert into a2_deal_ledger inside the same try/except block. Probe G proved that if the second connection fails (e.g. SQLite lock/error during a2_deal_ledger insert), trade_memory remains committed (1 row) with post_fill_within_budget=True while a2_deal_ledger has 0 rows and process_broker_fill_response() returns recorded=False."
+    },
+    "fix5_durable_post_fill_lock": {
+      "status": "FAIL",
+      "sub_checks": {
+        "restart_after_risk_breach_stays_locked": "PASS",
+        "restart_after_tradememory_failure_stays_locked": "PASS",
+        "malformed_incident_jsonl_fails_closed": "PASS",
+        "restart_after_simultaneous_state_and_incident_disk_write_failure": "FAIL"
+      },
+      "defect_id": "CMD18-F5-DISK-FULL-SQLITE-ONLY-UNLOCK",
+      "file_and_lines": "/opt/tauric-platform-staging/backend/run_operator_experiment_runner.py:399-413, 1961-2028",
+      "finding": "When a within-budget fill succeeds in SQLite (TradeMemoryService.record_trade() records post_fill_within_budget=True) while flat-file writes to a2_leg_state_{id}.json and a2_post_fill_incidents_{id}.jsonl fail (e.g. transient filesystem/permission error in Probe C), the halt state is NOT recorded in SQLite. On process restart, reconcile_or_initialize_a2_leg_state() sees no state file, no incident file, and post_fill_within_budget=True in TradeMemoryService, so it reconstructs state='CONFIRMED_FILLED' with new_entries_disabled=False, silently clearing the post-fill persistence failure lock."
+    }
+  },
+  "adversarial_scenarios": {
+    "AS1_broker_accepts_client_times_out": "PASS",
+    "AS2_broker_returns_ack_without_fill": "PASS",
+    "AS3_position_opens_and_closes_before_local_persistence": "FAIL (Fails closed as AMBIGUOUS in reconcile_exness_terminal_operation due to missing operation_id in Exness deal history, halting runner rather than reconciling closed fill)",
+    "AS4_multiple_deals_belong_to_one_order": "PASS (VWAP and deal dedup verified, subject to split-transaction defect CMD18-F4)",
+    "AS5_history_api_returns_incomplete_or_delayed_results": "FAIL (If new position is delayed in /snapshot while an unrelated EURUSD position exists, CMD18-F3-BLIND-SNAPSHOT-MATCH binds the wrong position)",
+    "AS6_sqlite_becomes_unavailable_during_fill": "PASS (Disables new entries and writes durable JSONL incident)",
+    "AS7_incident_jsonl_malformed_or_partially_written": "PASS (_has_durable_incidents_on_disk catches JSONDecodeError and returns (True, CORRUPT_INCIDENT_LOG))",
+    "AS8_two_processes_attempt_same_leg_simultaneously": "PASS (fcntl.flock LOCK_EX enforces single winner)",
+    "AS9_process_restarts_after_ambiguous_submission": "PASS (AMBIGUOUS_LOCKED and order_submitted=True prevent retry)",
+    "AS10_adapter_returns_unexpected_response_structure": "PASS (Rejected as UNSUPPORTED_ADAPTER_SCHEMA / MALFORMED_OR_CONTRADICTORY and disables new entries)"
+  },
+  "safety_invariants": {
+    "experiment_lock_authorized_false": true,
+    "real_trading_permanently_locked": true,
+    "real_account_16000629657_blocked": true,
+    "customer_account_17000109575_read_only": true,
+    "a2_execution_eligible_false": true,
+    "frozen_a2_sha256_intact": true,
+    "zero_broker_orders_or_paper_trading": true,
+    "zero_pm2_restarts_or_prod_changes": true
+  },
+  "verdict": "INDEPENDENT AUDIT FAILED — EXECUTION DISABLED"
+}
